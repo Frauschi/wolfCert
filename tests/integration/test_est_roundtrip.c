@@ -1,0 +1,268 @@
+/*
+ * Copyright (C) 2026 wolfSSL Inc.
+ *
+ * This file is part of wolfCert.
+ *
+ * wolfCert is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * wolfCert is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _GNU_SOURCE
+
+#include <wolfcert/wolfcert.h>
+#include <wolfcert/server.h>
+
+#include <wolfssl/options.h>
+#include <wolfssl/ssl.h>
+#include <wolfssl/wolfcrypt/asn.h>
+#include <wolfssl/wolfcrypt/asn_public.h>
+
+#include "tls_test_util.h"
+
+#include <pthread.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define REQUIRE(cond) \
+    do {                                                                    \
+        if (!(cond)) {                                                      \
+            fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, #cond);  \
+            return 1;                                                       \
+        }                                                                   \
+    } while (0)
+
+static void* server_thread(void* arg)
+{
+    wolfcert_server_run((WolfCertServer*)arg);
+    return NULL;
+}
+
+/* Pluggable-transport coverage: a connect_cb that counts invocations and then
+ * delegates to the built-in POSIX connect. */
+static int g_connect_calls = 0;
+static int counting_connect(const char* host, int port, int timeout_ms, void* ctx)
+{
+    (void)ctx;
+    ++g_connect_calls;
+    return wolfcert_posix_connect(host, port, timeout_ms, NULL);
+}
+
+static int enroll_one(const WolfCertServerCfg* client_cfg,
+                      WolfCertKeyType kt, int param,
+                      const WolfCertBuffer* ca_pem)
+{
+    WolfCertKeyCfg kcfg = { .type = kt, .param = param,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* dk = NULL;
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
+
+    const char* dns[] = { "device-7.local" };
+    WolfCertCertMeta meta = { .subject_dn = "CN=device-7,O=Acme",
+                              .san_dns = dns, .san_dns_len = 1 };
+    WolfCertBuffer csr = { 0 };
+    REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
+
+    WolfCertBuffer issued = { 0 };
+    REQUIRE(wolfcert_est_simple_enroll(client_cfg, csr.data, csr.len, &issued)
+            == WOLFCERT_OK);
+
+    DerBuffer* issued_der = NULL;
+    REQUIRE(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE,
+                        &issued_der, NULL, NULL, NULL) == 0);
+    WOLFSSL_CERT_MANAGER* cm = wolfSSL_CertManagerNew();
+    REQUIRE(cm != NULL);
+    REQUIRE(wolfSSL_CertManagerLoadCABuffer(cm, ca_pem->data, (long)ca_pem->len,
+                                            WOLFSSL_FILETYPE_PEM)
+            == WOLFSSL_SUCCESS);
+    REQUIRE(wolfSSL_CertManagerVerifyBuffer(cm, issued_der->buffer,
+                                            (long)issued_der->length,
+                                            WOLFSSL_FILETYPE_ASN1)
+            == WOLFSSL_SUCCESS);
+    wolfSSL_CertManagerFree(cm);
+    wc_FreeDer(&issued_der);
+
+    wolfcert_buffer_free(&csr);
+    wolfcert_buffer_free(&issued);
+    wolfcert_key_free(dk);
+    return 0;
+}
+
+static int has_alt(const DNS_entry* list, int type, const char* val, int len)
+{
+    for (const DNS_entry* e = list; e != NULL; e = e->next) {
+        if (e->type == type && e->len == len &&
+            memcmp(e->name, val, (size_t)len) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+/* Regression: a CSR carrying DNS + IP + rfc822 (email) SANs must round-trip
+ * into the issued certificate. wolfSSL splits parsed alt names by type --
+ * rfc822Name lands in DecodedCert.altEmailNames, not altNames -- so the CA
+ * must recombine the lists when re-emitting. This previously dropped the
+ * email SAN from the issued cert entirely. */
+static int enroll_check_san(const WolfCertServerCfg* client_cfg)
+{
+    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* dk = NULL;
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
+
+    const char* dns[]    = { "device-san.local" };
+    const char* ips[]    = { "10.20.30.40" };
+    const char* emails[] = { "dev-san@example.com" };
+    WolfCertCertMeta meta = { .subject_dn   = "CN=device-san",
+                              .san_dns      = dns,    .san_dns_len   = 1,
+                              .san_ip       = ips,    .san_ip_len    = 1,
+                              .san_email    = emails, .san_email_len = 1 };
+    WolfCertBuffer csr = { 0 };
+    REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
+
+    WolfCertBuffer issued = { 0 };
+    REQUIRE(wolfcert_est_simple_enroll(client_cfg, csr.data, csr.len, &issued)
+            == WOLFCERT_OK);
+
+    DerBuffer* der = NULL;
+    REQUIRE(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE, &der,
+                        NULL, NULL, NULL) == 0);
+
+    DecodedCert dc;
+    wc_InitDecodedCert(&dc, der->buffer, der->length, NULL);
+    REQUIRE(wc_ParseCert(&dc, CERT_TYPE, NO_VERIFY, NULL) == 0);
+
+    /* DNS + IP travel in altNames. */
+    const byte ip[] = { 10, 20, 30, 40 };
+    REQUIRE(has_alt(dc.altNames, ASN_DNS_TYPE, "device-san.local",
+                    (int)strlen("device-san.local")));
+    REQUIRE(has_alt(dc.altNames, ASN_IP_TYPE, (const char*)ip, (int)sizeof(ip)));
+    /* The regression guard: email lands in altEmailNames, must still survive. */
+    REQUIRE(has_alt(dc.altEmailNames, ASN_RFC822_TYPE, "dev-san@example.com",
+                    (int)strlen("dev-san@example.com")));
+
+    wc_FreeDecodedCert(&dc);
+    wc_FreeDer(&der);
+    wolfcert_buffer_free(&csr);
+    wolfcert_buffer_free(&issued);
+    wolfcert_key_free(dk);
+    return 0;
+}
+
+int main(void)
+{
+    REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+
+    /* EST runs over TLS (RFC 7030): stand the server up behind a freshly
+     * minted self-signed identity and pin it as the client trust anchor. */
+    uint8_t *tls_cert = NULL, *tls_key = NULL;
+    size_t tls_cert_len = 0, tls_key_len = 0;
+    REQUIRE(gen_server_identity(&tls_cert, &tls_cert_len,
+                                &tls_key, &tls_key_len) == 0);
+
+    WolfCertServerCfgSrv cfg = {
+        .protocol        = WOLFCERT_PROTO_EST,
+        .bind_host       = "127.0.0.1",
+        .bind_port       = 0,
+        .http_basic_user = "alice",
+        .http_basic_pass = "hunter2",
+        .tls_cert_pem    = tls_cert, .tls_cert_pem_len = tls_cert_len,
+        .tls_key_pem     = tls_key,  .tls_key_pem_len  = tls_key_len,
+    };
+    WolfCertServer* s = NULL;
+    REQUIRE(wolfcert_server_start(&cfg, &s) == WOLFCERT_OK);
+
+    pthread_t tid;
+    REQUIRE(pthread_create(&tid, NULL, server_thread, s) == 0);
+
+    char url[128];
+    snprintf(url, sizeof(url), "https://127.0.0.1:%u/.well-known/est",
+             wolfcert_server_port(s));
+    WolfCertServerCfg client_cfg = { .protocol = WOLFCERT_PROTO_EST,
+                                     .server_url = url,
+                                     .username = "alice", .password = "hunter2",
+                                     .trust_anchors = tls_cert,
+                                     .trust_anchors_len = tls_cert_len,
+                                     .verify_server = 1,
+                                     .connect_cb = counting_connect };
+
+    WolfCertBuffer ca_pem = { 0 };
+    REQUIRE(wolfcert_est_get_cacerts(&client_cfg, &ca_pem) == WOLFCERT_OK);
+
+    /* get_ca DER path: get_ca unpacks the PKCS#7 internally, so for the
+     * single-cert test CA the DER result is that cert's raw DER and loads
+     * directly as ASN.1. */
+    WolfCertClient* client = NULL;
+    REQUIRE(wolfcert_client_new(&client) == WOLFCERT_OK);
+    WolfCertBuffer ca_der = { 0 };
+    REQUIRE(wolfcert_client_get_ca(client, &client_cfg, WOLFCERT_ENCODING_DER, &ca_der)
+            == WOLFCERT_OK);
+    REQUIRE(ca_der.len > 0 && ca_der.data[0] == 0x30);
+    WOLFSSL_CERT_MANAGER* ca_cm = wolfSSL_CertManagerNew();
+    REQUIRE(ca_cm != NULL);
+    REQUIRE(wolfSSL_CertManagerLoadCABuffer(ca_cm, ca_der.data, (long)ca_der.len,
+                                            WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS);
+    wolfSSL_CertManagerFree(ca_cm);
+    wolfcert_buffer_free(&ca_der);
+    wolfcert_client_free(client);
+
+    /* One round-trip per key type: ECC always, Ed25519/Ed448 when enabled. */
+    if (enroll_one(&client_cfg, WOLFCERT_KEY_ECC, 256, &ca_pem))
+        return 1;
+#ifdef WOLFCERT_HAVE_ED25519
+    if (enroll_one(&client_cfg, WOLFCERT_KEY_ED25519, 0, &ca_pem))
+        return 1;
+#endif
+#ifdef WOLFCERT_HAVE_ED448
+    if (enroll_one(&client_cfg, WOLFCERT_KEY_ED448, 0, &ca_pem))
+        return 1;
+#endif
+
+    /* SAN round-trip incl. rfc822 (email) regression guard. */
+    if (enroll_check_san(&client_cfg))
+        return 1;
+
+    /* Auth failure path - needs a CSR to send. */
+    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* dk = NULL;
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
+    WolfCertCertMeta meta = { .subject_dn = "CN=auth-fail" };
+    WolfCertBuffer csr = { 0 };
+    REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
+
+    client_cfg.username = "bad";
+    client_cfg.password = "wrong";
+    WolfCertBuffer bad = { 0 };
+    REQUIRE(wolfcert_est_simple_enroll(&client_cfg, csr.data, csr.len, &bad)
+            == WOLFCERT_ERR_AUTH);
+
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(dk);
+
+    /* The pluggable transport must have been used for every request above. */
+    REQUIRE(g_connect_calls > 0);
+
+    wolfcert_server_stop(s);
+    pthread_join(tid, NULL);
+    wolfcert_server_free(s);
+
+    wolfcert_buffer_free(&ca_pem);
+    free(tls_cert);
+    free(tls_key);
+    wolfcert_cleanup();
+    printf("OK (%d transport connects)\n", g_connect_calls);
+    return 0;
+}

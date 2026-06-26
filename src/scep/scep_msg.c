@@ -1,0 +1,714 @@
+/*
+ * Copyright (C) 2026 wolfSSL Inc.
+ *
+ * This file is part of wolfCert.
+ *
+ * wolfCert is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * wolfCert is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/*
+ * SCEP pkiMessage build/parse helpers.
+ */
+
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+
+#include "../internal.h"
+#include <wolfcert/errors.h>
+
+#include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/asn.h>
+#include <wolfssl/wolfcrypt/asn_public.h>
+#include <wolfssl/wolfcrypt/error-crypt.h>
+#include <wolfssl/wolfcrypt/pkcs7.h>
+#include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/rsa.h>
+#include <wolfssl/wolfcrypt/ecc.h>
+
+#include <string.h>
+
+/* ---- SCEP OIDs & message types ------------------------------------------ */
+
+static const byte OID_MSG_TYPE[]    = { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x02 };
+static const byte OID_TRANS_ID[]    = { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x07 };
+static const byte OID_SENDER_NONCE[]= { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x05 };
+static const byte OID_RECIP_NONCE[] = { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x06 };
+static const byte OID_PKI_STATUS[]  = { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x03 };
+static const byte OID_FAIL_INFO[]   = { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x04 };
+
+/* ---- small DER helpers --------------------------------------------------
+ *
+ * Each writer takes the caller's buffer capacity and returns -1 instead of
+ * overflowing. Keeping the bounds check in the writer (rather than in each
+ * caller after the fact) makes scratch-buffer overflows impossible.
+ */
+
+static int der_put_len(byte* out, size_t cap, size_t n)
+{
+    if (n < 0x80) {
+        if (cap < 1)
+            return -1;
+
+        out[0] = (byte)n;
+        return 1;
+    }
+
+    if (n <= 0xFF) {
+        if (cap < 2)
+            return -1;
+
+        out[0] = 0x81;
+        out[1] = (byte)n;
+        return 2;
+    }
+
+    if (n <= 0xFFFF) {
+        if (cap < 3)
+            return -1;
+
+        out[0] = 0x82;
+        out[1] = (byte)(n>>8);
+        out[2] = (byte)n;
+        return 3;
+    }
+
+    if (cap < 4)
+        return -1;
+
+    out[0] = 0x83;
+    out[1] = (byte)(n>>16);
+    out[2] = (byte)(n>>8);
+    out[3] = (byte)n;
+    return 4;
+}
+
+/* Emit the raw AttributeValue - a bare PrintableString or OCTET STRING
+ * with NO outer SET. wolfSSL's PKCS7 encoder wraps each attribute's
+ * value in the CMS-mandated `SET OF AttributeValue` itself; pre-wrapping
+ * here would land SET { SET { ... } } on the wire, which every other
+ * RFC 8894 implementation rejects.
+ *
+ * Returns total bytes written, or -1 if `cap` is too small. */
+static int enc_printable(const char* s, byte* out, size_t cap)
+{
+    size_t sl = strlen(s);
+    if (cap < 1)
+        return -1;
+
+    out[0] = 0x13;
+    int ll = der_put_len(out + 1, cap - 1, sl);
+    if (ll < 0 || 1 + (size_t)ll + sl > cap)
+        return -1;
+
+    memcpy(out + 1 + ll, s, sl);
+    return (int)(1 + (size_t)ll + sl);
+}
+
+static int enc_octet(const byte* v, size_t vl, byte* out, size_t cap)
+{
+    if (cap < 1)
+        return -1;
+
+    out[0] = 0x04;
+    int ll = der_put_len(out + 1, cap - 1, vl);
+    if (ll < 0 || 1 + (size_t)ll + vl > cap)
+        return -1;
+
+    memcpy(out + 1 + ll, v, vl);
+    return (int)(1 + (size_t)ll + vl);
+}
+
+/* ---- signed attribs builder -------------------------------------------- */
+
+static int build_signed_attribs(const WolfCertScepAttrs* a,
+                                PKCS7Attrib* attrs, int* attrs_count,
+                                uint8_t* scratch, size_t scratch_cap)
+{
+    int n = 0;
+    size_t off = 0;
+
+    if (a->message_type != NULL) {
+        int vl = enc_printable(a->message_type, scratch + off, scratch_cap - off);
+        if (vl < 0)
+            return WOLFCERT_ERR_MEMORY;
+
+        attrs[n].oid = OID_MSG_TYPE;
+        attrs[n].oidSz = sizeof(OID_MSG_TYPE);
+        attrs[n].value = scratch + off;
+        attrs[n].valueSz = (word32)vl;
+        off += (size_t)vl;
+        n++;
+    }
+
+    if (a->transaction_id != NULL) {
+        char tbuf[128];
+        size_t tl = a->transaction_id_len < sizeof(tbuf) - 1
+                     ? a->transaction_id_len : sizeof(tbuf) - 1;
+        memcpy(tbuf, a->transaction_id, tl);
+        tbuf[tl] = '\0';
+        int vl = enc_printable(tbuf, scratch + off, scratch_cap - off);
+        if (vl < 0)
+            return WOLFCERT_ERR_MEMORY;
+
+        attrs[n].oid = OID_TRANS_ID;
+        attrs[n].oidSz = sizeof(OID_TRANS_ID);
+        attrs[n].value = scratch + off;
+        attrs[n].valueSz = (word32)vl;
+        off += (size_t)vl;
+        n++;
+    }
+    if (a->sender_nonce != NULL) {
+        int vl = enc_octet(a->sender_nonce, a->sender_nonce_len,
+                           scratch + off, scratch_cap - off);
+        if (vl < 0)
+            return WOLFCERT_ERR_MEMORY;
+
+        attrs[n].oid = OID_SENDER_NONCE;
+        attrs[n].oidSz = sizeof(OID_SENDER_NONCE);
+        attrs[n].value = scratch + off;
+        attrs[n].valueSz = (word32)vl;
+        off += (size_t)vl;
+        n++;
+    }
+    if (a->recipient_nonce != NULL) {
+        int vl = enc_octet(a->recipient_nonce, a->recipient_nonce_len,
+                           scratch + off, scratch_cap - off);
+        if (vl < 0)
+            return WOLFCERT_ERR_MEMORY;
+
+        attrs[n].oid = OID_RECIP_NONCE;
+        attrs[n].oidSz = sizeof(OID_RECIP_NONCE);
+        attrs[n].value = scratch + off;
+        attrs[n].valueSz = (word32)vl;
+        off += (size_t)vl;
+        n++;
+    }
+    if (a->pki_status != NULL) {
+        int vl = enc_printable(a->pki_status, scratch + off, scratch_cap - off);
+        if (vl < 0)
+            return WOLFCERT_ERR_MEMORY;
+
+        attrs[n].oid = OID_PKI_STATUS;
+        attrs[n].oidSz = sizeof(OID_PKI_STATUS);
+        attrs[n].value = scratch + off;
+        attrs[n].valueSz = (word32)vl;
+        off += (size_t)vl;
+        n++;
+    }
+    if (a->fail_info != NULL) {
+        int vl = enc_printable(a->fail_info, scratch + off, scratch_cap - off);
+        if (vl < 0)
+            return WOLFCERT_ERR_MEMORY;
+
+        attrs[n].oid = OID_FAIL_INFO;
+        attrs[n].oidSz = sizeof(OID_FAIL_INFO);
+        attrs[n].value = scratch + off;
+        attrs[n].valueSz = (word32)vl;
+        off += (size_t)vl;
+        n++;
+    }
+
+    *attrs_count = n;
+    return WOLFCERT_OK;
+}
+
+/* ---- public API --------------------------------------------------------- */
+
+int wolfcert_scep_envelop(const uint8_t* ra_cert_der, size_t ra_cert_len,
+                           const uint8_t* payload, size_t payload_len,
+                           int hash_oid,
+                           WolfCertBuffer* out_der, void* heap)
+{
+    (void)hash_oid;
+    PKCS7* p7 = wc_PKCS7_New(heap, WOLFCERT_DEVID_SOFTWARE);
+    if (p7 == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    int rc = wc_PKCS7_InitWithCert(p7, (byte*)ra_cert_der, (word32)ra_cert_len);
+    if (rc != 0) {
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_WC(rc, "scep", "InitWithCert");
+    }
+
+    WC_RNG rng;
+    if (wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE) != 0) {
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_CRYPTO;
+    }
+
+    p7->rng          = &rng;
+    p7->content      = (byte*)payload;
+    p7->contentSz    = (word32)payload_len;
+    p7->contentOID   = DATA;
+    p7->encryptOID   = AES256CBCb;
+    p7->keyWrapOID   = 0;
+
+    size_t cap = payload_len + ra_cert_len + 4096;
+    uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
+    if (buf == NULL) {
+        wc_FreeRng(&rng);
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    int n = wc_PKCS7_EncodeEnvelopedData(p7, buf, (word32)cap);
+
+    wc_FreeRng(&rng);
+    wc_PKCS7_Free(p7);
+    if (n <= 0) {
+        WOLFCERT_XFREE(buf, heap);
+        return WOLFCERT_ERR_WC(n, "scep", "EncodeEnvelopedData");
+    }
+
+    out_der->data = buf;
+    out_der->len = (size_t)n;
+    out_der->heap = heap;
+    return WOLFCERT_OK;
+}
+
+int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_cert_len,
+                             const uint8_t* recipient_key_der,  size_t recipient_key_len,
+                             const uint8_t* env_der, size_t env_len,
+                             WolfCertBuffer* out_plain, void* heap)
+{
+    PKCS7* p7 = wc_PKCS7_New(heap, WOLFCERT_DEVID_SOFTWARE);
+    if (p7 == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    int rc = wc_PKCS7_InitWithCert(p7, (byte*)recipient_cert_der,
+                                   (word32)recipient_cert_len);
+    if (rc != 0) {
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_WC(rc, "scep", "InitWithCert");
+    }
+
+    p7->privateKey   = (byte*)recipient_key_der;
+    p7->privateKeySz = (word32)recipient_key_len;
+
+    size_t cap = env_len + 4096;
+    uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
+    if (buf == NULL) {
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    int n = wc_PKCS7_DecodeEnvelopedData(p7, (byte*)env_der, (word32)env_len,
+                                         buf, (word32)cap);
+
+    wc_PKCS7_Free(p7);
+    if (n <= 0) {
+        WOLFCERT_XFREE(buf, heap);
+        return WOLFCERT_ERR_WC(n, "scep", "DecodeEnvelopedData");
+    }
+
+    out_plain->data = buf;
+    out_plain->len = (size_t)n;
+    out_plain->heap = heap;
+    return WOLFCERT_OK;
+}
+
+int wolfcert_scep_self_signed_rsa(RsaKey* key, const char* subject_cn,
+                                   uint8_t** out_der, size_t* out_len,
+                                   void* heap)
+{
+    Cert* cert = wc_CertNew(heap);
+    if (cert == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    wc_InitCert_ex(cert, heap, WOLFCERT_DEVID_SOFTWARE);
+    strncpy(cert->subject.commonName, subject_cn, CTC_NAME_SIZE - 1);
+    cert->subject.commonName[CTC_NAME_SIZE - 1] = '\0';
+    cert->selfSigned = 1;
+    cert->sigType    = CTC_SHA256wRSA;
+    cert->daysValid  = 2;
+
+    WC_RNG rng;
+    if (wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE) != 0) {
+        wc_CertFree(cert);
+        return WOLFCERT_ERR_CRYPTO;
+    }
+
+    size_t cap = 4096;
+    uint8_t* der = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
+    if (der == NULL) {
+        wc_FreeRng(&rng);
+        wc_CertFree(cert);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    int n = wc_MakeSelfCert(cert, der, (word32)cap, key, &rng);
+
+    wc_FreeRng(&rng);
+    wc_CertFree(cert);
+    if (n <= 0) {
+        WOLFCERT_XFREE(der, heap);
+        return WOLFCERT_ERR_WC(n, "scep", "MakeSelfCert");
+    }
+
+    *out_der = der;
+    *out_len = (size_t)n;
+    return WOLFCERT_OK;
+}
+
+WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_message(const uint8_t* envelope_der,
+    size_t envelope_len, const uint8_t* signer_cert_der, size_t signer_cert_len,
+    const uint8_t* signer_key_der,  size_t signer_key_len, int hash_oid,
+    const WolfCertScepAttrs* attrs, WolfCertBuffer* out_der, void* heap)
+{
+    PKCS7* p7 = wc_PKCS7_New(heap, WOLFCERT_DEVID_SOFTWARE);
+    if (p7 == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    int rc = wc_PKCS7_InitWithCert(p7, (byte*)signer_cert_der, (word32)signer_cert_len);
+    if (rc != 0) {
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_WC(rc, "scep", "InitWithCert");
+    }
+
+    WC_RNG rng;
+    if (wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE) != 0) {
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_CRYPTO;
+    }
+
+    p7->rng          = &rng;
+    p7->content      = (byte*)envelope_der;
+    p7->contentSz    = (word32)envelope_len;
+    p7->privateKey   = (byte*)signer_key_der;
+    p7->privateKeySz = (word32)signer_key_len;
+    p7->encryptOID   = RSAk;
+    p7->hashOID      = hash_oid ? hash_oid : SHA256h;
+
+    PKCS7Attrib attrs_arr[8];
+    uint8_t scratch[1024];
+    int nattr = 0;
+    rc = build_signed_attribs(attrs, attrs_arr, &nattr, scratch, sizeof(scratch));
+    if (rc != WOLFCERT_OK) {
+        wc_FreeRng(&rng);
+        wc_PKCS7_Free(p7);
+        return rc;
+    }
+
+    if (nattr > 0) {
+        p7->signedAttribs   = attrs_arr;
+        p7->signedAttribsSz = (word32)nattr;
+    }
+
+    /* wolfSSL's PKCS7 encoder mutates internal state on each
+     * EncodeSignedData call, so retry-on-BUFFER_E with the same PKCS7
+     * object is unreliable. Give the encoder a generous one-shot
+     * buffer instead: content + cert + signed attrs + per-algorithm
+     * slack. 32 KiB of headroom is enough for RSA-3072 signatures and
+     * large signed-attribute sets in practice. */
+    size_t cap = envelope_len + signer_cert_len + 128 * 1024;
+    uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
+    if (buf == NULL) {
+        wc_FreeRng(&rng);
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    int sz = wc_PKCS7_EncodeSignedData(p7, buf, (word32)cap);
+
+    wc_FreeRng(&rng);
+    wc_PKCS7_Free(p7);
+    if (sz <= 0) {
+        WOLFCERT_XFREE(buf, heap);
+        return WOLFCERT_ERR_WC(sz, "scep", "EncodeSignedData");
+    }
+
+    out_der->data = buf;
+    out_der->len = (size_t)sz;
+    out_der->heap = heap;
+    return WOLFCERT_OK;
+}
+
+WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
+    size_t pki_len, WolfCertBuffer* out_envelope, uint8_t** out_transaction_id,
+    size_t* out_tid_len, uint8_t** out_sender_nonce, size_t* out_snonce_len,
+    uint8_t** out_recipient_nonce,size_t* out_rnonce_len, char** out_message_type,
+    char** out_pki_status, uint8_t** out_signer_cert, size_t* out_signer_cert_len,
+    void* heap)
+{
+    PKCS7* p7 = wc_PKCS7_New(heap, WOLFCERT_DEVID_SOFTWARE);
+    if (p7 == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    wc_PKCS7_AllowDegenerate(p7, 0);
+
+    int rc = wc_PKCS7_VerifySignedData(p7, (byte*)pki_der, (word32)pki_len);
+    if (rc != 0) {
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_WC(rc, "scep", "VerifySignedData");
+    }
+
+    if (p7->content == NULL || p7->contentSz == 0) {
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_PROTOCOL;
+    }
+
+    uint8_t* env = (uint8_t*)WOLFCERT_XMALLOC(p7->contentSz, heap);
+    if (env == NULL) {
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    memcpy(env, p7->content, p7->contentSz);
+    out_envelope->data = env;
+    out_envelope->len  = p7->contentSz;
+    out_envelope->heap = heap;
+
+    if (out_signer_cert != NULL && out_signer_cert_len != NULL) {
+        *out_signer_cert = NULL;
+        *out_signer_cert_len = 0;
+        if (p7->cert[0] != NULL && p7->certSz[0] > 0) {
+            uint8_t* sc = (uint8_t*)WOLFCERT_XMALLOC(p7->certSz[0], heap);
+            if (sc != NULL) {
+                memcpy(sc, p7->cert[0], p7->certSz[0]);
+                *out_signer_cert     = sc;
+                *out_signer_cert_len = p7->certSz[0];
+            }
+        }
+    }
+
+    if (out_transaction_id) {
+        *out_transaction_id = NULL;
+        *out_tid_len = 0;
+    }
+
+    if (out_sender_nonce) {
+        *out_sender_nonce = NULL;
+        *out_snonce_len = 0;
+    }
+
+    if (out_recipient_nonce) {
+        *out_recipient_nonce = NULL;
+        *out_rnonce_len = 0;
+    }
+
+    if (out_message_type)
+        *out_message_type = NULL;
+
+    if (out_pki_status)
+        *out_pki_status = NULL;
+
+    for (PKCS7DecodedAttrib* a = p7->decodedAttrib; a != NULL; a = a->next) {
+        /* PKCS7DecodedAttrib.value can arrive in either of two shapes
+         * depending on the wolfSSL version / producer:
+         *   (a) the outer `SET OF AttributeValue` (tag 0x31 + content), or
+         *   (b) the first AttributeValue already stripped of the SET
+         *       (tag 0x13 PrintableString, 0x04 OCTET STRING, ...).
+         * Detect and unwrap whichever one we got. */
+        if (a->valueSz < 2 || a->value == NULL)
+            continue;
+
+        const byte* v = a->value;
+        size_t off = 0;
+
+        if (v[0] == 0x31) {
+            off = 2;
+            if (v[1] == 0x81) {
+                if (a->valueSz < 3)
+                    continue;
+                off = 3;
+            }
+            else if (v[1] == 0x82) {
+                if (a->valueSz < 4)
+                    continue;
+                off = 4;
+            }
+        }
+
+        if (off + 2 > a->valueSz)
+            continue;
+
+        size_t vlen = v[off + 1];
+        size_t voff = off + 2;
+        if (v[off + 1] == 0x81) {
+            if (off + 3 > a->valueSz)
+                continue;
+
+            vlen = v[off + 2];
+            voff = off + 3;
+        }
+        else if (v[off + 1] == 0x82) {
+            if (off + 4 > a->valueSz)
+                continue;
+            vlen = ((size_t)v[off + 2] << 8) | v[off + 3];
+            voff = off + 4;
+        }
+
+        if (voff + vlen > a->valueSz)
+            continue;
+
+        off = voff;
+
+        if (a->oidSz == sizeof(OID_MSG_TYPE) &&
+            memcmp(a->oid, OID_MSG_TYPE, a->oidSz) == 0 && out_message_type) {
+            char* s = (char*)WOLFCERT_XMALLOC(vlen + 1, heap);
+            if (s) {
+                memcpy(s, v + off, vlen);
+                s[vlen] = '\0';
+                *out_message_type = s;
+            }
+        }
+        else if (a->oidSz == sizeof(OID_PKI_STATUS) &&
+                 memcmp(a->oid, OID_PKI_STATUS, a->oidSz) == 0 && out_pki_status) {
+            char* s = (char*)WOLFCERT_XMALLOC(vlen + 1, heap);
+            if (s) {
+                memcpy(s, v + off, vlen);
+                s[vlen] = '\0';
+                *out_pki_status = s;
+            }
+        }
+        else if (a->oidSz == sizeof(OID_TRANS_ID) &&
+                 memcmp(a->oid, OID_TRANS_ID, a->oidSz) == 0 && out_transaction_id) {
+            uint8_t* b = (uint8_t*)WOLFCERT_XMALLOC(vlen, heap);
+            if (b) {
+                memcpy(b, v + off, vlen);
+                *out_transaction_id = b;
+                *out_tid_len = vlen;
+            }
+        }
+        else if (a->oidSz == sizeof(OID_SENDER_NONCE) &&
+                 memcmp(a->oid, OID_SENDER_NONCE, a->oidSz) == 0 && out_sender_nonce) {
+            uint8_t* b = (uint8_t*)WOLFCERT_XMALLOC(vlen, heap);
+            if (b) {
+                memcpy(b, v + off, vlen);
+                *out_sender_nonce = b;
+                *out_snonce_len = vlen;
+            }
+        }
+        else if (a->oidSz == sizeof(OID_RECIP_NONCE) &&
+                 memcmp(a->oid, OID_RECIP_NONCE, a->oidSz) == 0 && out_recipient_nonce) {
+            uint8_t* b = (uint8_t*)WOLFCERT_XMALLOC(vlen, heap);
+            if (b) {
+                memcpy(b, v + off, vlen);
+                *out_recipient_nonce = b;
+                *out_rnonce_len = vlen;
+            }
+        }
+    }
+
+    wc_PKCS7_Free(p7);
+    return WOLFCERT_OK;
+}
+
+/* Build RFC 8894 section 3.3.2 IssuerAndSubject:
+ *   IssuerAndSubject ::= SEQUENCE { issuer Name, subject Name }
+ * where the issuer Name is copied from the RA/CA cert and the subject
+ * Name is copied from the CSR. This is the enveloped content of a
+ * GetCertInitial (messageType 20) pkiMessage - it lets the server
+ * locate the pending request by DN when transactionID matching is
+ * ambiguous. */
+int wolfcert_scep_issuer_and_subject(const uint8_t* issuer_cert_der, size_t issuer_cert_len,
+                                      const uint8_t* csr_der,         size_t csr_len,
+                                      WolfCertBuffer* out_der, void* heap)
+{
+    if (issuer_cert_der == NULL || csr_der == NULL || out_der == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    DecodedCert ic;
+    wc_InitDecodedCert(&ic, (byte*)issuer_cert_der,
+                                        (word32)issuer_cert_len, heap);
+
+    int rc = wc_ParseCert(&ic, CERT_TYPE, NO_VERIFY, NULL);
+    if (rc != 0) {
+        wc_FreeDecodedCert(&ic);
+        return WOLFCERT_ERR_PARSE;
+    }
+
+    DecodedCert sc;
+    wc_InitDecodedCert(&sc, (byte*)csr_der, (word32)csr_len, heap);
+
+    rc = wc_ParseCert(&sc, CERTREQ_TYPE, NO_VERIFY, NULL);
+    if (rc != 0) {
+        wc_FreeDecodedCert(&ic);
+        wc_FreeDecodedCert(&sc);
+        return WOLFCERT_ERR_PARSE;
+    }
+
+    if (ic.subjectRaw == NULL || ic.subjectRawLen <= 0 ||
+            sc.subjectRaw == NULL || sc.subjectRawLen <= 0) {
+        wc_FreeDecodedCert(&ic);
+        wc_FreeDecodedCert(&sc);
+        return WOLFCERT_ERR_PARSE;
+    }
+
+    size_t inner = (size_t)ic.subjectRawLen + (size_t)sc.subjectRawLen;
+    size_t cap   = inner + 8;
+    uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
+    if (buf == NULL) {
+        wc_FreeDecodedCert(&ic);
+        wc_FreeDecodedCert(&sc);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    buf[0] = 0x30;
+    int ll = der_put_len(buf + 1, cap - 1, inner);
+    if (ll < 0) {
+        WOLFCERT_XFREE(buf, heap);
+        wc_FreeDecodedCert(&ic);
+        wc_FreeDecodedCert(&sc);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    size_t off = 1 + (size_t)ll;
+    memcpy(buf + off, ic.subjectRaw, (size_t)ic.subjectRawLen);
+    off += (size_t)ic.subjectRawLen;
+    memcpy(buf + off, sc.subjectRaw, (size_t)sc.subjectRawLen);
+    off += (size_t)sc.subjectRawLen;
+
+    wc_FreeDecodedCert(&ic);
+    wc_FreeDecodedCert(&sc);
+    out_der->data = buf;
+    out_der->len = off;
+    out_der->heap = heap;
+
+    return WOLFCERT_OK;
+}
+
+/* Extract the raw SPKI (SubjectPublicKeyInfo) from either a cert or a CSR
+ * DER. Used by the server to verify the signer-cert pub key matches the
+ * pub key in the enclosed CSR. */
+int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
+                           uint8_t** out_spki, size_t* out_len, void* heap)
+{
+    DecodedCert dc;
+    wc_InitDecodedCert(&dc, (byte*)der, (word32)len, heap);
+
+    int rc = wc_ParseCert(&dc, is_csr ? CERTREQ_TYPE : CERT_TYPE, NO_VERIFY, NULL);
+    if (rc != 0) {
+        wc_FreeDecodedCert(&dc);
+        return WOLFCERT_ERR_PARSE;
+    }
+
+    if (dc.publicKey == NULL || dc.pubKeySize == 0) {
+        wc_FreeDecodedCert(&dc);
+        return WOLFCERT_ERR_PARSE;
+    }
+
+    uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(dc.pubKeySize, heap);
+    if (buf == NULL) {
+        wc_FreeDecodedCert(&dc);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    memcpy(buf, dc.publicKey, dc.pubKeySize);
+    *out_spki = buf;
+    *out_len = dc.pubKeySize;
+    wc_FreeDecodedCert(&dc);
+
+    return WOLFCERT_OK;
+}

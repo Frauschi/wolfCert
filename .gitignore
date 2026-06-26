@@ -1,0 +1,71 @@
+# Build directories
+build/
+build-*/
+_build/
+out/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+Testing/
+*.cbp
+compile_commands.json
+DartConfiguration.tcl
+
+# Autotools generated output
+Makefile
+Makefile.in
+aclocal.m4
+autom4te.cache/
+build-aux/
+configure
+configure~
+config.h
+config.h.in
+config.h.in~
+config.log
+config.status
+.deps/
+.dirstamp
+.libs/
+libtool
+stamp-h1
+wolfcert.pc
+
+# Test output (built test binaries), but never the test sources
+test_*
+!test_*.c
+!test_*.h
+test-suite.log
+
+# Object / library / binary artifacts
+*.o
+*.lo
+*.la
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+*.dSYM/
+*.exe
+wolfcert/options.h
+
+# Autoconf-generated CMake package-config files (from cmake/*.in)
+cmake/wolfCertConfig.cmake
+cmake/wolfCertConfigVersion.cmake
+cmake/wolfCertTargets.cmake
+
+# CLI binaries produced by either build system
+/wolfcert-client
+/wolfcert-server
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+.cache

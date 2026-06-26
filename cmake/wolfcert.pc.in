@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=${prefix}/@CMAKE_INSTALL_LIBDIR@
+includedir=${prefix}/@CMAKE_INSTALL_INCLUDEDIR@
+
+Name: wolfCert
+Description: Certificate lifecycle management library built on wolfSSL
+Version: @PROJECT_VERSION@
+Requires: wolfssl
+Libs: -L${libdir} -lwolfcert
+Cflags: -I${includedir}
