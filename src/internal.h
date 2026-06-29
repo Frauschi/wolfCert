@@ -55,6 +55,18 @@
 #define WOLFCERT_HTTP_AUTH_BUF_SZ 512   /* client Basic-auth header line      */
 #endif
 
+/* Heap headroom added on top of (envelope + signer cert) when encoding a SCEP
+ * SignedData pkiMessage. wolfSSL's PKCS#7 encoder mutates internal state per
+ * call, so it is given a single right-sized one-shot buffer rather than
+ * size-then-encode retried. This slack bounds everything else in the message:
+ * the signed-attribute set (~2 KiB), the RSA signature (<=1 KiB at RSA-8192),
+ * and the SignerInfo identifier plus ASN.1 framing (~1 KiB). 8 KiB is a safe
+ * default; override (compiler -D or user_settings) to trim it on constrained
+ * targets, see docs/EMBEDDED.md. */
+#ifndef WOLFCERT_SCEP_PKI_SLACK
+#define WOLFCERT_SCEP_PKI_SLACK   (8 * 1024)
+#endif
+
 /* ---- key ---------------------------------------------------------------- */
 
 struct WolfCertKey {

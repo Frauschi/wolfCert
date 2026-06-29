@@ -159,6 +159,10 @@ endif
 endif
 
 if WOLFCERT_HAVE_SCEP
+check_PROGRAMS += test_scep_msg
+test_scep_msg_SOURCES  = tests/unit/test_scep_msg.c
+test_scep_msg_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
+test_scep_msg_LDADD    = libwolfcert.la $(WOLFSSL_LIBS)
 if WOLFCERT_HAVE_SERVER
 check_PROGRAMS += test_scep_roundtrip test_scep_poll_roundtrip
 test_scep_roundtrip_SOURCES = tests/integration/test_scep_roundtrip.c

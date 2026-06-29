@@ -149,7 +149,28 @@ Two related buffers are intentionally **not** exposed as knobs:
   PKCS#7 signed-attribute encoding; shrinking it risks breaking SCEP
   signing rather than saving meaningful RAM.
 
-## 3. Heap / static-memory pools
+## 3. SCEP pkiMessage encode buffer
+
+Encoding a SCEP SignedData pkiMessage allocates a one-shot heap buffer
+sized `envelope + signer-cert + WOLFCERT_SCEP_PKI_SLACK`. The slack bounds
+everything else in the message (signed attributes, signature, ASN.1
+framing); see the macro comment in `src/internal.h`.
+
+| Macro | Default | Bounds |
+|-------|---------|--------|
+| `WOLFCERT_SCEP_PKI_SLACK` | `8192` | signed-attribute set + signature + SignerInfo/ASN.1 framing on top of the envelope and signer cert |
+
+A PENDING/FAILURE CertRep has no envelope, so its buffer is just
+`signer-cert + WOLFCERT_SCEP_PKI_SLACK`. Override via `-D` or your
+`user_settings`-style config header; ~4 KiB is the realistic floor for an
+RSA-2048 signer (drop further only if you also bound the signer cert and
+RSA key size). Example:
+
+```c
+#define WOLFCERT_SCEP_PKI_SLACK (6 * 1024)
+```
+
+## 4. Heap / static-memory pools
 
 Every wolfCert allocation carries a `heap` hint that threads through to
 wolfSSL's `XMALLOC`. Build wolfSSL with `WOLFSSL_STATIC_MEMORY` and pass a
@@ -158,13 +179,13 @@ keeping the large heap-allocated `Cert` off a general-purpose allocator.
 See [`ARCHITECTURE.md` section 4.1](ARCHITECTURE.md#41-heap-hints--static-memory-pools)
 for the three levels of hint granularity.
 
-## 4. Threading
+## 5. Threading
 
 If your target is single-threaded, build wolfSSL with `SINGLE_THREADED`.
 wolfCert holds no locks of its own (init/cleanup delegate refcounting to
 `wolfSSL_Init`/`wolfSSL_Cleanup`), so there is nothing extra to configure.
 
-## 5. Algorithms & protocols
+## 6. Algorithms & protocols
 
 Strip unused key algorithms and protocols at configure time so their code
 and tables drop out entirely - see the `WOLFCERT_HAVE_*` /
@@ -187,6 +208,7 @@ with ECC or a PQC algorithm, disabling SCEP avoids pulling in RSA.
 #define WOLFCERT_HTTP_REQ_BUF_SZ  768
 #define WOLFCERT_HTTP_PATH_SZ     128
 #define WOLFCERT_HTTP_AUTH_BUF_SZ 128
+#define WOLFCERT_SCEP_PKI_SLACK   (6 * 1024)
 ```
 
 This drops the per-`Cert` heap cost by ~17 KB and the HTTP request stack

@@ -1,0 +1,233 @@
+/*
+ * Copyright (C) 2026 wolfSSL Inc.
+ *
+ * This file is part of wolfCert.
+ *
+ * wolfCert is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * wolfCert is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/*
+ * SCEP pkiMessage structural tests.
+ *
+ * RFC 8894 section 3.2.2: a CertRep whose pkiStatus is PENDING ("3") or
+ * FAILURE ("2") carries no pkcsPKIEnvelope, so the signed pkiMessage must
+ * encode with an absent SignedData eContent. This exercises the build/parse
+ * pair directly: a non-success pkiMessage built with no envelope must contain
+ * no EnvelopedData and must round-trip through the parser with an empty
+ * envelope and the expected signed attributes.
+ */
+
+#define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE   /* expose memmem on macOS */
+#define _GNU_SOURCE
+
+#include <wolfcert/wolfcert.h>
+#include "internal.h"
+
+#include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/asn_public.h>
+#include <wolfssl/wolfcrypt/rsa.h>
+#include <wolfssl/wolfcrypt/random.h>
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define REQUIRE(cond) \
+    do {                                                                    \
+        if (!(cond)) {                                                      \
+            fprintf(stderr, "FAIL %s:%d %s\n", __FILE__, __LINE__, #cond);  \
+            return 1;                                                       \
+        }                                                                   \
+    } while (0)
+
+/* Generate a throwaway self-signed RSA CA cert and its private key, both DER.
+ * Ownership of the returned buffers passes to the caller (free with free()). */
+static int make_ca(uint8_t** cert_out, size_t* cert_out_len,
+                   uint8_t** key_out, size_t* key_out_len)
+{
+    RsaKey   key;
+    WC_RNG   rng;
+    Cert*    cert = NULL;
+    uint8_t* cert_der = NULL;
+    uint8_t* key_der  = NULL;
+    int      ret  = 0;
+    int      key_n = 0;
+    int      cert_n = 0;
+
+    if (wc_InitRng(&rng) != 0)
+        return -1;
+    if (wc_InitRsaKey(&key, NULL) != 0) {
+        wc_FreeRng(&rng);
+        return -1;
+    }
+
+    if (ret == 0 && wc_MakeRsaKey(&key, 2048, WC_RSA_EXPONENT, &rng) != 0)
+        ret = -1;
+
+    if (ret == 0) {
+        key_der  = (uint8_t*)malloc(2048);
+        cert_der = (uint8_t*)malloc(4096);
+        if (key_der == NULL || cert_der == NULL)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        key_n = wc_RsaKeyToDer(&key, key_der, 2048);
+        if (key_n <= 0)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        cert = wc_CertNew(NULL);
+        if (cert == NULL)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        wc_InitCert_ex(cert, NULL, INVALID_DEVID);
+        strncpy(cert->subject.commonName, "wolfCert Test CA", CTC_NAME_SIZE - 1);
+        cert->subject.commonName[CTC_NAME_SIZE - 1] = '\0';
+        cert->isCA       = 1;
+        cert->selfSigned = 1;
+        cert->sigType    = CTC_SHA256wRSA;
+        cert->daysValid  = 2;
+
+        cert_n = wc_MakeSelfCert(cert, cert_der, 4096, &key, &rng);
+        if (cert_n <= 0)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        *key_out      = key_der;
+        *key_out_len  = (size_t)key_n;
+        *cert_out     = cert_der;
+        *cert_out_len = (size_t)cert_n;
+        key_der  = NULL;   /* ownership transferred */
+        cert_der = NULL;
+    }
+
+    if (cert != NULL)
+        wc_CertFree(cert);
+    free(key_der);
+    free(cert_der);
+    wc_FreeRsaKey(&key);
+    wc_FreeRng(&rng);
+    return ret;
+}
+
+/* Build a FAILURE CertRep signed with hash_oid and confirm it carries no
+ * pkcsPKIEnvelope and still round-trips through the parser - which must
+ * discover the signer's digest rather than assume one. */
+static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
+                             const uint8_t* key_der, size_t key_len,
+                             int hash_oid)
+{
+    /* pkcs7-envelopedData OID 1.2.840.113549.1.7.3 - present whenever a
+     * pkcsPKIEnvelope is emitted, and what must be absent here. */
+    static const uint8_t ENVELOPED_OID[] =
+        { 0x06,0x09,0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x03 };
+    static const uint8_t tid[16] =
+        { 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 };
+    uint8_t sn[16];
+    uint8_t rn[16];
+
+    WolfCertScepAttrs attrs;
+    WolfCertBuffer    pki = { 0 };
+    WolfCertBuffer    env = { 0 };
+    char*    status = NULL;
+    char*    mt     = NULL;
+    uint8_t* rx_tid = NULL;
+    size_t   rx_tid_len = 0;
+    uint8_t* rx_sn  = NULL;
+    size_t   rx_sn_len = 0;
+    uint8_t* rx_rn  = NULL;
+    size_t   rx_rn_len = 0;
+    int      prc;
+
+    memset(sn, 0xA5, sizeof(sn));
+    memset(rn, 0x5A, sizeof(rn));
+
+    /* Build a FAILURE CertRep with no enveloped messageData. */
+    memset(&attrs, 0, sizeof(attrs));
+    attrs.transaction_id     = tid;
+    attrs.transaction_id_len = sizeof(tid);
+    attrs.sender_nonce       = sn;
+    attrs.sender_nonce_len   = sizeof(sn);
+    attrs.recipient_nonce    = rn;
+    attrs.recipient_nonce_len = sizeof(rn);
+    attrs.message_type       = "3";
+    attrs.pki_status         = "2";
+    attrs.fail_info          = "2";
+
+    REQUIRE(wolfcert_scep_build_pki_message(NULL, 0, ca_der, ca_len,
+                                            key_der, key_len, hash_oid,
+                                            &attrs, &pki, NULL) == WOLFCERT_OK);
+
+    /* The pkcsPKIEnvelope must be genuinely absent: no EnvelopedData. */
+    REQUIRE(memmem(pki.data, pki.len, ENVELOPED_OID,
+                   sizeof(ENVELOPED_OID)) == NULL);
+
+    /* The message must still verify and parse, returning an empty envelope. */
+    prc = wolfcert_scep_parse_pki_message(pki.data, pki.len, &env,
+            &rx_tid, &rx_tid_len, &rx_sn, &rx_sn_len, &rx_rn, &rx_rn_len,
+            &mt, &status, NULL, NULL, NULL);
+    REQUIRE(prc == WOLFCERT_OK);
+    REQUIRE(env.len == 0 && env.data == NULL);
+    REQUIRE(status != NULL && strcmp(status, "2") == 0);
+    REQUIRE(mt != NULL && strcmp(mt, "3") == 0);
+
+    wolfcert_buffer_free(&env);
+    wolfcert_buffer_free(&pki);
+    WOLFCERT_XFREE(status, NULL);
+    WOLFCERT_XFREE(mt, NULL);
+    WOLFCERT_XFREE(rx_tid, NULL);
+    WOLFCERT_XFREE(rx_sn, NULL);
+    WOLFCERT_XFREE(rx_rn, NULL);
+    return 0;
+}
+
+static int test_non_success_has_no_envelope(void)
+{
+    uint8_t* ca_der  = NULL;
+    size_t   ca_len  = 0;
+    uint8_t* key_der = NULL;
+    size_t   key_len = 0;
+    int      rc;
+
+    REQUIRE(make_ca(&ca_der, &ca_len, &key_der, &key_len) == 0);
+
+    /* SHA-256 is the common case. SHA-512 covers a signer that chose a
+     * different digest: the parser must not assume the algorithm. */
+    rc = check_no_envelope(ca_der, ca_len, key_der, key_len, SHA256h);
+#ifdef WOLFSSL_SHA512
+    if (rc == 0)
+        rc = check_no_envelope(ca_der, ca_len, key_der, key_len, SHA512h);
+#endif
+
+    free(ca_der);
+    free(key_der);
+    return rc;
+}
+
+int main(void)
+{
+    REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+    if (test_non_success_has_no_envelope())
+        return 1;
+    wolfcert_cleanup();
+    printf("OK\n");
+    return 0;
+}

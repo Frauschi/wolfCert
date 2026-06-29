@@ -478,24 +478,9 @@ static int send_cert_rep(WolfCertServer* s, int fd,
             return rc;
         }
     }
-    else {
-        /* RFC 8894 section 3.2.2: CertRep with pkiStatus != SUCCESS has no
-         * enveloped messageData. Build an EnvelopedData around an
-         * empty OCTET STRING (0x04 0x00) so wolfSSL's wc_PKCS7 path
-         * - which refuses zero-length content - still produces a
-         * wrappable payload. The client's parser only inspects
-         * signed attributes in this case; the envelope content is
-         * unused. */
-        static const uint8_t EMPTY_OCTET[2] = { 0x04, 0x00 };
-        rc = wolfcert_scep_envelop(env_target, env_target_len,
-                                    EMPTY_OCTET, sizeof(EMPTY_OCTET),
-                                    AES128CBCb, &resp_env, s->heap);
-
-        if (rc != WOLFCERT_OK) {
-            send_text(s, fd, 500, "Server Error", "text/plain", "");
-            return rc;
-        }
-    }
+    /* RFC 8894 section 3.2.2: a CertRep with pkiStatus PENDING ("3") or
+     * FAILURE ("2") carries no enveloped messageData. resp_env is left empty
+     * so the signed pkiMessage is built with an absent pkcsPKIEnvelope. */
 
     WC_RNG rng;
     wc_InitRng_ex(&rng, s->heap, WOLFCERT_DEVID_SOFTWARE);

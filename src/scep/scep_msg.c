@@ -379,13 +379,29 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_message(const uint8_t* envelope_de
         return WOLFCERT_ERR_CRYPTO;
     }
 
+    /* A CertRep with pkiStatus PENDING/FAILURE (RFC 8894 section 3.2.2) has no
+     * pkcsPKIEnvelope: the SignedData encapsulates no content. Emit a detached
+     * SignedData in that case so the eContent is genuinely absent; wolfSSL
+     * computes the messageDigest over the empty content internally. */
+    int detached = (envelope_der == NULL || envelope_len == 0);
+
     p7->rng          = &rng;
-    p7->content      = (byte*)envelope_der;
-    p7->contentSz    = (word32)envelope_len;
     p7->privateKey   = (byte*)signer_key_der;
     p7->privateKeySz = (word32)signer_key_len;
     p7->encryptOID   = RSAk;
     p7->hashOID      = hash_oid ? hash_oid : SHA256h;
+    if (!detached) {
+        p7->content   = (byte*)envelope_der;
+        p7->contentSz = (word32)envelope_len;
+    }
+    else {
+        rc = wc_PKCS7_SetDetached(p7, 1);
+        if (rc != 0) {
+            wc_FreeRng(&rng);
+            wc_PKCS7_Free(p7);
+            return WOLFCERT_ERR_WC(rc, "scep", "SetDetached");
+        }
+    }
 
     PKCS7Attrib attrs_arr[8];
     uint8_t scratch[1024];
@@ -404,11 +420,11 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_message(const uint8_t* envelope_de
 
     /* wolfSSL's PKCS7 encoder mutates internal state on each
      * EncodeSignedData call, so retry-on-BUFFER_E with the same PKCS7
-     * object is unreliable. Give the encoder a generous one-shot
-     * buffer instead: content + cert + signed attrs + per-algorithm
-     * slack. 32 KiB of headroom is enough for RSA-3072 signatures and
-     * large signed-attribute sets in practice. */
-    size_t cap = envelope_len + signer_cert_len + 128 * 1024;
+     * object is unreliable. Give the encoder a single right-sized one-shot
+     * buffer instead: the envelope content and signer cert pass through
+     * verbatim, and WOLFCERT_SCEP_PKI_SLACK bounds the signed attributes,
+     * signature, and ASN.1 framing on top. */
+    size_t cap = envelope_len + signer_cert_len + WOLFCERT_SCEP_PKI_SLACK;
     uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
     if (buf == NULL) {
         wc_FreeRng(&rng);
@@ -450,21 +466,28 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
         return WOLFCERT_ERR_WC(rc, "scep", "VerifySignedData");
     }
 
-    if (p7->content == NULL || p7->contentSz == 0) {
-        wc_PKCS7_Free(p7);
-        return WOLFCERT_ERR_PROTOCOL;
-    }
+    /* A CertRep with pkiStatus PENDING/FAILURE (RFC 8894 section 3.2.2) carries
+     * no pkcsPKIEnvelope, so the SignedData encapsulates no content. wolfSSL
+     * verifies the absent eContent against the hash of empty content, and the
+     * signed attributes (pkiStatus, transactionID, nonces, ...) stay
+     * authenticated; report the envelope as empty in that case. */
+    if (p7->content != NULL && p7->contentSz != 0) {
+        uint8_t* env = (uint8_t*)WOLFCERT_XMALLOC(p7->contentSz, heap);
+        if (env == NULL) {
+            wc_PKCS7_Free(p7);
+            return WOLFCERT_ERR_MEMORY;
+        }
 
-    uint8_t* env = (uint8_t*)WOLFCERT_XMALLOC(p7->contentSz, heap);
-    if (env == NULL) {
-        wc_PKCS7_Free(p7);
-        return WOLFCERT_ERR_MEMORY;
+        memcpy(env, p7->content, p7->contentSz);
+        out_envelope->data = env;
+        out_envelope->len  = p7->contentSz;
+        out_envelope->heap = heap;
     }
-
-    memcpy(env, p7->content, p7->contentSz);
-    out_envelope->data = env;
-    out_envelope->len  = p7->contentSz;
-    out_envelope->heap = heap;
+    else {
+        out_envelope->data = NULL;
+        out_envelope->len  = 0;
+        out_envelope->heap = heap;
+    }
 
     if (out_signer_cert != NULL && out_signer_cert_len != NULL) {
         *out_signer_cert = NULL;
