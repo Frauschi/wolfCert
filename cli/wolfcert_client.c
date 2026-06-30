@@ -35,11 +35,14 @@
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 
+#include <fcntl.h>
 #include <getopt.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
 #include <time.h>
+#include <unistd.h>
 
 static uint8_t* read_whole(const char* path, size_t* out_len)
 {
@@ -328,18 +331,41 @@ static int proto_of(const char* s, WolfCertProtocol* out)
     return -1;
 }
 
-static int write_file(const char* path, const uint8_t* data, size_t len)
+static int write_file(const char* path, const uint8_t* data, size_t len,
+                      int sensitive)
 {
+    FILE* f;
+    size_t n;
+
     if (path == NULL) {
         fwrite(data, 1, len, stdout);
         return 0;
     }
 
-    FILE* f = fopen(path, "wb");
-    if (f == NULL)
-        return -1;
+    /* Private keys must never be left group/world readable on a shared host.
+     * Create them owner-only and force the mode even when overwriting an
+     * existing wider-permission file, matching the library filesystem store. */
+    if (sensitive) {
+        int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0)
+            return -1;
+        if (fchmod(fd, 0600) != 0) {
+            close(fd);
+            return -1;
+        }
+        f = fdopen(fd, "wb");
+        if (f == NULL) {
+            close(fd);
+            return -1;
+        }
+    }
+    else {
+        f = fopen(path, "wb");
+        if (f == NULL)
+            return -1;
+    }
 
-    size_t n = fwrite(data, 1, len, f);
+    n = fwrite(data, 1, len, f);
     fclose(f);
 
     return n == len ? 0 : -1;
@@ -493,7 +519,7 @@ static int cmd_getcacerts(int argc, char** argv)
         return 2;
     }
 
-    int wrc = write_file(opts.out_cert, pem.data, pem.len);
+    int wrc = write_file(opts.out_cert, pem.data, pem.len, 0);
     if (wrc != 0) {
         fprintf(stderr, "getcacerts: cannot write %s\n",
                 opts.out_cert ? opts.out_cert : "<stdout>");
@@ -780,7 +806,7 @@ static int cmd_enroll(int argc, char** argv)
 
     int wrc = 0;
     if (opts.out_cert) {
-        wrc = write_file(opts.out_cert, issued.data, issued.len);
+        wrc = write_file(opts.out_cert, issued.data, issued.len, 0);
     }
     else {
         fwrite(issued.data, 1, issued.len, stdout);
@@ -793,7 +819,7 @@ static int cmd_enroll(int argc, char** argv)
     if (opts.out_key) {
         WolfCertBuffer key_pem = { 0 };
         if (wolfcert_key_to_pem(key, &key_pem) == WOLFCERT_OK) {
-            if (write_file(opts.out_key, key_pem.data, key_pem.len) != 0) {
+            if (write_file(opts.out_key, key_pem.data, key_pem.len, 1) != 0) {
                 fprintf(stderr, "enroll: cannot write %s\n", opts.out_key);
                 wrc = -1;
             }
@@ -917,7 +943,7 @@ static int cmd_reenroll(int argc, char** argv)
 
     int wrc = 0;
     if (opts.out_cert) {
-        wrc = write_file(opts.out_cert, issued.data, issued.len);
+        wrc = write_file(opts.out_cert, issued.data, issued.len, 0);
     }
     else {
         fwrite(issued.data, 1, issued.len, stdout);
@@ -990,7 +1016,7 @@ static int cmd_getnextca(int argc, char** argv)
         return 2;
     }
 
-    int wrc = write_file(opts.out_cert, pem.data, pem.len);
+    int wrc = write_file(opts.out_cert, pem.data, pem.len, 0);
     if (wrc != 0) {
         fprintf(stderr, "getnextca: cannot write %s\n",
                 opts.out_cert ? opts.out_cert : "<stdout>");
