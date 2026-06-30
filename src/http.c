@@ -1415,6 +1415,7 @@ static int inspect_headers(WolfCertHttpSession* s)
     }
 
     s->sm_content_type = find_header(hdrs, "Content-Type", s->heap);
+    s->sm_retry_after_sec = 0;
     char* ra = find_header(hdrs, "Retry-After", s->heap);
     if (ra != NULL) {
         const char* p = ra;

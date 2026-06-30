@@ -26,6 +26,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -164,12 +165,145 @@ static int test_loopback_http(void)
     return 0;
 }
 
+/* Keep-alive server: answers two requests on one connection. The first
+ * response carries Retry-After, the second does not. */
+static void* srv_retry_thread(void* arg)
+{
+    struct srv_ctx* sc = (struct srv_ctx*)arg;
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls < 0)
+        return NULL;
+    int yes = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
+                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        close(ls);
+        return NULL;
+    }
+    if (listen(ls, 1) < 0) {
+        close(ls);
+        return NULL;
+    }
+    socklen_t slen = sizeof(sa);
+    getsockname(ls, (struct sockaddr*)&sa, &slen);
+    sc->port = ntohs(sa.sin_port);
+
+    int cs = accept(ls, NULL, NULL);
+    close(ls);
+    if (cs < 0)
+        return NULL;
+
+    const char* responses[2] = {
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 5\r\n"
+        "Retry-After: 30\r\n"
+        "\r\n"
+        "first",
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: 6\r\n"
+        "\r\n"
+        "second"
+    };
+
+    char buf[4096];
+    int reqno;
+    for (reqno = 0; reqno < 2; ++reqno) {
+        size_t n = 0;
+        while (n < sizeof(buf) - 1) {
+            ssize_t r = recv(cs, buf + n, sizeof(buf) - 1 - n, 0);
+            if (r <= 0)
+                break;
+            n += (size_t)r;
+            buf[n] = '\0';
+            if (strstr(buf, "\r\n\r\n") != NULL)
+                break;
+        }
+        send(cs, responses[reqno], strlen(responses[reqno]), 0);
+    }
+
+    shutdown(cs, SHUT_WR);
+    close(cs);
+    return NULL;
+}
+
+static int drive_nb(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
+                    WolfCertHttpResponse* resp)
+{
+    int fd = wolfcert_http_session_fd(s);
+    struct pollfd pfd;
+    for (;;) {
+        int rc = wolfcert_http_session_request_nb(s, req, resp);
+        if (rc == WOLFCERT_ERR_WANT_READ) {
+            pfd.fd = fd;
+            pfd.events = POLLIN;
+            poll(&pfd, 1, 2000);
+            continue;
+        }
+        if (rc == WOLFCERT_ERR_WANT_WRITE) {
+            pfd.fd = fd;
+            pfd.events = POLLOUT;
+            poll(&pfd, 1, 2000);
+            continue;
+        }
+        return rc;
+    }
+}
+
+/* A non-blocking session reused across requests must not carry a stale
+ * Retry-After from an earlier response into a later one. */
+static int test_session_retry_after_reset(void)
+{
+    struct srv_ctx sc = { 0 };
+    pthread_t tid;
+    REQUIRE(pthread_create(&tid, NULL, srv_retry_thread, &sc) == 0);
+    for (int i = 0; i < 200 && sc.port == 0; ++i) {
+        const struct timespec ts = { 0, 5 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    REQUIRE(sc.port != 0);
+
+    char base[128];
+    char url[160];
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", sc.port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/test", sc.port);
+
+    WolfCertHttpSessionCfg cfg = {
+        .base_url = base,
+        .nonblocking = 1,
+    };
+    WolfCertHttpSession* s = NULL;
+    REQUIRE(wolfcert_http_session_open(&cfg, &s) == WOLFCERT_OK);
+
+    WolfCertHttpRequest req = { .method = "GET", .url = url };
+
+    WolfCertHttpResponse resp1 = { 0 };
+    REQUIRE(drive_nb(s, &req, &resp1) == WOLFCERT_OK);
+    REQUIRE(resp1.status_code == 200);
+    REQUIRE(resp1.retry_after_sec == 30);
+    wolfcert_http_response_free(&resp1);
+
+    WolfCertHttpResponse resp2 = { 0 };
+    REQUIRE(drive_nb(s, &req, &resp2) == WOLFCERT_OK);
+    REQUIRE(resp2.status_code == 200);
+    REQUIRE(resp2.retry_after_sec == 0);
+    wolfcert_http_response_free(&resp2);
+
+    wolfcert_http_session_close(s);
+    pthread_join(tid, NULL);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     if (test_url_parser())
         return 1;
     if (test_loopback_http())
+        return 1;
+    if (test_session_retry_after_reset())
         return 1;
     wolfcert_cleanup();
     printf("OK\n");
