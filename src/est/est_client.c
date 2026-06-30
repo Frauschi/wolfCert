@@ -581,8 +581,13 @@ int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
     }
 
     if (s->in_resp.status_code != 200) {
-        int mapped = (s->in_resp.status_code == 401 || s->in_resp.status_code == 403)
-                     ? WOLFCERT_ERR_AUTH : WOLFCERT_ERR_HTTP;
+        int mapped;
+        if (s->in_resp.status_code == 202)
+            mapped = WOLFCERT_ERR_PENDING;
+        else if (s->in_resp.status_code == 401 || s->in_resp.status_code == 403)
+            mapped = WOLFCERT_ERR_AUTH;
+        else
+            mapped = WOLFCERT_ERR_HTTP;
         est_async_reset(s);
 
         return mapped;
@@ -674,8 +679,13 @@ int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
         return rc;
 
     if (resp.status_code != 200) {
-        int mapped = (resp.status_code == 401 || resp.status_code == 403)
-                     ? WOLFCERT_ERR_AUTH : WOLFCERT_ERR_HTTP;
+        int mapped;
+        if (resp.status_code == 202)
+            mapped = WOLFCERT_ERR_PENDING;
+        else if (resp.status_code == 401 || resp.status_code == 403)
+            mapped = WOLFCERT_ERR_AUTH;
+        else
+            mapped = WOLFCERT_ERR_HTTP;
         wolfcert_http_response_free(&resp);
 
         return mapped;
