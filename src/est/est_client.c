@@ -184,12 +184,13 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
     }
 
     WolfCertHttpRequest req = {
-        .method          = "POST",
-        .url             = url,
-        .content_type    = "application/pkcs10",
-        .accept          = "application/pkcs7-mime",
-        .body            = b64.data,
-        .body_len        = b64.len,
+        .method                    = "POST",
+        .url                       = url,
+        .content_type              = "application/pkcs10",
+        .content_transfer_encoding = "base64",
+        .accept                    = "application/pkcs7-mime",
+        .body                      = b64.data,
+        .body_len                  = b64.len,
     };
     fill_common(srv, &req);
 

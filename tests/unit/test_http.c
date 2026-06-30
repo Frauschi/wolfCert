@@ -385,6 +385,96 @@ static int test_chunked_size_overflow(void)
     return 0;
 }
 
+/* Capture the request headers a client sends so the test can inspect
+ * which headers were emitted on the wire. */
+struct capture_ctx {
+    int  port;
+    char request[4096];
+};
+
+static void* srv_thread_capture(void* arg)
+{
+    struct capture_ctx* cc = (struct capture_ctx*)arg;
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls < 0)
+        return NULL;
+    int yes = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
+                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        close(ls);
+        return NULL;
+    }
+    if (listen(ls, 1) < 0) {
+        close(ls);
+        return NULL;
+    }
+    socklen_t slen = sizeof(sa);
+    getsockname(ls, (struct sockaddr*)&sa, &slen);
+    cc->port = ntohs(sa.sin_port);
+
+    int cs = accept(ls, NULL, NULL);
+    close(ls);
+    if (cs < 0)
+        return NULL;
+
+    size_t n = 0;
+    while (n < sizeof(cc->request) - 1) {
+        ssize_t r = recv(cs, cc->request + n, sizeof(cc->request) - 1 - n, 0);
+        if (r <= 0)
+            break;
+        n += (size_t)r;
+        cc->request[n] = '\0';
+        if (strstr(cc->request, "\r\n\r\n") != NULL)
+            break;
+    }
+
+    const char* response =
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    send(cs, response, strlen(response), 0);
+    shutdown(cs, SHUT_WR);
+    close(cs);
+    return NULL;
+}
+
+/* RFC 7030 section 4.2.1: a base64-encoded enrollment body must be sent
+ * with Content-Transfer-Encoding: base64 so the server decodes it. A
+ * request that sets content_transfer_encoding must emit that header. */
+static int test_request_transfer_encoding(void)
+{
+    struct capture_ctx cc = { 0 };
+    pthread_t tid;
+    REQUIRE(pthread_create(&tid, NULL, srv_thread_capture, &cc) == 0);
+    for (int i = 0; i < 200 && cc.port == 0; ++i) {
+        const struct timespec ts = { 0, 5 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    REQUIRE(cc.port != 0);
+
+    char url[128];
+    snprintf(url, sizeof(url),
+             "http://127.0.0.1:%d/.well-known/est/simpleenroll", cc.port);
+    const char* body = "Zm9vYmFy\r\n";
+    WolfCertHttpRequest req = {
+        .method = "POST", .url = url,
+        .content_type = "application/pkcs10",
+        .content_transfer_encoding = "base64",
+        .body = (const uint8_t*)body, .body_len = strlen(body),
+    };
+    WolfCertHttpResponse resp = { 0 };
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_OK);
+    REQUIRE(resp.status_code == 200);
+    wolfcert_http_response_free(&resp);
+    pthread_join(tid, NULL);
+
+    REQUIRE(strstr(cc.request, "Content-Transfer-Encoding: base64") != NULL);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -395,6 +485,8 @@ int main(void)
     if (test_session_retry_after_reset())
         return 1;
     if (test_chunked_size_overflow())
+        return 1;
+    if (test_request_transfer_encoding())
         return 1;
     wolfcert_cleanup();
     printf("OK\n");
