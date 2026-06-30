@@ -134,6 +134,13 @@ typedef struct {
      * wire this policy into a proper RA. */
     int              est_require_csr_attributes;
 
+    /* Test-server convenience: when set, the SCEP CertRep is emitted
+     * without a recipientNonce, simulating a peer (e.g. a WOLFSSL_NO_MALLOC
+     * server stuck at the default MAX_SIGNED_ATTRIBS_SZ) that cannot carry
+     * it. Used to exercise the client-side rejection of a CertRep that
+     * omits the nonce. */
+    int              scep_omit_recipient_nonce;
+
     /* Heap hint for server-internal allocations. */
     void*            heap;
 } WolfCertServerCfgSrv;

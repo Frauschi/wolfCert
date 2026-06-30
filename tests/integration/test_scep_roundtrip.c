@@ -256,6 +256,51 @@ int main(void)
         wc_FreeRng(&rng);
     }
 
+    /* ---- Absent recipientNonce in a CertRep must be rejected -------------
+     * RFC 8894 section 3.2.1.2 requires the sender to verify the CertRep's
+     * recipientNonce echoes the senderNonce it sent. A CertRep that carries
+     * no recipientNonce cannot be verified, so the client must reject it.
+     * Drive a server that deliberately omits the nonce and confirm the
+     * enrollment fails instead of accepting the reply. */
+    WolfCertServerCfgSrv cfg3 = { .protocol = WOLFCERT_PROTO_SCEP,
+                                  .bind_host = "127.0.0.1", .bind_port = 0,
+                                  .scep_omit_recipient_nonce = 1 };
+    WolfCertServer* s3 = NULL;
+    REQUIRE(wolfcert_server_start(&cfg3, &s3) == WOLFCERT_OK);
+    pthread_t tid3;
+    REQUIRE(pthread_create(&tid3, NULL, server_thread, s3) == 0);
+
+    char url3[128];
+    snprintf(url3, sizeof(url3), "http://127.0.0.1:%u/scep", wolfcert_server_port(s3));
+    WolfCertServerCfg cli3 = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url3 };
+
+    WolfCertScepCaps caps3 = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_caps(&cli3, &caps3) == WOLFCERT_OK);
+    WolfCertBuffer ca3_pem = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli3, &ca3_pem) == WOLFCERT_OK);
+    DerBuffer* ca3_der = NULL;
+    REQUIRE(wc_PemToDer(ca3_pem.data, (long)ca3_pem.len, CERT_TYPE,
+                        &ca3_der, NULL, NULL, NULL) == 0);
+
+    WolfCertKey* dk3 = NULL;
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk3) == WOLFCERT_OK);
+    WolfCertCertMeta meta3 = { .subject_dn = "CN=scep-no-rnonce" };
+    WolfCertBuffer csr3 = { 0 };
+    REQUIRE(wolfcert_csr_build(dk3, &meta3, &csr3) == WOLFCERT_OK);
+    WolfCertBuffer out3 = { 0 };
+    REQUIRE(wolfcert_scep_pkcs_req(&cli3, &caps3, ca3_der->buffer, ca3_der->length,
+                                   dk3, csr3.data, csr3.len, &out3)
+            == WOLFCERT_ERR_PROTOCOL);
+
+    wolfcert_server_stop(s3);
+    pthread_join(tid3, NULL);
+    wolfcert_server_free(s3);
+    wc_FreeDer(&ca3_der);
+    wolfcert_buffer_free(&ca3_pem);
+    wolfcert_buffer_free(&csr3);
+    wolfcert_buffer_free(&out3);
+    wolfcert_key_free(dk3);
+
     wc_FreeDer(&ca_der);
     wc_FreeDer(&issued_der);
     wolfcert_buffer_free(&ca_pem);

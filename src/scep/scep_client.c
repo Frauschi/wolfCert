@@ -387,21 +387,19 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
         return rc;
     }
 
-    /* RFC 8894 section 3.2.1.2: when the CertRep carries a recipientNonce it
-     * MUST echo the senderNonce we sent. A mismatch means the response was
-     * not generated for our request (stale / replayed / cross-talk) -> reject.
-     * A missing recipientNonce is tolerated so we still interoperate with a
-     * peer that cannot emit it (e.g. a WOLFSSL_NO_MALLOC server stuck at the
-     * default MAX_SIGNED_ATTRIBS_SZ). */
-    if (rx_rn != NULL &&
-        (rx_rn_len != sizeof(nonce) ||
-         memcmp(rx_rn, nonce, sizeof(nonce)) != 0)) {
+    /* RFC 8894 section 3.2.1.2: the CertRep MUST carry a recipientNonce that
+     * echoes the senderNonce we sent. An absent or mismatched recipientNonce
+     * means the response cannot be tied to our request (stale / replayed /
+     * cross-talk / cannot verify) -> reject. */
+    if (rx_rn == NULL || rx_rn_len != sizeof(nonce) ||
+        memcmp(rx_rn, nonce, sizeof(nonce)) != 0) {
         WOLFCERT_XFREE(rx_rn,  heap);
         WOLFCERT_XFREE(status, heap);
         WOLFCERT_XFREE(rx_tid, heap);
         wolfcert_buffer_free(&resp_env);
         return WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
-                            "CertRep recipientNonce does not echo senderNonce");
+                            "CertRep recipientNonce missing or does not echo "
+                            "senderNonce");
     }
     WOLFCERT_XFREE(rx_rn, heap);
 

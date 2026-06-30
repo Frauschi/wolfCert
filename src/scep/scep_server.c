@@ -513,6 +513,10 @@ static int send_cert_rep(WolfCertServer* s, int fd,
     (void)snonce_len;
     (void)fail_info;
 #endif
+    if (s->cfg.scep_omit_recipient_nonce) {
+        attrs.recipient_nonce     = NULL;
+        attrs.recipient_nonce_len = 0;
+    }
 
     WolfCertBuffer pki_out = { 0 };
     rc = wolfcert_scep_build_pki_message(resp_env.data, resp_env.len,
