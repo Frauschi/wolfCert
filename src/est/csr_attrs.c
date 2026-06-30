@@ -576,14 +576,18 @@ int wolfcert_csr_attrs_apply(const WolfCertCsrAttrs* attrs,
          * time - doing it here (rather than in a separate branch) keeps
          * the "caller-supplied type wins" rule intact. */
         if (key_cfg->param == 0) {
-            if (attrs->preferred_key_type == WOLFCERT_KEY_RSA &&
-                attrs->preferred_rsa_bits > 0) {
-                key_cfg->param = attrs->preferred_rsa_bits;
+            if (attrs->preferred_key_type == WOLFCERT_KEY_RSA) {
+                /* RSA hints never carry a modulus size, so fall back to
+                 * a safe default rather than handing keygen a 0. */
+                key_cfg->param = attrs->preferred_rsa_bits > 0 ?
+                                    attrs->preferred_rsa_bits : 2048;
             }
-            else if (attrs->preferred_key_type == WOLFCERT_KEY_ECC &&
-                     attrs->preferred_ecc_curve_bits > 0) {
-                key_cfg->param = ecc_param_for_bits(
+            else if (attrs->preferred_key_type == WOLFCERT_KEY_ECC) {
+                int ecc_param = ecc_param_for_bits(
                                     attrs->preferred_ecc_curve_bits);
+                /* A bare sig-alg OID pins the curve to nothing usable;
+                 * default to P-256 so keygen still has a curve. */
+                key_cfg->param = ecc_param != 0 ? ecc_param : 256;
             }
             /* Ed25519 / Ed448 / ML-DSA 44/65/87: wolfCert's keygen
              * ignores `param` for these types, so leave it at 0. */
