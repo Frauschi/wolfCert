@@ -732,7 +732,11 @@ int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
     if (rc != WOLFCERT_OK)
         return rc;
 
-    if (resp.status_code == 204 || resp.body_len == 0) {
+    /* RFC 7030 section 4.5.2: both 204 and 404 mean the server has no CSR
+     * Attributes Response to offer; treat either (and an empty body) as a
+     * normal "no attributes" result rather than a transport error. */
+    if (resp.status_code == 204 || resp.status_code == 404 ||
+        resp.body_len == 0) {
         wolfcert_http_response_free(&resp);
         return WOLFCERT_OK;
     }

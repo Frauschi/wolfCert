@@ -26,7 +26,8 @@
  *
  * Separately, asserts that a server started without
  * csr_attributes_der replies HTTP 204 and the client returns
- * WOLFCERT_OK with an empty buffer.
+ * WOLFCERT_OK with an empty buffer, and that a 404 on /csrattrs
+ * (e.g. a misrouted URL) is likewise read as "no attributes".
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -191,6 +192,25 @@ int main(void)
     REQUIRE(wolfcert_est_get_csr_attrs(&cli2, &empty) == WOLFCERT_OK);
     REQUIRE(empty.data == NULL);
     REQUIRE(empty.len  == 0);
+
+    /* --- Case 3: a base URL with a stray path segment makes /csrattrs
+     *            resolve to an unknown suffix, so the server answers 404.
+     *            The client reads 404 like 204: WOLFCERT_OK + empty buffer,
+     *            rather than surfacing a transport error. */
+    char url404[160];
+    snprintf(url404, sizeof(url404),
+             "https://127.0.0.1:%u/.well-known/est/nope",
+             wolfcert_server_port(srv2));
+    WolfCertServerCfg cli404 = { .protocol = WOLFCERT_PROTO_EST,
+                                 .server_url = url404,
+                                 .trust_anchors = tls_cert,
+                                 .trust_anchors_len = tls_cert_len,
+                                 .verify_server = 1 };
+
+    WolfCertBuffer notfound = { 0 };
+    REQUIRE(wolfcert_est_get_csr_attrs(&cli404, &notfound) == WOLFCERT_OK);
+    REQUIRE(notfound.data == NULL);
+    REQUIRE(notfound.len  == 0);
 
     wolfcert_server_stop(srv2);
     pthread_join(tid2, NULL);
