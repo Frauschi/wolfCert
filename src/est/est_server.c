@@ -891,6 +891,15 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req)
         return rc;
     }
 
+    /* RFC 7030 section 3.5 lets an EST client bind the proof-of-possession to
+     * the TLS session by carrying the tls-unique channel binding (RFC 5929)
+     * inside the CSR (typically the PKCS#9 challengePassword), in which case
+     * the server MUST verify it. We currently do not implement this: the CSR
+     * is issued on its own merits without extracting any tls-unique value or
+     * comparing it against this connection's TLS Finished data. If channel
+     * binding is ever required, derive tls-unique from the TLS session here
+     * and reject the request when the embedded binding does not match. */
+
     /* Policy enforcement: reject CSRs that don't carry every
      * bare-OID Attribute advertised via /csrattrs. Done before
      * wolfcert_ca_issue so an offending client can't walk away with a
