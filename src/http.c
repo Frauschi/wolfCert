@@ -352,7 +352,7 @@ typedef struct {
 
 static int dyn_append(DynBuf* d, const void* data, size_t len)
 {
-    if (d->len + len > d->max)
+    if (len > d->max - d->len)
         return WOLFCERT_ERR_PROTOCOL;
 
     if (d->len + len > d->cap) {
@@ -494,7 +494,7 @@ static int decode_chunked(const uint8_t* in, size_t in_len,
             return WOLFCERT_OK;
         }
 
-        if (p + clen + 2 > in_len) {
+        if (clen > max_bytes || p + 2 > in_len || clen > in_len - p - 2) {
             WOLFCERT_XFREE(body.buf, heap);
             return WOLFCERT_ERR_PROTOCOL;
         }
