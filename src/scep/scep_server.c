@@ -469,7 +469,8 @@ static int send_cert_rep(WolfCertServer* s, int fd,
         }
 
         rc = wolfcert_scep_envelop(env_target, env_target_len,
-                                    p7.data, p7.len, SHA256h, &resp_env, s->heap);
+                                    p7.data, p7.len, AES128CBCb, &resp_env,
+                                    s->heap);
 
         wolfcert_buffer_free(&p7);
         if (rc != WOLFCERT_OK) {
@@ -488,7 +489,7 @@ static int send_cert_rep(WolfCertServer* s, int fd,
         static const uint8_t EMPTY_OCTET[2] = { 0x04, 0x00 };
         rc = wolfcert_scep_envelop(env_target, env_target_len,
                                     EMPTY_OCTET, sizeof(EMPTY_OCTET),
-                                    SHA256h, &resp_env, s->heap);
+                                    AES128CBCb, &resp_env, s->heap);
 
         if (rc != WOLFCERT_OK) {
             send_text(s, fd, 500, "Server Error", "text/plain", "");

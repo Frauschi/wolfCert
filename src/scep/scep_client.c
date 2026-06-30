@@ -292,13 +292,31 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
 {
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
     int hash_oid = pick_hash_oid(caps);
+    int enc_oid;
     out->heap = heap;
     out->fail_info = -1;
+
+    /* RFC 8894: the GetCACaps "AES" keyword advertises AES-128-CBC as the
+     * content cipher. Honour it when offered; otherwise fall back to the
+     * mandatory-to-implement triple DES-CBC. A wolfSSL built without 3DES
+     * cannot serve that fallback, so reject the legacy peer with a clear
+     * error instead of a cryptic encoder failure. */
+    if (caps != NULL && caps->aes) {
+        enc_oid = AES128CBCb;
+    }
+    else {
+#ifdef NO_DES3
+        return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+            "peer does not advertise AES and wolfSSL lacks 3DES fallback");
+#else
+        enc_oid = DES3b;
+#endif
+    }
 
     WolfCertBuffer env = { 0 };
     int rc = wolfcert_scep_envelop(ra_cert, ra_cert_len,
                                     envelope_content, envelope_content_len,
-                                    hash_oid, &env, heap);
+                                    enc_oid, &env, heap);
     if (rc != WOLFCERT_OK)
         return rc;
 
