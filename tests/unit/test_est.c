@@ -195,6 +195,29 @@ static void* srv_thread(void* arg)
     return NULL;
 }
 
+/* wolfcert_oid_to_dotted must decode the first two arcs correctly even when
+ * the leading byte is >= 120 (node1 == 2, node2 >= 40), not just for the
+ * common OIDs whose first byte is < 80. */
+static int test_oid_to_dotted(void)
+{
+    char out[128];
+
+    const uint8_t high[] = { 0x78, 0x03 };   /* 40*2 + 40 = 120 -> 2.40.3 */
+    wolfcert_oid_to_dotted(high, sizeof(high), out, sizeof(out));
+    REQUIRE(strcmp(out, "2.40.3") == 0);
+
+    const uint8_t low[] = { 0x2A, 0x03 };    /* 40*1 + 2 = 42 -> 1.2.3 */
+    wolfcert_oid_to_dotted(low, sizeof(low), out, sizeof(out));
+    REQUIRE(strcmp(out, "1.2.3") == 0);
+
+    /* An empty OID must still leave a valid, empty C string. */
+    memset(out, 'x', sizeof(out));
+    wolfcert_oid_to_dotted(NULL, 0, out, sizeof(out));
+    REQUIRE(out[0] == '\0');
+
+    return 0;
+}
+
 int main(void)
 {
     /* The mock TLS responder may wolfSSL_write() after the client has read its
@@ -203,6 +226,9 @@ int main(void)
     signal(SIGPIPE, SIG_IGN);
 
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+
+    if (test_oid_to_dotted())
+        return 1;
 
     uint8_t ca_der[4096];
     size_t ca_len = 0;

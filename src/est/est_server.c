@@ -785,29 +785,44 @@ static int csr_attrs_enforce(const WolfCertServer* s,
     return missing ? WOLFCERT_ERR_PROTOCOL : WOLFCERT_OK;
 }
 
+WOLFCERT_TEST_VIS size_t wolfcert_oid_to_dotted(const uint8_t* oid, size_t oid_len,
+                                                char* out, size_t out_cap)
+{
+    size_t off = 0;
+
+    /* Always leave a valid C string, even for an empty OID or zero capacity. */
+    if (out_cap > 0)
+        out[0] = '\0';
+
+    if (oid_len >= 1) {
+        /* First byte holds the first two arcs as 40*node1 + node2. node1 is
+         * capped at 2, so for a first byte >= 80 node2 is the remainder above
+         * 80 (node2 can exceed 40 only when node1 == 2). */
+        unsigned first  = oid[0] < 80 ? oid[0] / 40 : 2;
+        unsigned second = oid[0] < 80 ? oid[0] % 40 : oid[0] - 80u;
+        off += (size_t)snprintf(out + off, out_cap - off, "%u.%u",
+                                first, second);
+    }
+
+    unsigned long n = 0;
+    for (size_t i = 1; i < oid_len && off + 16 < out_cap; ++i) {
+        n = (n << 7) | (oid[i] & 0x7F);
+        if ((oid[i] & 0x80) == 0) {
+            off += (size_t)snprintf(out + off, out_cap - off, ".%lu", n);
+            n = 0;
+        }
+    }
+
+    return off;
+}
+
 /* Emit a 400 Bad Request whose body lists the missing OID in dotted
  * decimal. Helpful for humans debugging the round-trip. */
 static void send_missing_oid(WolfCertServer* s, int fd,
                              const uint8_t* oid, size_t oid_len)
 {
-    /* Render the OID. First byte holds first two arcs (40*a + b). */
     char txt[128];
-    size_t off = 0;
-    if (oid_len >= 1) {
-        unsigned first  = oid[0] / 40;
-        unsigned second = oid[0] % 40;
-        off += (size_t)snprintf(txt + off, sizeof(txt) - off, "%u.%u",
-                                first, second);
-    }
-
-    unsigned long n = 0;
-    for (size_t i = 1; i < oid_len && off + 16 < sizeof(txt); ++i) {
-        n = (n << 7) | (oid[i] & 0x7F);
-        if ((oid[i] & 0x80) == 0) {
-            off += (size_t)snprintf(txt + off, sizeof(txt) - off, ".%lu", n);
-            n = 0;
-        }
-    }
+    wolfcert_oid_to_dotted(oid, oid_len, txt, sizeof(txt));
 
     char body[192];
     int bl = snprintf(body, sizeof(body),
