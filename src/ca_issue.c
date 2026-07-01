@@ -36,6 +36,7 @@
 #include <wolfssl/wolfcrypt/ecc.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/memory.h>
 #ifdef WOLFCERT_HAVE_ED25519
 #  include <wolfssl/wolfcrypt/ed25519.h>
 #endif
@@ -297,6 +298,8 @@ void wolfcert_ca_free(WolfCertCa* ca)
     }
 
     WOLFCERT_XFREE(ca->cert_der, ca->heap);
+    if (ca->key_der != NULL && ca->key_der_len > 0)
+        wc_ForceZero(ca->key_der, ca->key_der_len);
     WOLFCERT_XFREE(ca->key_der,  ca->heap);
     memset(ca, 0, sizeof(*ca));
 }

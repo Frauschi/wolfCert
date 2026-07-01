@@ -24,6 +24,8 @@
 #include <wolfcert/errors.h>
 #include "internal.h"
 
+#include <wolfssl/wolfcrypt/memory.h>
+
 #include <errno.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -418,6 +420,7 @@ int wolfcert_store_write_key(WolfCertStoreOps* store, const char* key_name,
         return rc;
 
     rc = store->write(store->ctx, key_name, pem.data, pem.len, 1);
+    wc_ForceZero(pem.data, (word32)pem.len);
     wolfcert_buffer_free(&pem);
 
     return rc;

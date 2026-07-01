@@ -24,6 +24,8 @@
 #include <wolfcert/errors.h>
 #include "../internal.h"
 
+#include <wolfssl/wolfcrypt/memory.h>
+
 #include <stdio.h>
 #include <string.h>
 
@@ -275,6 +277,7 @@ int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
                         current_cert, current_cert_len,
                         key_pem.data, key_pem.len, out);
 
+    wc_ForceZero(key_pem.data, (word32)key_pem.len);
     wolfcert_buffer_free(&key_pem);
     return rc;
 }
