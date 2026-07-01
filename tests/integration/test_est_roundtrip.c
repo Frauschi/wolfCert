@@ -275,6 +275,58 @@ int main(void)
     wolfcert_buffer_free(&csr);
     wolfcert_key_free(dk);
 
+    /* Basic-auth must be a full-length exact match. A credential whose base64
+     * carries the correct token as a prefix plus trailing bytes must be
+     * rejected, not accepted by a prefix-only comparison. This server's
+     * "alice:hunter" is 12 bytes, so its base64 has no padding and the base64
+     * of the longer "alice:hunterABC" extends it cleanly. */
+    WolfCertServerCfgSrv acfg = {
+        .protocol        = WOLFCERT_PROTO_EST,
+        .bind_host       = "127.0.0.1", .bind_port = 0,
+        .http_basic_user = "alice", .http_basic_pass = "hunter",
+        .tls_cert_pem    = tls_cert, .tls_cert_pem_len = tls_cert_len,
+        .tls_key_pem     = tls_key,  .tls_key_pem_len  = tls_key_len,
+    };
+    WolfCertServer* as = NULL;
+    REQUIRE(wolfcert_server_start(&acfg, &as) == WOLFCERT_OK);
+    pthread_t atid;
+    REQUIRE(pthread_create(&atid, NULL, server_thread, as) == 0);
+
+    char aurl[128];
+    snprintf(aurl, sizeof(aurl), "https://127.0.0.1:%u/.well-known/est",
+             wolfcert_server_port(as));
+    WolfCertServerCfg acli = { .protocol = WOLFCERT_PROTO_EST, .server_url = aurl,
+                               .trust_anchors = tls_cert,
+                               .trust_anchors_len = tls_cert_len,
+                               .verify_server = 1,
+                               .username = "alice", .password = "hunter" };
+
+    WolfCertKeyCfg akcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* adk = NULL;
+    REQUIRE(wolfcert_key_generate(&akcfg, &adk) == WOLFCERT_OK);
+    WolfCertCertMeta ameta = { .subject_dn = "CN=auth-exact" };
+    WolfCertBuffer acsr = { 0 };
+    REQUIRE(wolfcert_csr_build(adk, &ameta, &acsr) == WOLFCERT_OK);
+
+    /* Exact credentials still enroll. */
+    WolfCertBuffer aok = { 0 };
+    REQUIRE(wolfcert_est_simple_enroll(&acli, acsr.data, acsr.len, &aok)
+            == WOLFCERT_OK);
+    wolfcert_buffer_free(&aok);
+
+    /* Correct token prefix plus trailing bytes must be rejected. */
+    acli.password = "hunterABC";
+    WolfCertBuffer abad = { 0 };
+    REQUIRE(wolfcert_est_simple_enroll(&acli, acsr.data, acsr.len, &abad)
+            == WOLFCERT_ERR_AUTH);
+
+    wolfcert_buffer_free(&acsr);
+    wolfcert_key_free(adk);
+    wolfcert_server_stop(as);
+    pthread_join(atid, NULL);
+    wolfcert_server_free(as);
+
     /* The pluggable transport must have been used for every request above. */
     REQUIRE(g_connect_calls > 0);
 

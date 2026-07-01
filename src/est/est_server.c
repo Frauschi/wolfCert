@@ -484,6 +484,10 @@ static void send_accepted_retry_after(WolfCertServer* s, int fd, int retry_after
     send_all(s, fd, hdr, (size_t)n);
 }
 
+/* HTTP Basic authentication scheme token, including its trailing space. */
+#define EST_BASIC_AUTH_SCHEME     "Basic "
+#define EST_BASIC_AUTH_SCHEME_LEN (sizeof(EST_BASIC_AUTH_SCHEME) - 1)
+
 static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
 {
     if (s->cfg_basic_user == NULL)
@@ -492,7 +496,8 @@ static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
     if (auth_header == NULL)
         return 0;
 
-    if (strncasecmp(auth_header, "Basic ", 6) != 0)
+    if (strncasecmp(auth_header, EST_BASIC_AUTH_SCHEME,
+                    EST_BASIC_AUTH_SCHEME_LEN) != 0)
         return 0;
 
     size_t ul = strlen(s->cfg_basic_user);
@@ -510,7 +515,17 @@ static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
     if (wolfcert_base64_encode(raw, ul + 1 + pl, &enc, s->heap) != WOLFCERT_OK)
         return 0;
 
-    int ok = strncmp(auth_header + 6, (char*)enc.data, enc.len) == 0;
+    /* Constant-time, full-length comparison of the base64 credential: reject
+     * on a length mismatch, then accumulate byte differences so the timing
+     * does not leak the length of the matching prefix. */
+    const char* tok = auth_header + EST_BASIC_AUTH_SCHEME_LEN;
+    int ok = (strlen(tok) == enc.len);
+    if (ok) {
+        unsigned acc = 0;
+        for (size_t i = 0; i < enc.len; ++i)
+            acc |= (unsigned)((unsigned char)tok[i] ^ enc.data[i]);
+        ok = (acc == 0);
+    }
     wolfcert_buffer_free(&enc);
 
     return ok;
