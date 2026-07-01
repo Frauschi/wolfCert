@@ -234,6 +234,29 @@ int main(void)
     if (enroll_check_san(&client_cfg))
         return 1;
 
+    /* Proof-of-possession: a CSR whose self-signature does not validate must
+     * be rejected. Build a valid CSR, corrupt a byte of its trailing
+     * signature value (DER structure stays intact so it still parses), and
+     * confirm the server refuses to issue. Credentials are still valid here,
+     * so a rejection can only come from the PoP check. */
+    WolfCertKeyCfg pop_kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+                                .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* pop_dk = NULL;
+    REQUIRE(wolfcert_key_generate(&pop_kcfg, &pop_dk) == WOLFCERT_OK);
+    WolfCertCertMeta pop_meta = { .subject_dn = "CN=pop-tamper" };
+    WolfCertBuffer pop_csr = { 0 };
+    REQUIRE(wolfcert_csr_build(pop_dk, &pop_meta, &pop_csr) == WOLFCERT_OK);
+    REQUIRE(pop_csr.len > 0);
+    pop_csr.data[pop_csr.len - 1] ^= 0x01;
+
+    WolfCertBuffer pop_out = { 0 };
+    REQUIRE(wolfcert_est_simple_enroll(&client_cfg, pop_csr.data, pop_csr.len,
+                                       &pop_out) != WOLFCERT_OK);
+    REQUIRE(pop_out.data == NULL);
+
+    wolfcert_buffer_free(&pop_csr);
+    wolfcert_key_free(pop_dk);
+
     /* Auth failure path - needs a CSR to send. */
     WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
