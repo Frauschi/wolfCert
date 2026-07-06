@@ -780,3 +780,39 @@ int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
 
     return WOLFCERT_OK;
 }
+
+int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert,
+                                    size_t signer_cert_len,
+                                    const uint8_t* ra_cert, size_t ra_cert_len,
+                                    void* heap)
+{
+    uint8_t* signer_spki = NULL;
+    size_t   signer_spki_len = 0;
+    uint8_t* ra_spki = NULL;
+    size_t   ra_spki_len = 0;
+    int      rc;
+
+    if (signer_cert == NULL || ra_cert == NULL)
+        return WOLFCERT_ERR_AUTH;
+
+    rc = wolfcert_extract_spki(signer_cert, signer_cert_len, 0,
+                               &signer_spki, &signer_spki_len, heap);
+    if (rc != WOLFCERT_OK)
+        return WOLFCERT_ERR_AUTH;
+
+    rc = wolfcert_extract_spki(ra_cert, ra_cert_len, 0,
+                               &ra_spki, &ra_spki_len, heap);
+    if (rc != WOLFCERT_OK) {
+        WOLFCERT_XFREE(signer_spki, heap);
+        return WOLFCERT_ERR_AUTH;
+    }
+
+    if (signer_spki_len != ra_spki_len ||
+            memcmp(signer_spki, ra_spki, signer_spki_len) != 0) {
+        rc = WOLFCERT_ERR_AUTH;
+    }
+
+    WOLFCERT_XFREE(signer_spki, heap);
+    WOLFCERT_XFREE(ra_spki, heap);
+    return rc;
+}

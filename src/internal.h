@@ -304,4 +304,12 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
 int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
                           uint8_t** out_spki, size_t* out_len, void* heap);
 
+/* RFC 8894: a CertRep must be signed by the CA/RA certificate the client
+ * fetched via GetCACert. Confirm the response signer certificate shares the
+ * RA certificate's public key. Returns WOLFCERT_OK on match, an error
+ * otherwise. */
+WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(
+    const uint8_t* signer_cert, size_t signer_cert_len,
+    const uint8_t* ra_cert, size_t ra_cert_len, void* heap);
+
 #endif /* WOLFCERT_INTERNAL_H */

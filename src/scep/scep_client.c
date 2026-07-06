@@ -372,19 +372,39 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
     size_t rx_sn_len  = 0;
     uint8_t* rx_rn  = NULL;
     size_t rx_rn_len  = 0;
+    uint8_t* rx_signer = NULL;
+    size_t rx_signer_len = 0;
     rc = wolfcert_scep_parse_pki_message(resp, resp_len, &resp_env,
             &rx_tid, &rx_tid_len, &rx_sn, &rx_sn_len, &rx_rn, &rx_rn_len,
-            &resp_mt, &status, NULL, NULL, heap);
+            &resp_mt, &status, &rx_signer, &rx_signer_len, heap);
 
     WOLFCERT_XFREE(resp,   heap);
     WOLFCERT_XFREE(rx_sn,  heap);
     WOLFCERT_XFREE(resp_mt, heap);
     if (rc != WOLFCERT_OK) {
+        WOLFCERT_XFREE(rx_signer, heap);
         WOLFCERT_XFREE(rx_rn,  heap);
         WOLFCERT_XFREE(status, heap);
         WOLFCERT_XFREE(rx_tid, heap);
         wolfcert_buffer_free(&resp_env);
         return rc;
+    }
+
+    /* wolfcert_scep_parse_pki_message only verifies the CMS signature against
+     * the cert embedded in the response, so a MITM on the (often plaintext)
+     * SCEP transport could forge a fully signed CertRep. Authenticate the
+     * response by requiring its signer to be the CA/RA cert fetched via
+     * GetCACert before trusting anything it carries. */
+    rc = wolfcert_scep_verify_rep_signer(rx_signer, rx_signer_len,
+                                         ra_cert, ra_cert_len, heap);
+    WOLFCERT_XFREE(rx_signer, heap);
+    if (rc != WOLFCERT_OK) {
+        WOLFCERT_XFREE(rx_rn,  heap);
+        WOLFCERT_XFREE(status, heap);
+        WOLFCERT_XFREE(rx_tid, heap);
+        wolfcert_buffer_free(&resp_env);
+        return WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "scep",
+                            "CertRep is not signed by the CA/RA certificate");
     }
 
     /* RFC 8894 section 3.2.1.2: the CertRep MUST carry a recipientNonce that

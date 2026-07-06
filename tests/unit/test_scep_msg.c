@@ -326,12 +326,49 @@ static int test_signer_subject_matches_csr(void)
     return 0;
 }
 
+/* RFC 8894: a CertRep must be signed by the CA/RA certificate the client
+ * fetched via GetCACert. A response signed by any other certificate, as a
+ * MITM or rogue server would forge, must be rejected before the client
+ * trusts the enclosed certificate. */
+static int test_cert_rep_signer_trust(void)
+{
+    uint8_t* ra_der  = NULL;
+    size_t   ra_len  = 0;
+    uint8_t* ra_key  = NULL;
+    size_t   ra_key_len = 0;
+    uint8_t* att_der = NULL;
+    size_t   att_len = 0;
+    uint8_t* att_key = NULL;
+    size_t   att_key_len = 0;
+
+    REQUIRE(make_ca(&ra_der,  &ra_len,  &ra_key,  &ra_key_len)  == 0);
+    REQUIRE(make_ca(&att_der, &att_len, &att_key, &att_key_len) == 0);
+
+    /* Signer whose key differs from the RA cert must be rejected. */
+    REQUIRE(wolfcert_scep_verify_rep_signer(att_der, att_len,
+                                            ra_der, ra_len, NULL)
+            != WOLFCERT_OK);
+
+    /* The genuine CA/RA signer is accepted. */
+    REQUIRE(wolfcert_scep_verify_rep_signer(ra_der, ra_len,
+                                            ra_der, ra_len, NULL)
+            == WOLFCERT_OK);
+
+    free(ra_der);
+    free(ra_key);
+    free(att_der);
+    free(att_key);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     if (test_non_success_has_no_envelope())
         return 1;
     if (test_signer_subject_matches_csr())
+        return 1;
+    if (test_cert_rep_signer_trust())
         return 1;
     wolfcert_cleanup();
     printf("OK\n");
