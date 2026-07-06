@@ -286,7 +286,7 @@ int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_
                             WolfCertBuffer* out_plain, void* heap);
 #ifdef WOLFCERT_HAVE_RSA
 WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
-    const char* subject_cn, uint8_t** out_der, size_t* out_len, void* heap);
+    const uint8_t* csr_der, size_t csr_len, uint8_t** out_der, size_t* out_len, void* heap);
 #endif
 WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_message(const uint8_t* envelope_der,
     size_t envelope_len, const uint8_t* signer_cert_der, size_t signer_cert_len,

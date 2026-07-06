@@ -37,6 +37,7 @@
 #include "internal.h"
 
 #include <wolfssl/options.h>
+#include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/random.h>
@@ -222,10 +223,115 @@ static int test_non_success_has_no_envelope(void)
     return rc;
 }
 
+/* Build a PKCS#10 CSR with a distinctive multi-RDN subject, DER-encoded and
+ * signed with `key`. Ownership of *csr_out passes to the caller (free with
+ * free()). */
+static int make_csr(RsaKey* key, WC_RNG* rng, const char* cn, const char* org,
+                    uint8_t** csr_out, size_t* csr_out_len)
+{
+    Cert*    req = NULL;
+    uint8_t* der = NULL;
+    int      ret = 0;
+    int      body_n = 0;
+    int      sign_n = 0;
+
+    req = wc_CertNew(NULL);
+    if (req == NULL)
+        return -1;
+
+    wc_InitCert_ex(req, NULL, INVALID_DEVID);
+    strncpy(req->subject.commonName, cn, CTC_NAME_SIZE - 1);
+    req->subject.commonName[CTC_NAME_SIZE - 1] = '\0';
+    strncpy(req->subject.org, org, CTC_NAME_SIZE - 1);
+    req->subject.org[CTC_NAME_SIZE - 1] = '\0';
+    req->sigType = CTC_SHA256wRSA;
+
+    der = (uint8_t*)malloc(4096);
+    if (der == NULL)
+        ret = -1;
+
+    if (ret == 0) {
+        body_n = wc_MakeCertReq(req, der, 4096, key, NULL);
+        if (body_n <= 0)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        sign_n = wc_SignCert(body_n, CTC_SHA256wRSA, der, 4096, key, NULL, rng);
+        if (sign_n <= 0)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        *csr_out     = der;
+        *csr_out_len = (size_t)sign_n;
+        der = NULL;   /* ownership transferred */
+    }
+
+    if (req != NULL)
+        wc_CertFree(req);
+    free(der);
+    return ret;
+}
+
+/* RFC 8894 section 2.3: the transient self-signed certificate that signs a
+ * PKCSReq must carry the same subject name as the enclosed PKCS#10 request.
+ * Build a CSR with a distinctive subject, generate the signer cert from it,
+ * and require the signer's subject DN to match the CSR's byte for byte. */
+static int test_signer_subject_matches_csr(void)
+{
+    RsaKey      key;
+    WC_RNG      rng;
+    uint8_t*    csr_der    = NULL;
+    size_t      csr_len    = 0;
+    uint8_t*    signer_der = NULL;
+    size_t      signer_len = 0;
+    DecodedCert csr_dc;
+    DecodedCert sgn_dc;
+    int         rc = 0;
+
+    REQUIRE(wc_InitRng(&rng) == 0);
+    REQUIRE(wc_InitRsaKey(&key, NULL) == 0);
+    REQUIRE(wc_MakeRsaKey(&key, 2048, WC_RSA_EXPONENT, &rng) == 0);
+
+    REQUIRE(make_csr(&key, &rng, "device-4711.example.org", "Widgets Inc",
+                     &csr_der, &csr_len) == 0);
+
+    REQUIRE(wolfcert_scep_self_signed_rsa(&key, csr_der, csr_len,
+                                          &signer_der, &signer_len, NULL)
+            == WOLFCERT_OK);
+
+    wc_InitDecodedCert(&csr_dc, csr_der, (word32)csr_len, NULL);
+    REQUIRE(wc_ParseCert(&csr_dc, CERTREQ_TYPE, NO_VERIFY, NULL) == 0);
+
+    wc_InitDecodedCert(&sgn_dc, signer_der, (word32)signer_len, NULL);
+    REQUIRE(wc_ParseCert(&sgn_dc, CERT_TYPE, NO_VERIFY, NULL) == 0);
+
+    /* The signer certificate subject DN must equal the CSR subject DN. */
+    if (sgn_dc.subjectRaw == NULL || csr_dc.subjectRaw == NULL ||
+            sgn_dc.subjectRawLen != csr_dc.subjectRawLen ||
+            memcmp(sgn_dc.subjectRaw, csr_dc.subjectRaw,
+                   (size_t)csr_dc.subjectRawLen) != 0) {
+        rc = 1;
+    }
+
+    wc_FreeDecodedCert(&csr_dc);
+    wc_FreeDecodedCert(&sgn_dc);
+    WOLFCERT_XFREE(signer_der, NULL);
+    free(csr_der);
+    wc_FreeRsaKey(&key);
+    wc_FreeRng(&rng);
+
+    REQUIRE(rc == 0);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     if (test_non_success_has_no_envelope())
+        return 1;
+    if (test_signer_subject_matches_csr())
         return 1;
     wolfcert_cleanup();
     printf("OK\n");

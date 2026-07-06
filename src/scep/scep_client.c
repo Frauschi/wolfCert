@@ -488,7 +488,7 @@ int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
     uint8_t* signer_der = NULL;
     size_t signer_len = 0;
     int rc = wolfcert_scep_self_signed_rsa((RsaKey*)new_key->impl,
-                                            "SCEP Enrollee",
+                                            csr_der, csr_der_len,
                                             &signer_der, &signer_len, heap);
     if (rc != WOLFCERT_OK)
         return rc;
@@ -662,16 +662,16 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
 
     /* For a pending PKCSReq the caller has no long-lived cert carrying
      * signer_key's pubkey, so we regenerate the same transient
-     * self-signed "SCEP Enrollee" cert that pkcs_req_ex wraps the
-     * original request with. RenewalReq callers supply their existing
-     * cert directly. */
+     * self-signed cert (subject copied from the CSR) that pkcs_req_ex
+     * wraps the original request with. RenewalReq callers supply their
+     * existing cert directly. */
     uint8_t* derived_signer = NULL;
     size_t derived_signer_len = 0;
     const uint8_t* eff_signer     = signer_cert;
     size_t         eff_signer_len = signer_cert_len;
     if (signer_cert == NULL) {
         rc = wolfcert_scep_self_signed_rsa((RsaKey*)signer_key->impl,
-                                            "SCEP Enrollee",
+                                            csr_der, csr_der_len,
                                             &derived_signer, &derived_signer_len,
                                             heap);
         if (rc != WOLFCERT_OK) {

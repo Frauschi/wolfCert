@@ -35,6 +35,7 @@
 
 #if defined(WOLFCERT_HAVE_SCEP) && defined(WOLFCERT_HAVE_RSA)
 #include <wolfssl/wolfcrypt/asn.h>
+#include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/random.h>
 #endif
@@ -144,12 +145,34 @@ static int test_scep_envelop_alg(void)
     uint8_t* ra_der = NULL;
     size_t ra_len = 0;
     WolfCertBuffer env = { 0 };
+    Cert* req = NULL;
+    uint8_t* csr_der = NULL;
+    int csr_body = 0;
+    int csr_len = 0;
 
     REQUIRE(wc_InitRng(&rng) == 0);
     REQUIRE(wc_InitRsaKey(&key, NULL) == 0);
     REQUIRE(wc_MakeRsaKey(&key, 2048, 65537L, &rng) == 0);
 
-    REQUIRE(wolfcert_scep_self_signed_rsa(&key, "scep-test",
+    /* wolfcert_scep_self_signed_rsa now derives the signer subject from an
+     * enclosed PKCS#10 request (RFC 8894 section 2.3), so build a minimal CSR
+     * to feed it. The subject is irrelevant to this test's cipher check. */
+    req = wc_CertNew(NULL);
+    REQUIRE(req != NULL);
+    wc_InitCert_ex(req, NULL, INVALID_DEVID);
+    strncpy(req->subject.commonName, "scep-test", CTC_NAME_SIZE - 1);
+    req->subject.commonName[CTC_NAME_SIZE - 1] = '\0';
+    req->sigType = CTC_SHA256wRSA;
+
+    csr_der = (uint8_t*)WOLFCERT_XMALLOC(4096, NULL);
+    REQUIRE(csr_der != NULL);
+    csr_body = wc_MakeCertReq(req, csr_der, 4096, &key, NULL);
+    REQUIRE(csr_body > 0);
+    csr_len = wc_SignCert(csr_body, CTC_SHA256wRSA, csr_der, 4096, &key, NULL,
+                          &rng);
+    REQUIRE(csr_len > 0);
+
+    REQUIRE(wolfcert_scep_self_signed_rsa(&key, csr_der, (size_t)csr_len,
                                           &ra_der, &ra_len, NULL) == WOLFCERT_OK);
 
     REQUIRE(wolfcert_scep_envelop(ra_der, ra_len, payload, sizeof(payload),
@@ -173,6 +196,8 @@ static int test_scep_envelop_alg(void)
 #endif
 
     WOLFCERT_XFREE(ra_der, NULL);
+    WOLFCERT_XFREE(csr_der, NULL);
+    wc_CertFree(req);
     wc_FreeRsaKey(&key);
     wc_FreeRng(&rng);
     return 0;

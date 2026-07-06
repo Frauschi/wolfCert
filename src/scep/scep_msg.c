@@ -317,34 +317,82 @@ int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_
 }
 
 WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
-    const char* subject_cn, uint8_t** out_der, size_t* out_len, void* heap)
+    const uint8_t* csr_der, size_t csr_len, uint8_t** out_der, size_t* out_len,
+    void* heap)
 {
-    Cert* cert = wc_CertNew(heap);
+    DecodedCert dc;
+    Cert*    cert;
+    WC_RNG   rng;
+    uint8_t* der;
+    size_t   cap = csr_len + 4096;
+    int      cn;
+    int      n;
+    int      rc;
+
+    if (key == NULL || csr_der == NULL || out_der == NULL || out_len == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    cert = wc_CertNew(heap);
     if (cert == NULL)
         return WOLFCERT_ERR_MEMORY;
 
     wc_InitCert_ex(cert, heap, WOLFCERT_DEVID_SOFTWARE);
-    strncpy(cert->subject.commonName, subject_cn, CTC_NAME_SIZE - 1);
-    cert->subject.commonName[CTC_NAME_SIZE - 1] = '\0';
+
+    /* RFC 8894 section 2.3: the signer certificate SHOULD carry the same
+     * subject name as the enclosed PKCS#10 request. The certificate is
+     * self-signed, so its issuer name is the same DN.
+     *
+     * wolfSSL recovers the raw name length with XSTRLEN while encoding, so the
+     * raw-name path cannot represent a DN that contains a 0x00 byte (e.g. a
+     * BMPString value or a length octet whose low byte is zero). Use it only
+     * for a NUL-free DN that leaves room for a terminator, and fall back to the
+     * request's common name otherwise. The signer subject is not security
+     * relevant: issuance binds on the public key, not this name. */
+    wc_InitDecodedCert(&dc, (const byte*)csr_der, (word32)csr_len, heap);
+    rc = wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL);
+    if (rc != 0) {
+        wc_FreeDecodedCert(&dc);
+        wc_CertFree(cert);
+        return WOLFCERT_ERR_PARSE;
+    }
+
+    if (dc.subjectRaw != NULL && dc.subjectRawLen > 0 &&
+            dc.subjectRawLen < (int)sizeof(cert->sbjRaw) &&
+            memchr(dc.subjectRaw, 0x00, (size_t)dc.subjectRawLen) == NULL) {
+        memcpy(cert->sbjRaw, dc.subjectRaw, (size_t)dc.subjectRawLen);
+        cert->sbjRaw[dc.subjectRawLen] = '\0';
+        memcpy(cert->issRaw, dc.subjectRaw, (size_t)dc.subjectRawLen);
+        cert->issRaw[dc.subjectRawLen] = '\0';
+    }
+    else if (dc.subjectCN != NULL && dc.subjectCNLen > 0) {
+        cn = dc.subjectCNLen < CTC_NAME_SIZE - 1
+             ? dc.subjectCNLen : CTC_NAME_SIZE - 1;
+        memcpy(cert->subject.commonName, dc.subjectCN, (size_t)cn);
+        cert->subject.commonName[cn] = '\0';
+    }
+    else {
+        strncpy(cert->subject.commonName, "SCEP Enrollee", CTC_NAME_SIZE - 1);
+        cert->subject.commonName[CTC_NAME_SIZE - 1] = '\0';
+    }
+    wc_FreeDecodedCert(&dc);
+
     cert->selfSigned = 1;
     cert->sigType    = CTC_SHA256wRSA;
     cert->daysValid  = 2;
 
-    WC_RNG rng;
     if (wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE) != 0) {
         wc_CertFree(cert);
         return WOLFCERT_ERR_CRYPTO;
     }
 
-    size_t cap = 4096;
-    uint8_t* der = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
+    der = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
     if (der == NULL) {
         wc_FreeRng(&rng);
         wc_CertFree(cert);
         return WOLFCERT_ERR_MEMORY;
     }
 
-    int n = wc_MakeSelfCert(cert, der, (word32)cap, key, &rng);
+    n = wc_MakeSelfCert(cert, der, (word32)cap, key, &rng);
 
     wc_FreeRng(&rng);
     wc_CertFree(cert);
