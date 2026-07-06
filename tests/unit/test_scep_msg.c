@@ -361,6 +361,38 @@ static int test_cert_rep_signer_trust(void)
     return 0;
 }
 
+/* RFC 8894: an enrollment response must be a CertRep (messageType "3") whose
+ * transactionID echoes the request. A mismatched transactionID or a wrong
+ * messageType must be rejected so a follow-up poll cannot run under the wrong
+ * transaction. */
+static int test_cert_rep_txid_and_type(void)
+{
+    static const uint8_t sent[8]  = { 'a','b','c','d','e','f','0','1' };
+    static const uint8_t other[8] = { 'a','b','c','d','e','f','0','2' };
+
+    /* Correct messageType with an echoed transactionID is accepted. */
+    REQUIRE(wolfcert_scep_check_cert_rep("3", sent, sizeof(sent),
+                                         sent, sizeof(sent)) == WOLFCERT_OK);
+
+    /* A transactionID that does not echo the request is rejected. */
+    REQUIRE(wolfcert_scep_check_cert_rep("3", other, sizeof(other),
+                                         sent, sizeof(sent)) != WOLFCERT_OK);
+
+    /* A transactionID of a different length is rejected. */
+    REQUIRE(wolfcert_scep_check_cert_rep("3", sent, sizeof(sent) - 1,
+                                         sent, sizeof(sent)) != WOLFCERT_OK);
+
+    /* A messageType other than CertRep ("3") is rejected. */
+    REQUIRE(wolfcert_scep_check_cert_rep("19", sent, sizeof(sent),
+                                         sent, sizeof(sent)) != WOLFCERT_OK);
+
+    /* A missing messageType is rejected. */
+    REQUIRE(wolfcert_scep_check_cert_rep(NULL, sent, sizeof(sent),
+                                         sent, sizeof(sent)) != WOLFCERT_OK);
+
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -369,6 +401,8 @@ int main(void)
     if (test_signer_subject_matches_csr())
         return 1;
     if (test_cert_rep_signer_trust())
+        return 1;
+    if (test_cert_rep_txid_and_type())
         return 1;
     wolfcert_cleanup();
     printf("OK\n");

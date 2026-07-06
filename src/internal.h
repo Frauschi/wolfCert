@@ -312,4 +312,11 @@ WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(
     const uint8_t* signer_cert, size_t signer_cert_len,
     const uint8_t* ra_cert, size_t ra_cert_len, void* heap);
 
+/* RFC 8894: an enrollment response must be a CertRep (messageType "3") whose
+ * transactionID echoes the one the client sent. Returns WOLFCERT_OK when both
+ * hold, WOLFCERT_ERR_PROTOCOL otherwise. */
+WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
+    const uint8_t* rx_tid, size_t rx_tid_len,
+    const uint8_t* sent_tid, size_t sent_tid_len);
+
 #endif /* WOLFCERT_INTERNAL_H */

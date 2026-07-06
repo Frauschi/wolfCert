@@ -816,3 +816,17 @@ int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert,
     WOLFCERT_XFREE(ra_spki, heap);
     return rc;
 }
+
+int wolfcert_scep_check_cert_rep(const char* msg_type,
+                                 const uint8_t* rx_tid, size_t rx_tid_len,
+                                 const uint8_t* sent_tid, size_t sent_tid_len)
+{
+    if (msg_type == NULL || strcmp(msg_type, "3") != 0)
+        return WOLFCERT_ERR_PROTOCOL;
+
+    if (rx_tid == NULL || sent_tid == NULL || rx_tid_len != sent_tid_len ||
+            memcmp(rx_tid, sent_tid, sent_tid_len) != 0)
+        return WOLFCERT_ERR_PROTOCOL;
+
+    return WOLFCERT_OK;
+}

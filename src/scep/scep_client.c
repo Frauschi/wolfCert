@@ -380,6 +380,21 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
 
     WOLFCERT_XFREE(resp,   heap);
     WOLFCERT_XFREE(rx_sn,  heap);
+    if (rc != WOLFCERT_OK) {
+        WOLFCERT_XFREE(resp_mt, heap);
+        WOLFCERT_XFREE(rx_signer, heap);
+        WOLFCERT_XFREE(rx_rn,  heap);
+        WOLFCERT_XFREE(status, heap);
+        WOLFCERT_XFREE(rx_tid, heap);
+        wolfcert_buffer_free(&resp_env);
+        return rc;
+    }
+
+    /* RFC 8894: an enrollment response is a CertRep (messageType 3) whose
+     * transactionID echoes the one we sent. Reject a response that claims a
+     * different type or transaction before consuming it. */
+    rc = wolfcert_scep_check_cert_rep(resp_mt, rx_tid, rx_tid_len,
+                                      txid, txid_len);
     WOLFCERT_XFREE(resp_mt, heap);
     if (rc != WOLFCERT_OK) {
         WOLFCERT_XFREE(rx_signer, heap);
@@ -387,7 +402,9 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
         WOLFCERT_XFREE(status, heap);
         WOLFCERT_XFREE(rx_tid, heap);
         wolfcert_buffer_free(&resp_env);
-        return rc;
+        return WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
+                            "CertRep messageType or transactionID does not "
+                            "match the request");
     }
 
     /* wolfcert_scep_parse_pki_message only verifies the CMS signature against
