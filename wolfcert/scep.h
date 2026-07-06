@@ -147,8 +147,16 @@ WOLFCERT_API int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
  * of the current CA's expiry, so the device can install the new trust
  * anchor before the old one stops being honored. Returns
  * WOLFCERT_ERR_NOT_FOUND when the server has no roll-over configured
- * (HTTP 404). */
+ * (HTTP 404).
+ *
+ * The response is a CMS SignedData signed by the current CA. current_ca_der is
+ * the current CA certificate in DER (previously fetched via GetCACert and
+ * verified out of band) and is required: the roll-over message is rejected
+ * unless its SignedData signer shares that CA's public key, so a substituted
+ * roll-over CA over an untrusted transport is refused. */
 WOLFCERT_API int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
+                                                const uint8_t* current_ca_der,
+                                                size_t current_ca_len,
                                                 WolfCertBuffer* out_next_ca_pem);
 
 #ifdef __cplusplus

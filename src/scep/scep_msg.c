@@ -529,6 +529,39 @@ int wolfcert_scep_build_next_ca_response(const uint8_t* next_ca_cert,
     return rc;
 }
 
+int wolfcert_scep_verify_next_ca_response(const uint8_t* resp_der, size_t resp_len,
+                                          const uint8_t* current_ca_der,
+                                          size_t current_ca_len,
+                                          WolfCertBuffer* out_pem, void* heap)
+{
+    WolfCertBuffer content = { 0 };
+    uint8_t* signer = NULL;
+    size_t   signer_len = 0;
+    int      rc;
+
+    if (resp_der == NULL || current_ca_der == NULL || out_pem == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    rc = wolfcert_scep_parse_pki_message(resp_der, resp_len, &content,
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+            &signer, &signer_len, heap);
+
+    /* Bind the rollover message to the trusted current CA: its SignedData
+     * signer must share that CA's public key. */
+    if (rc == WOLFCERT_OK) {
+        rc = wolfcert_scep_verify_rep_signer(signer, signer_len,
+                                             current_ca_der, current_ca_len, heap);
+    }
+
+    if (rc == WOLFCERT_OK) {
+        rc = wolfcert_pkcs7_certs_to_pem(content.data, content.len, out_pem, heap);
+    }
+
+    WOLFCERT_XFREE(signer, heap);
+    wolfcert_buffer_free(&content);
+    return rc;
+}
+
 WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     size_t pki_len, WolfCertBuffer* out_envelope, uint8_t** out_transaction_id,
     size_t* out_tid_len, uint8_t** out_sender_nonce, size_t* out_snonce_len,

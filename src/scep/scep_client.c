@@ -736,9 +736,12 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
 }
 
 int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
+                                   const uint8_t* current_ca_der,
+                                   size_t current_ca_len,
                                    WolfCertBuffer* out_next_ca_pem)
 {
-    if (srv == NULL || srv->server_url == NULL || out_next_ca_pem == NULL)
+    if (srv == NULL || srv->server_url == NULL ||
+            current_ca_der == NULL || out_next_ca_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
@@ -769,17 +772,12 @@ int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
 
     /* RFC 8894 section 4.6.1: the body is a SignedData signed by the current
      * CA whose content is a degenerate certs-only bundle carrying the next CA
-     * certificate. Verify the signature, then extract the certs from the
-     * signed content rather than the outer signer certificate. */
-    WolfCertBuffer inner = { 0 };
-    rc = wolfcert_scep_parse_pki_message(resp.body, resp.body_len, &inner,
-            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, heap);
-    if (rc == WOLFCERT_OK) {
-        rc = wolfcert_pkcs7_certs_to_pem(inner.data, inner.len,
-                                          out_next_ca_pem, heap);
-    }
+     * certificate. Verify the signature, bind it to the trusted current CA,
+     * then extract the certs from the signed content rather than the outer
+     * signer certificate. */
+    rc = wolfcert_scep_verify_next_ca_response(resp.body, resp.body_len,
+            current_ca_der, current_ca_len, out_next_ca_pem, heap);
 
-    wolfcert_buffer_free(&inner);
     wolfcert_http_response_free(&resp);
     return rc;
 }

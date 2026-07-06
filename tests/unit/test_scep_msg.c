@@ -443,6 +443,66 @@ static int test_next_ca_response_is_signed(void)
     return 0;
 }
 
+/* RFC 8894 section 4.6.1: the client must bind the GetNextCACert response to
+ * the current CA it already trusts. A response validated against a different
+ * (attacker) CA must be rejected, while the genuine current CA is accepted. */
+static int test_next_ca_response_signer_trust(void)
+{
+    uint8_t* ca_der   = NULL;
+    size_t   ca_len   = 0;
+    uint8_t* ca_key   = NULL;
+    size_t   ca_key_len = 0;
+    uint8_t* att_der  = NULL;
+    size_t   att_len  = 0;
+    uint8_t* att_key  = NULL;
+    size_t   att_key_len = 0;
+    uint8_t* next_der = NULL;
+    size_t   next_len = 0;
+    uint8_t* next_key = NULL;
+    size_t   next_key_len = 0;
+    WolfCertBuffer resp = { 0 };
+    WolfCertBuffer pem  = { 0 };
+
+    REQUIRE(make_ca(&ca_der,   &ca_len,   &ca_key,   &ca_key_len)   == 0);
+    REQUIRE(make_ca(&att_der,  &att_len,  &att_key,  &att_key_len)  == 0);
+    REQUIRE(make_ca(&next_der, &next_len, &next_key, &next_key_len) == 0);
+
+    /* Roll-over response signed by the genuine current CA. */
+    REQUIRE(wolfcert_scep_build_next_ca_response(next_der, next_len,
+                                                 ca_der, ca_len,
+                                                 ca_key, ca_key_len,
+                                                 &resp, NULL) == WOLFCERT_OK);
+
+    /* Accepted when bound to the CA that actually signed it. */
+    REQUIRE(wolfcert_scep_verify_next_ca_response(resp.data, resp.len,
+                                                  ca_der, ca_len,
+                                                  &pem, NULL) == WOLFCERT_OK);
+    REQUIRE(pem.len > 0);
+    wolfcert_buffer_free(&pem);
+
+    /* Rejected when bound to a different CA: the signer is not trusted. */
+    REQUIRE(wolfcert_scep_verify_next_ca_response(resp.data, resp.len,
+                                                  att_der, att_len,
+                                                  &pem, NULL) != WOLFCERT_OK);
+    wolfcert_buffer_free(&pem);
+
+    /* Binding is mandatory: a NULL current CA must be rejected, not silently
+     * skipped. */
+    REQUIRE(wolfcert_scep_verify_next_ca_response(resp.data, resp.len,
+                                                  NULL, 0, &pem, NULL)
+            == WOLFCERT_ERR_BAD_ARG);
+    wolfcert_buffer_free(&pem);
+
+    wolfcert_buffer_free(&resp);
+    free(ca_der);
+    free(ca_key);
+    free(att_der);
+    free(att_key);
+    free(next_der);
+    free(next_key);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -455,6 +515,8 @@ int main(void)
     if (test_cert_rep_txid_and_type())
         return 1;
     if (test_next_ca_response_is_signed())
+        return 1;
+    if (test_next_ca_response_signer_trust())
         return 1;
     wolfcert_cleanup();
     printf("OK\n");

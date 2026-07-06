@@ -329,4 +329,13 @@ WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
     const uint8_t* rx_tid, size_t rx_tid_len,
     const uint8_t* sent_tid, size_t sent_tid_len);
 
+/* Validate a GetNextCACert response (RFC 8894 section 4.6.1): verify it is a
+ * SignedData, bind its signer to the trusted current CA (required), and extract
+ * the enclosed rollover certificate(s) as PEM. Rejects an unsigned response or
+ * one not signed by the current CA. */
+WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(
+    const uint8_t* resp_der, size_t resp_len,
+    const uint8_t* current_ca_der, size_t current_ca_len,
+    WolfCertBuffer* out_pem, void* heap);
+
 #endif /* WOLFCERT_INTERNAL_H */

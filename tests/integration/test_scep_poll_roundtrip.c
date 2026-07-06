@@ -167,8 +167,15 @@ static int next_ca_path(WolfCertServer* s)
 
     WolfCertBuffer current = { 0 };
     REQUIRE(wolfcert_scep_get_ca_cert(&cli, &current) == WOLFCERT_OK);
+    DerBuffer* current_der = NULL;
+    REQUIRE(wc_PemToDer(current.data, (long)current.len, CERT_TYPE,
+                        &current_der, NULL, NULL, NULL) == 0);
+
+    /* Bound to the current CA that signed the response: accepted. */
     WolfCertBuffer next = { 0 };
-    REQUIRE(wolfcert_scep_get_next_ca_cert(&cli, &next) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_get_next_ca_cert(&cli, current_der->buffer,
+                                           current_der->length, &next)
+            == WOLFCERT_OK);
     REQUIRE(memmem(next.data, next.len, "BEGIN CERTIFICATE", 17) != NULL);
 
     /* Roll-over CA must differ from the current CA. */
@@ -177,10 +184,25 @@ static int next_ca_path(WolfCertServer* s)
 
     /* Second call must return the cached next CA (same bytes). */
     WolfCertBuffer next2 = { 0 };
-    REQUIRE(wolfcert_scep_get_next_ca_cert(&cli, &next2) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_get_next_ca_cert(&cli, current_der->buffer,
+                                           current_der->length, &next2)
+            == WOLFCERT_OK);
     REQUIRE(next.len == next2.len);
     REQUIRE(memcmp(next.data, next2.data, next.len) == 0);
 
+    /* Bound to a CA that did not sign the response (the roll-over CA itself,
+     * which the current CA signs over): rejected. */
+    DerBuffer* rollover_der = NULL;
+    REQUIRE(wc_PemToDer(next.data, (long)next.len, CERT_TYPE,
+                        &rollover_der, NULL, NULL, NULL) == 0);
+    WolfCertBuffer reject = { 0 };
+    REQUIRE(wolfcert_scep_get_next_ca_cert(&cli, rollover_der->buffer,
+                                           rollover_der->length, &reject)
+            != WOLFCERT_OK);
+
+    wc_FreeDer(&rollover_der);
+    wc_FreeDer(&current_der);
+    wolfcert_buffer_free(&reject);
     wolfcert_buffer_free(&current);
     wolfcert_buffer_free(&next);
     wolfcert_buffer_free(&next2);
@@ -206,9 +228,19 @@ static int next_ca_disabled_path(void)
     REQUIRE(wolfcert_scep_get_ca_caps(&cli, &caps) == WOLFCERT_OK);
     REQUIRE(caps.get_next_ca_cert == 0);
 
+    WolfCertBuffer ca = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli, &ca) == WOLFCERT_OK);
+    DerBuffer* ca_der = NULL;
+    REQUIRE(wc_PemToDer(ca.data, (long)ca.len, CERT_TYPE,
+                        &ca_der, NULL, NULL, NULL) == 0);
+
     WolfCertBuffer next = { 0 };
-    int rc = wolfcert_scep_get_next_ca_cert(&cli, &next);
+    int rc = wolfcert_scep_get_next_ca_cert(&cli, ca_der->buffer,
+                                            ca_der->length, &next);
     REQUIRE(rc == WOLFCERT_ERR_NOT_FOUND);
+
+    wc_FreeDer(&ca_der);
+    wolfcert_buffer_free(&ca);
 
     wolfcert_server_stop(s);
     pthread_join(tid, NULL);

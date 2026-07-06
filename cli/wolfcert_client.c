@@ -1005,8 +1005,36 @@ static int cmd_getnextca(int argc, char** argv)
         return 1;
     }
 
+    /* The roll-over message is signed by the current CA, so fetch that CA
+     * first and require the response to be signed by it. */
+    WolfCertBuffer ca_pem = { 0 };
+    int rc = wolfcert_scep_get_ca_cert(&srv, &ca_pem);
+    if (rc != WOLFCERT_OK) {
+        fprintf(stderr, "getnextca: %s\n", wolfcert_strerror(rc));
+        free(trust_hold);
+        free(mt_cert);
+        free(mt_key);
+        opts_free(&opts);
+        return 2;
+    }
+
+    DerBuffer* ca_der = NULL;
+    if (wc_PemToDer(ca_pem.data, (long)ca_pem.len, CERT_TYPE,
+                    &ca_der, NULL, NULL, NULL) != 0) {
+        fprintf(stderr, "getnextca: cannot decode current CA certificate\n");
+        wolfcert_buffer_free(&ca_pem);
+        free(trust_hold);
+        free(mt_cert);
+        free(mt_key);
+        opts_free(&opts);
+        return 2;
+    }
+
     WolfCertBuffer pem = { 0 };
-    int rc = wolfcert_scep_get_next_ca_cert(&srv, &pem);
+    rc = wolfcert_scep_get_next_ca_cert(&srv, ca_der->buffer, ca_der->length,
+                                        &pem);
+    wc_FreeDer(&ca_der);
+    wolfcert_buffer_free(&ca_pem);
     if (rc != WOLFCERT_OK) {
         fprintf(stderr, "getnextca: %s\n", wolfcert_strerror(rc));
         free(trust_hold);
