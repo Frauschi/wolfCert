@@ -39,6 +39,7 @@
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
+#include <wolfssl/wolfcrypt/pkcs7.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/random.h>
 
@@ -503,6 +504,123 @@ static int test_next_ca_response_signer_trust(void)
     return 0;
 }
 
+/* Build a SignedData signed by signer_cert/signer_key, but prepend extra_cert
+ * so the bundle carries it as the first certificate while the SignerInfo still
+ * identifies signer_cert. Ownership of *out passes to the caller (free()). */
+static int make_two_cert_signed(const uint8_t* signer_cert, size_t signer_cert_len,
+                                const uint8_t* signer_key, size_t signer_key_len,
+                                const uint8_t* extra_cert, size_t extra_cert_len,
+                                uint8_t** out, size_t* out_len)
+{
+    static const uint8_t content[3] = { 0xDE, 0xAD, 0xBE };
+    PKCS7*   p7 = NULL;
+    WC_RNG   rng;
+    uint8_t* buf = NULL;
+    int      have_rng = 0;
+    int      ret = 0;
+    int      n = 0;
+
+    if (wc_InitRng(&rng) != 0)
+        return -1;
+    have_rng = 1;
+
+    p7 = wc_PKCS7_New(NULL, INVALID_DEVID);
+    if (p7 == NULL)
+        ret = -1;
+
+    if (ret == 0 &&
+            wc_PKCS7_InitWithCert(p7, (byte*)signer_cert, (word32)signer_cert_len) != 0)
+        ret = -1;
+
+    /* Prepend a second certificate so the signer is no longer cert[0]. */
+    if (ret == 0 &&
+            wc_PKCS7_AddCertificate(p7, (byte*)extra_cert, (word32)extra_cert_len) != 0)
+        ret = -1;
+
+    if (ret == 0) {
+        buf = (uint8_t*)malloc(8192);
+        if (buf == NULL)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        p7->rng          = &rng;
+        p7->privateKey   = (byte*)signer_key;
+        p7->privateKeySz = (word32)signer_key_len;
+        p7->encryptOID   = RSAk;
+        p7->hashOID      = SHA256h;
+        p7->content      = (byte*)content;
+        p7->contentSz    = sizeof(content);
+
+        n = wc_PKCS7_EncodeSignedData(p7, buf, 8192);
+        if (n <= 0)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        *out     = buf;
+        *out_len = (size_t)n;
+        buf = NULL;
+    }
+
+    free(buf);
+    if (p7 != NULL)
+        wc_PKCS7_Free(p7);
+    if (have_rng)
+        wc_FreeRng(&rng);
+    return ret;
+}
+
+/* A SignedData verifier trusts the certificate that actually produced the
+ * signature, which wolfSSL matches by SignerInfo identity, not the first cert
+ * in the bundle. A message signed by an attacker key but carrying a trusted
+ * cert first must surface the attacker cert as the signer so the trust check
+ * against the trusted CA rejects it. */
+static int test_signer_is_verified_cert(void)
+{
+    uint8_t* ca_der   = NULL;
+    size_t   ca_len   = 0;
+    uint8_t* ca_key   = NULL;
+    size_t   ca_key_len = 0;
+    uint8_t* att_der  = NULL;
+    size_t   att_len  = 0;
+    uint8_t* att_key  = NULL;
+    size_t   att_key_len = 0;
+    uint8_t* msg      = NULL;
+    size_t   msg_len  = 0;
+    WolfCertBuffer env = { 0 };
+    uint8_t* signer   = NULL;
+    size_t   signer_len = 0;
+
+    REQUIRE(make_ca(&ca_der,  &ca_len,  &ca_key,  &ca_key_len)  == 0);
+    REQUIRE(make_ca(&att_der, &att_len, &att_key, &att_key_len) == 0);
+
+    /* Signed by the attacker key, but the trusted CA cert is cert[0]. */
+    REQUIRE(make_two_cert_signed(att_der, att_len, att_key, att_key_len,
+                                 ca_der, ca_len, &msg, &msg_len) == 0);
+
+    REQUIRE(wolfcert_scep_parse_pki_message(msg, msg_len, &env,
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+            &signer, &signer_len, NULL) == WOLFCERT_OK);
+
+    /* The parser must surface the cert that signed, not cert[0]. */
+    REQUIRE(signer != NULL);
+    REQUIRE(signer_len == att_len && memcmp(signer, att_der, att_len) == 0);
+
+    /* Binding that real signer to the trusted CA must therefore fail. */
+    REQUIRE(wolfcert_scep_verify_rep_signer(signer, signer_len,
+                                            ca_der, ca_len, NULL) != WOLFCERT_OK);
+
+    WOLFCERT_XFREE(signer, NULL);
+    wolfcert_buffer_free(&env);
+    free(msg);
+    free(ca_der);
+    free(ca_key);
+    free(att_der);
+    free(att_key);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -517,6 +635,8 @@ int main(void)
     if (test_next_ca_response_is_signed())
         return 1;
     if (test_next_ca_response_signer_trust())
+        return 1;
+    if (test_signer_is_verified_cert())
         return 1;
     wolfcert_cleanup();
     printf("OK\n");

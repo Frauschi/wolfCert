@@ -607,12 +607,16 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     if (out_signer_cert != NULL && out_signer_cert_len != NULL) {
         *out_signer_cert = NULL;
         *out_signer_cert_len = 0;
-        if (p7->cert[0] != NULL && p7->certSz[0] > 0) {
-            uint8_t* sc = (uint8_t*)WOLFCERT_XMALLOC(p7->certSz[0], heap);
+        /* Return the certificate that actually produced the verified
+         * signature, which wolfSSL matches by SignerInfo identity. It is not
+         * necessarily the first certificate in the bundle, so a caller binding
+         * the signer to a trust anchor must not trust cert[0]. */
+        if (p7->verifyCert != NULL && p7->verifyCertSz > 0) {
+            uint8_t* sc = (uint8_t*)WOLFCERT_XMALLOC(p7->verifyCertSz, heap);
             if (sc != NULL) {
-                memcpy(sc, p7->cert[0], p7->certSz[0]);
+                memcpy(sc, p7->verifyCert, p7->verifyCertSz);
                 *out_signer_cert     = sc;
-                *out_signer_cert_len = p7->certSz[0];
+                *out_signer_cert_len = p7->verifyCertSz;
             }
         }
     }
