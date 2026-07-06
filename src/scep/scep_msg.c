@@ -495,6 +495,40 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_message(const uint8_t* envelope_de
     return WOLFCERT_OK;
 }
 
+int wolfcert_scep_build_next_ca_response(const uint8_t* next_ca_cert,
+                                         size_t next_ca_cert_len,
+                                         const uint8_t* ca_cert, size_t ca_cert_len,
+                                         const uint8_t* ca_key, size_t ca_key_len,
+                                         WolfCertBuffer* out_der, void* heap)
+{
+    const uint8_t* cs[1];
+    size_t         cl[1];
+    WolfCertBuffer inner = { 0 };
+    WolfCertScepAttrs attrs;
+    int rc;
+
+    if (next_ca_cert == NULL || ca_cert == NULL || ca_key == NULL ||
+            out_der == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    cs[0] = next_ca_cert;
+    cl[0] = next_ca_cert_len;
+    rc = wolfcert_pkcs7_build_certs_only(cs, cl, 1, &inner, heap);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    /* Sign the certs-only bundle with the current CA key, carrying no SCEP
+     * signed attributes: this is a plain SignedData, not a pkiMessage. */
+    memset(&attrs, 0, sizeof(attrs));
+    rc = wolfcert_scep_build_pki_message(inner.data, inner.len,
+                                         ca_cert, ca_cert_len,
+                                         ca_key, ca_key_len,
+                                         SHA256h, &attrs, out_der, heap);
+
+    wolfcert_buffer_free(&inner);
+    return rc;
+}
+
 WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     size_t pki_len, WolfCertBuffer* out_envelope, uint8_t** out_transaction_id,
     size_t* out_tid_len, uint8_t** out_sender_nonce, size_t* out_snonce_len,

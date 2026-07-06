@@ -393,6 +393,56 @@ static int test_cert_rep_txid_and_type(void)
     return 0;
 }
 
+/* RFC 8894 section 4.6.1: the GetNextCACert response must be a SignedData
+ * signed by the current CA, not an unsigned degenerate certs-only bundle. A
+ * signed message verifies through the pkiMessage parser (which rejects
+ * degenerate SignedData); the signed content must in turn yield the next CA
+ * certificate. */
+static int test_next_ca_response_is_signed(void)
+{
+    uint8_t* ca_der   = NULL;
+    size_t   ca_len   = 0;
+    uint8_t* ca_key   = NULL;
+    size_t   ca_key_len = 0;
+    uint8_t* next_der = NULL;
+    size_t   next_len = 0;
+    uint8_t* next_key = NULL;
+    size_t   next_key_len = 0;
+    WolfCertBuffer resp     = { 0 };
+    WolfCertBuffer content  = { 0 };
+    WolfCertBuffer next_pem = { 0 };
+    int rc;
+
+    REQUIRE(make_ca(&ca_der,   &ca_len,   &ca_key,   &ca_key_len)   == 0);
+    REQUIRE(make_ca(&next_der, &next_len, &next_key, &next_key_len) == 0);
+
+    REQUIRE(wolfcert_scep_build_next_ca_response(next_der, next_len,
+                                                 ca_der, ca_len,
+                                                 ca_key, ca_key_len,
+                                                 &resp, NULL) == WOLFCERT_OK);
+
+    /* A signed SignedData verifies here; an unsigned degenerate bundle does
+     * not, because the parser rejects degenerate SignedData. */
+    rc = wolfcert_scep_parse_pki_message(resp.data, resp.len, &content,
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(content.data != NULL && content.len > 0);
+
+    /* The signed content carries the next CA certificate. */
+    REQUIRE(wolfcert_pkcs7_certs_to_pem(content.data, content.len,
+                                        &next_pem, NULL) == WOLFCERT_OK);
+    REQUIRE(next_pem.len > 0);
+
+    wolfcert_buffer_free(&content);
+    wolfcert_buffer_free(&next_pem);
+    wolfcert_buffer_free(&resp);
+    free(ca_der);
+    free(ca_key);
+    free(next_der);
+    free(next_key);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -403,6 +453,8 @@ int main(void)
     if (test_cert_rep_signer_trust())
         return 1;
     if (test_cert_rep_txid_and_type())
+        return 1;
+    if (test_next_ca_response_is_signed())
         return 1;
     wolfcert_cleanup();
     printf("OK\n");

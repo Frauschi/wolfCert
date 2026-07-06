@@ -767,11 +767,19 @@ int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
         return WOLFCERT_ERR_HTTP;
     }
 
-    /* The body is a degenerate certs-only PKCS#7 per RFC 8894 section 4.6.1,
-     * so we can reuse the certs-to-PEM extractor. */
-    rc = wolfcert_pkcs7_certs_to_pem(resp.body, resp.body_len,
-                                      out_next_ca_pem, heap);
+    /* RFC 8894 section 4.6.1: the body is a SignedData signed by the current
+     * CA whose content is a degenerate certs-only bundle carrying the next CA
+     * certificate. Verify the signature, then extract the certs from the
+     * signed content rather than the outer signer certificate. */
+    WolfCertBuffer inner = { 0 };
+    rc = wolfcert_scep_parse_pki_message(resp.body, resp.body_len, &inner,
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, heap);
+    if (rc == WOLFCERT_OK) {
+        rc = wolfcert_pkcs7_certs_to_pem(inner.data, inner.len,
+                                          out_next_ca_pem, heap);
+    }
 
+    wolfcert_buffer_free(&inner);
     wolfcert_http_response_free(&resp);
     return rc;
 }

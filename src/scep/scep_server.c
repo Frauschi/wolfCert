@@ -268,11 +268,9 @@ static void handle_get_ca_cert(WolfCertServer* s, int fd)
     send_bin(s, fd, "application/x-x509-ca-cert", s->ca.cert_der, s->ca.cert_der_len);
 }
 
-/* Materialize the rolled-over CA on first request and return its cert as
- * a degenerate certs-only PKCS#7. Strict RFC 8894 section 4.6.1 wants the
- * response signed by the current CA; in practice all deployed SCEP
- * clients we've interoperated with accept the degenerate form, and this
- * keeps the test server honest about what it actually produces. */
+/* Materialize the rolled-over CA on first request and return it wrapped in a
+ * SignedData signed by the current CA, per RFC 8894 section 4.6.1, so the
+ * client can bind the rollover certificate to the CA it already trusts. */
 static void handle_get_next_ca_cert(WolfCertServer* s, int fd)
 {
     if (!s->cfg.scep_enable_next_ca) {
@@ -291,11 +289,13 @@ static void handle_get_next_ca_cert(WolfCertServer* s, int fd)
         p->next_ca_ready = 1;
     }
 
-    const uint8_t* cs[1] = { p->next_ca.cert_der };
-    size_t         cl[1] = { p->next_ca.cert_der_len };
-    WolfCertBuffer p7    = { 0 };
+    WolfCertBuffer p7 = { 0 };
 
-    if (wolfcert_pkcs7_build_certs_only(cs, cl, 1, &p7, s->heap) != WOLFCERT_OK) {
+    if (wolfcert_scep_build_next_ca_response(p->next_ca.cert_der,
+                                             p->next_ca.cert_der_len,
+                                             s->ca.cert_der, s->ca.cert_der_len,
+                                             s->ca.key_der, s->ca.key_der_len,
+                                             &p7, s->heap) != WOLFCERT_OK) {
         send_text(s, fd, 500, "Server Error", "text/plain", "");
         return;
     }

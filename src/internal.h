@@ -299,6 +299,16 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     char** out_pki_status, uint8_t** out_signer_cert, size_t* out_signer_cert_len,
     void* heap);
 
+/* Build the GetNextCACert response (RFC 8894 section 4.6.1): wrap the next CA
+ * certificate in a degenerate certs-only SignedData and sign that with the
+ * current CA key, so the client can bind the rollover certificate to trust it
+ * already holds. */
+WOLFCERT_TEST_VIS int wolfcert_scep_build_next_ca_response(
+    const uint8_t* next_ca_cert, size_t next_ca_cert_len,
+    const uint8_t* ca_cert, size_t ca_cert_len,
+    const uint8_t* ca_key, size_t ca_key_len,
+    WolfCertBuffer* out_der, void* heap);
+
 /* Extract the SubjectPublicKeyInfo bytes from a DER certificate or CSR.
  * Result is heap-allocated; caller frees with WOLFCERT_XFREE(..., heap). */
 int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
