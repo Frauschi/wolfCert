@@ -263,10 +263,10 @@ int main(void)
      * Drive a server that deliberately omits the nonce and confirm the
      * enrollment fails instead of accepting the reply. */
     WolfCertServerCfgSrv cfg3 = { .protocol = WOLFCERT_PROTO_SCEP,
-                                  .bind_host = "127.0.0.1", .bind_port = 0,
-                                  .scep_omit_recipient_nonce = 1 };
+                                  .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s3 = NULL;
     REQUIRE(wolfcert_server_start(&cfg3, &s3) == WOLFCERT_OK);
+    wolfcert_scep_server_set_faults(s3, 1 /* omit recipientNonce */, 0);
     pthread_t tid3;
     REQUIRE(pthread_create(&tid3, NULL, server_thread, s3) == 0);
 
@@ -300,6 +300,51 @@ int main(void)
     wolfcert_buffer_free(&csr3);
     wolfcert_buffer_free(&out3);
     wolfcert_key_free(dk3);
+
+    /* ---- CertRep signed by a non-CA key must be rejected ----------------
+     * RFC 8894 authenticates the CertRep through its CMS signature. A reply
+     * signed by a key other than the trusted CA (a rogue server or a man in
+     * the middle) must be rejected. Drive a server that signs with a throwaway
+     * key and confirm the enrollment fails with an auth error rather than
+     * accepting the attacker-controlled certificate. */
+    WolfCertServerCfgSrv cfg4 = { .protocol = WOLFCERT_PROTO_SCEP,
+                                  .bind_host = "127.0.0.1", .bind_port = 0 };
+    WolfCertServer* s4 = NULL;
+    REQUIRE(wolfcert_server_start(&cfg4, &s4) == WOLFCERT_OK);
+    wolfcert_scep_server_set_faults(s4, 0, 1 /* sign with wrong key */);
+    pthread_t tid4;
+    REQUIRE(pthread_create(&tid4, NULL, server_thread, s4) == 0);
+
+    char url4[128];
+    snprintf(url4, sizeof(url4), "http://127.0.0.1:%u/scep", wolfcert_server_port(s4));
+    WolfCertServerCfg cli4 = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url4 };
+
+    WolfCertScepCaps caps4 = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_caps(&cli4, &caps4) == WOLFCERT_OK);
+    WolfCertBuffer ca4_pem = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli4, &ca4_pem) == WOLFCERT_OK);
+    DerBuffer* ca4_der = NULL;
+    REQUIRE(wc_PemToDer(ca4_pem.data, (long)ca4_pem.len, CERT_TYPE,
+                        &ca4_der, NULL, NULL, NULL) == 0);
+
+    WolfCertKey* dk4 = NULL;
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk4) == WOLFCERT_OK);
+    WolfCertCertMeta meta4 = { .subject_dn = "CN=scep-wrong-signer" };
+    WolfCertBuffer csr4 = { 0 };
+    REQUIRE(wolfcert_csr_build(dk4, &meta4, &csr4) == WOLFCERT_OK);
+    WolfCertBuffer out4 = { 0 };
+    REQUIRE(wolfcert_scep_pkcs_req(&cli4, &caps4, ca4_der->buffer, ca4_der->length,
+                                   dk4, csr4.data, csr4.len, &out4)
+            == WOLFCERT_ERR_AUTH);
+
+    wolfcert_server_stop(s4);
+    pthread_join(tid4, NULL);
+    wolfcert_server_free(s4);
+    wc_FreeDer(&ca4_der);
+    wolfcert_buffer_free(&ca4_pem);
+    wolfcert_buffer_free(&csr4);
+    wolfcert_buffer_free(&out4);
+    wolfcert_key_free(dk4);
 
     wc_FreeDer(&ca_der);
     wc_FreeDer(&issued_der);

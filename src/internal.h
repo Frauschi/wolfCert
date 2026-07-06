@@ -152,6 +152,15 @@ ssize_t wolfcert_io_send(WolfCertServer* srv, int fd, const void* buf, size_t le
 WOLFCERT_API const WolfCertServerOps* wolfcert_est_server_ops(void);
 WOLFCERT_API const WolfCertServerOps* wolfcert_scep_server_ops(void);
 
+#if defined(WOLFCERT_BUILD_TESTING)
+/* Test-only fault injection for a started SCEP server: make it emit a CertRep
+ * without a recipientNonce, and/or sign the CertRep with a throwaway key
+ * instead of the CA key. Used to drive the client-side rejection paths. Call
+ * after wolfcert_server_start and before the client request. */
+WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
+    int omit_recipient_nonce, int sign_with_wrong_key);
+#endif
+
 /* ---- error reporting --------------------------------------------------- */
 
 int  wolfcert_map_wc_err(int wc_rc);
