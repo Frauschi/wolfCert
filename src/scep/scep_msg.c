@@ -495,7 +495,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_message(const uint8_t* envelope_de
     return WOLFCERT_OK;
 }
 
-int wolfcert_scep_build_next_ca_response(const uint8_t* next_ca_cert,
+WOLFCERT_TEST_VIS int wolfcert_scep_build_next_ca_response(const uint8_t* next_ca_cert,
                                          size_t next_ca_cert_len,
                                          const uint8_t* ca_cert, size_t ca_cert_len,
                                          const uint8_t* ca_key, size_t ca_key_len,
@@ -529,7 +529,8 @@ int wolfcert_scep_build_next_ca_response(const uint8_t* next_ca_cert,
     return rc;
 }
 
-int wolfcert_scep_verify_next_ca_response(const uint8_t* resp_der, size_t resp_len,
+WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(const uint8_t* resp_der,
+                                          size_t resp_len,
                                           const uint8_t* current_ca_der,
                                           size_t current_ca_len,
                                           WolfCertBuffer* out_pem, void* heap)
@@ -852,7 +853,7 @@ int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
     return WOLFCERT_OK;
 }
 
-int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert,
+WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert,
                                     size_t signer_cert_len,
                                     const uint8_t* ra_cert, size_t ra_cert_len,
                                     void* heap)
@@ -888,7 +889,7 @@ int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert,
     return rc;
 }
 
-int wolfcert_scep_check_cert_rep(const char* msg_type,
+WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
                                  const uint8_t* rx_tid, size_t rx_tid_len,
                                  const uint8_t* sent_tid, size_t sent_tid_len)
 {
