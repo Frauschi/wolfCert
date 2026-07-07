@@ -323,13 +323,13 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_next_ca_response(
 int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
                           uint8_t** out_spki, size_t* out_len, void* heap);
 
-/* RFC 8894: a CertRep must be signed by the CA/RA certificate the client
- * fetched via GetCACert. Confirm the response signer certificate shares the
- * RA certificate's public key. Returns WOLFCERT_OK on match, an error
- * otherwise. */
+/* RFC 8894: a CertRep must be signed by the CA or its RA. Confirm the response
+ * signer certificate shares a public key with some certificate in the trusted
+ * GetCACert bundle (one or more concatenated DER certs). Returns WOLFCERT_OK on
+ * match, WOLFCERT_ERR_AUTH otherwise. */
 WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(
     const uint8_t* signer_cert, size_t signer_cert_len,
-    const uint8_t* ra_cert, size_t ra_cert_len, void* heap);
+    const uint8_t* ca_bundle, size_t ca_bundle_len, void* heap);
 
 /* RFC 8894: an enrollment response must be a CertRep (messageType "3") whose
  * transactionID echoes the one the client sent. Returns WOLFCERT_OK when both
@@ -339,9 +339,10 @@ WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
     const uint8_t* sent_tid, size_t sent_tid_len);
 
 /* Validate a GetNextCACert response (RFC 8894 section 4.6.1): verify it is a
- * SignedData, bind its signer to the trusted current CA (required), and extract
- * the enclosed rollover certificate(s) as PEM. Rejects an unsigned response or
- * one not signed by the current CA. */
+ * SignedData, bind its signer to a certificate in the trusted current-CA
+ * bundle (current_ca_der is one or more concatenated DER certs; required), and
+ * extract the enclosed rollover certificate(s) as PEM. Rejects an unsigned
+ * response or one not signed by a cert in the bundle. */
 WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(
     const uint8_t* resp_der, size_t resp_len,
     const uint8_t* current_ca_der, size_t current_ca_len,

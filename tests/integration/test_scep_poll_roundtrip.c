@@ -87,6 +87,7 @@ static int poll_path(WolfCertServer* s)
     WolfCertScepResult r1 = { 0 };
     int rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
                                        ca_der->buffer, ca_der->length,
+                                       ca_der->buffer, ca_der->length,
                                        dk, csr.data, csr.len, &r1);
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(r1.status == WOLFCERT_SCEP_STATUS_PENDING);
@@ -107,6 +108,7 @@ static int poll_path(WolfCertServer* s)
      * "SCEP Enrollee" self-signed cert that PKCSReq used. */
     WolfCertScepResult r2 = { 0 };
     rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
                                         ca_der->buffer, ca_der->length,
                                         NULL, 0,
                                         dk, csr.data, csr.len,
@@ -137,6 +139,7 @@ static int poll_path(WolfCertServer* s)
     memset(bogus_tid, 0x5A, sizeof(bogus_tid));
     WolfCertScepResult r3 = { 0 };
     rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
                                         ca_der->buffer, ca_der->length,
                                         NULL, 0,
                                         dk, csr.data, csr.len,

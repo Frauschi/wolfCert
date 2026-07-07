@@ -283,6 +283,7 @@ static int run_pki_op(const WolfCertServerCfg* srv,
 static int do_scep_round_trip(const WolfCertServerCfg* srv,
                               const WolfCertScepCaps*   caps,
                               const uint8_t* ra_cert, size_t ra_cert_len,
+                              const uint8_t* ca_bundle, size_t ca_bundle_len,
                               const uint8_t* signer_cert, size_t signer_cert_len,
                               const uint8_t* signer_key,  size_t signer_key_len,
                               const char* msg_type,
@@ -410,10 +411,10 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
     /* wolfcert_scep_parse_pki_message only verifies the CMS signature against
      * the cert embedded in the response, so a MITM on the (often plaintext)
      * SCEP transport could forge a fully signed CertRep. Authenticate the
-     * response by requiring its signer to be the CA/RA cert fetched via
-     * GetCACert before trusting anything it carries. */
+     * response by requiring its signer to be one of the CA/RA certs from the
+     * GetCACert bundle before trusting anything it carries. */
     rc = wolfcert_scep_verify_rep_signer(rx_signer, rx_signer_len,
-                                         ra_cert, ra_cert_len, heap);
+                                         ca_bundle, ca_bundle_len, heap);
     WOLFCERT_XFREE(rx_signer, heap);
     if (rc != WOLFCERT_OK) {
         WOLFCERT_XFREE(rx_rn,  heap);
@@ -506,12 +507,13 @@ static int rsa_key_to_der(const WolfCertKey* key, void* heap,
 int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
                               const WolfCertScepCaps*  caps,
                               const uint8_t* ra_cert, size_t ra_cert_len,
+                              const uint8_t* ca_bundle, size_t ca_bundle_len,
                               const WolfCertKey*       new_key,
                               const uint8_t* csr_der, size_t csr_der_len,
                               WolfCertScepResult*      out)
 {
-    if (srv == NULL || ra_cert == NULL || new_key == NULL ||
-        csr_der == NULL || out == NULL)
+    if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
+        new_key == NULL || csr_der == NULL || out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     if (new_key->type != WOLFCERT_KEY_RSA)
@@ -539,6 +541,7 @@ int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
     }
 
     rc = do_scep_round_trip(srv, caps, ra_cert, ra_cert_len,
+                            ca_bundle, ca_bundle_len,
                             signer_der, signer_len, key_der, key_der_len,
                             "19", csr_der, csr_der_len,
                             NULL, 0, out);
@@ -559,8 +562,11 @@ int wolfcert_scep_pkcs_req(const WolfCertServerCfg* srv,
     if (out_cert_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
+    /* Single-cert form: the envelope target doubles as the one-cert trust
+     * bundle. Callers with a CA/RA bundle should use the _ex form. */
     WolfCertScepResult r = { 0 };
     int rc = wolfcert_scep_pkcs_req_ex(srv, caps, ra_cert, ra_cert_len,
+                                       ra_cert, ra_cert_len,
                                        new_key, csr_der, csr_der_len, &r);
     if (rc != WOLFCERT_OK) {
         wolfcert_scep_result_free(&r);
@@ -585,6 +591,7 @@ int wolfcert_scep_pkcs_req(const WolfCertServerCfg* srv,
 int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
                                  const WolfCertScepCaps*  caps,
                                  const uint8_t* ra_cert, size_t ra_cert_len,
+                                 const uint8_t* ca_bundle, size_t ca_bundle_len,
                                  const uint8_t* current_cert, size_t current_cert_len,
                                  const WolfCertKey* current_key,
                                  const WolfCertKey* new_key,
@@ -592,8 +599,9 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
                                  WolfCertScepResult* out)
 {
     (void)new_key;
-    if (srv == NULL || ra_cert == NULL || current_cert == NULL ||
-            current_key == NULL || csr_der == NULL || out == NULL)
+    if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
+            current_cert == NULL || current_key == NULL || csr_der == NULL ||
+            out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     if (current_key->type != WOLFCERT_KEY_RSA)
@@ -611,6 +619,7 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
         return rc;
 
     rc = do_scep_round_trip(srv, caps, ra_cert, ra_cert_len,
+                            ca_bundle, ca_bundle_len,
                             current_cert, current_cert_len,
                             key_der, key_der_len,
                             "17", csr_der, csr_der_len,
@@ -633,8 +642,11 @@ int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
     if (out_cert_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
+    /* Single-cert form: the envelope target doubles as the one-cert trust
+     * bundle. Callers with a CA/RA bundle should use the _ex form. */
     WolfCertScepResult r = { 0 };
     int rc = wolfcert_scep_renewal_req_ex(srv, caps, ra_cert, ra_cert_len,
+                                          ra_cert, ra_cert_len,
                                           current_cert, current_cert_len,
                                           current_key, new_key,
                                           csr_der, csr_der_len, &r);
@@ -662,6 +674,7 @@ int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
 int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
                                    const WolfCertScepCaps*  caps,
                                    const uint8_t* ra_cert, size_t ra_cert_len,
+                                   const uint8_t* ca_bundle, size_t ca_bundle_len,
                                    const uint8_t* signer_cert, size_t signer_cert_len,
                                    const WolfCertKey* signer_key,
                                    const uint8_t* csr_der, size_t csr_der_len,
@@ -669,7 +682,7 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
                                    size_t transaction_id_len,
                                    WolfCertScepResult* out)
 {
-    if (srv == NULL || ra_cert == NULL ||
+    if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
             signer_key == NULL || csr_der == NULL ||
             transaction_id == NULL || transaction_id_len == 0 || out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -723,6 +736,7 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
     }
 
     rc = do_scep_round_trip(srv, caps, ra_cert, ra_cert_len,
+                            ca_bundle, ca_bundle_len,
                             eff_signer, eff_signer_len,
                             key_der, key_der_len,
                             "20", ias.data, ias.len,

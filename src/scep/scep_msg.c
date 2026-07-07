@@ -853,40 +853,79 @@ int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
     return WOLFCERT_OK;
 }
 
+/* Total length (tag + length octets + value) of the DER SEQUENCE at `p`, or 0
+ * if it is not a SEQUENCE that fits in `len`. Walks a concatenated-DER cert
+ * bundle one certificate at a time. */
+static size_t der_seq_len(const uint8_t* p, size_t len)
+{
+    size_t clen, hdr, nb, i;
+
+    if (len < 2 || p[0] != 0x30)
+        return 0;
+
+    if ((p[1] & 0x80) == 0) {
+        hdr  = 2;
+        clen = p[1];
+    }
+    else {
+        nb = (size_t)(p[1] & 0x7F);
+        if (nb == 0 || nb > 4 || len < 2 + nb)
+            return 0;
+
+        clen = 0;
+        for (i = 0; i < nb; i++)
+            clen = (clen << 8) | p[2 + i];
+        hdr = 2 + nb;
+    }
+
+    if (clen > len - hdr)
+        return 0;
+
+    return hdr + clen;
+}
+
 WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert,
                                     size_t signer_cert_len,
-                                    const uint8_t* ra_cert, size_t ra_cert_len,
+                                    const uint8_t* ca_bundle, size_t ca_bundle_len,
                                     void* heap)
 {
     uint8_t* signer_spki = NULL;
     size_t   signer_spki_len = 0;
-    uint8_t* ra_spki = NULL;
-    size_t   ra_spki_len = 0;
-    int      rc;
+    uint8_t* ca_spki = NULL;
+    size_t   ca_spki_len = 0;
+    size_t   off = 0;
+    size_t   clen;
+    int      matched = 0;
 
-    if (signer_cert == NULL || ra_cert == NULL)
+    if (signer_cert == NULL || ca_bundle == NULL)
         return WOLFCERT_ERR_AUTH;
 
-    rc = wolfcert_extract_spki(signer_cert, signer_cert_len, 0,
-                               &signer_spki, &signer_spki_len, heap);
-    if (rc != WOLFCERT_OK)
+    if (wolfcert_extract_spki(signer_cert, signer_cert_len, 0,
+                              &signer_spki, &signer_spki_len, heap) != WOLFCERT_OK)
         return WOLFCERT_ERR_AUTH;
 
-    rc = wolfcert_extract_spki(ra_cert, ra_cert_len, 0,
-                               &ra_spki, &ra_spki_len, heap);
-    if (rc != WOLFCERT_OK) {
-        WOLFCERT_XFREE(signer_spki, heap);
-        return WOLFCERT_ERR_AUTH;
-    }
+    /* RFC 8894: the CertRep is signed by the CA or its RA. Accept the signer
+     * if it shares a public key with any certificate in the trusted GetCACert
+     * bundle (one or more concatenated DER certs). */
+    while (off < ca_bundle_len && !matched) {
+        clen = der_seq_len(ca_bundle + off, ca_bundle_len - off);
+        if (clen == 0)
+            break;
 
-    if (signer_spki_len != ra_spki_len ||
-            memcmp(signer_spki, ra_spki, signer_spki_len) != 0) {
-        rc = WOLFCERT_ERR_AUTH;
+        if (wolfcert_extract_spki(ca_bundle + off, clen, 0,
+                                  &ca_spki, &ca_spki_len, heap) == WOLFCERT_OK) {
+            if (ca_spki_len == signer_spki_len &&
+                    memcmp(ca_spki, signer_spki, signer_spki_len) == 0)
+                matched = 1;
+            WOLFCERT_XFREE(ca_spki, heap);
+            ca_spki = NULL;
+        }
+
+        off += clen;
     }
 
     WOLFCERT_XFREE(signer_spki, heap);
-    WOLFCERT_XFREE(ra_spki, heap);
-    return rc;
+    return matched ? WOLFCERT_OK : WOLFCERT_ERR_AUTH;
 }
 
 WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,

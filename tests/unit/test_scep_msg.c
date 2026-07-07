@@ -621,6 +621,62 @@ static int test_signer_is_verified_cert(void)
     return 0;
 }
 
+/* RFC 8894 / split CA-RA: the response signer is trusted when it matches any
+ * certificate in the fingerprint-verified GetCACert bundle, not only the first
+ * one. Verify a signer matching the second cert of a two-cert bundle (e.g. an
+ * RA encryption cert followed by the CA signer) is accepted, and one in neither
+ * is rejected. */
+static int test_signer_matches_any_bundle_cert(void)
+{
+    uint8_t* a_der  = NULL;
+    size_t   a_len  = 0;
+    uint8_t* a_key  = NULL;
+    size_t   a_key_len = 0;
+    uint8_t* b_der  = NULL;
+    size_t   b_len  = 0;
+    uint8_t* b_key  = NULL;
+    size_t   b_key_len = 0;
+    uint8_t* u_der  = NULL;
+    size_t   u_len  = 0;
+    uint8_t* u_key  = NULL;
+    size_t   u_key_len = 0;
+    uint8_t* bundle = NULL;
+    size_t   bundle_len;
+
+    REQUIRE(make_ca(&a_der, &a_len, &a_key, &a_key_len) == 0);
+    REQUIRE(make_ca(&b_der, &b_len, &b_key, &b_key_len) == 0);
+    REQUIRE(make_ca(&u_der, &u_len, &u_key, &u_key_len) == 0);
+
+    /* Concatenated-DER bundle: [cert A, cert B]. */
+    bundle_len = a_len + b_len;
+    bundle = (uint8_t*)malloc(bundle_len);
+    REQUIRE(bundle != NULL);
+    memcpy(bundle, a_der, a_len);
+    memcpy(bundle + a_len, b_der, b_len);
+
+    /* Signer matching the second bundle cert is accepted... */
+    REQUIRE(wolfcert_scep_verify_rep_signer(b_der, b_len,
+                                            bundle, bundle_len, NULL)
+            == WOLFCERT_OK);
+    /* ...the first too... */
+    REQUIRE(wolfcert_scep_verify_rep_signer(a_der, a_len,
+                                            bundle, bundle_len, NULL)
+            == WOLFCERT_OK);
+    /* ...and a signer in neither is rejected. */
+    REQUIRE(wolfcert_scep_verify_rep_signer(u_der, u_len,
+                                            bundle, bundle_len, NULL)
+            != WOLFCERT_OK);
+
+    free(bundle);
+    free(a_der);
+    free(a_key);
+    free(b_der);
+    free(b_key);
+    free(u_der);
+    free(u_key);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -637,6 +693,8 @@ int main(void)
     if (test_next_ca_response_signer_trust())
         return 1;
     if (test_signer_is_verified_cert())
+        return 1;
+    if (test_signer_matches_any_bundle_cert())
         return 1;
     wolfcert_cleanup();
     printf("OK\n");

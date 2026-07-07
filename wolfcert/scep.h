@@ -85,12 +85,20 @@ WOLFCERT_API void wolfcert_scep_result_free(WolfCertScepResult* r);
 /* PKCSReq: enroll a new certificate. challengePassword is taken from
  * srv->password.
  *
+ * `ra_cert` is the DER cert the request is enveloped to (the CA/RA encryption
+ * cert). `ca_bundle` is the trusted GetCACert response (one or more
+ * concatenated DER certs) the CertRep signer is checked against; in a split
+ * CA/RA deployment the response signer differs from `ra_cert`, so pass the
+ * whole bundle. For a single-cert CA, pass `ra_cert` as the bundle (the
+ * wolfcert_scep_pkcs_req wrapper does this).
+ *
  * Returns WOLFCERT_OK on any successful server round-trip; inspect
  * out->status to distinguish SUCCESS / PENDING / FAILURE. Transport-level
  * errors (TLS, HTTP, parse) surface as negative wolfCert error codes. */
 WOLFCERT_API int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
                                            const WolfCertScepCaps* caps,
                                            const uint8_t* ra_cert, size_t ra_cert_len,
+                                           const uint8_t* ca_bundle, size_t ca_bundle_len,
                                            const WolfCertKey* new_key,
                                            const uint8_t* csr_der, size_t csr_der_len,
                                            WolfCertScepResult* out);
@@ -105,10 +113,13 @@ WOLFCERT_API int wolfcert_scep_pkcs_req(const WolfCertServerCfg* srv,
                                         const uint8_t* csr_der, size_t csr_der_len,
                                         WolfCertBuffer* out_cert_pem);
 
-/* RenewalReq: re-enroll using an existing cert/key to sign the pkiMessage. */
+/* RenewalReq: re-enroll using an existing cert/key to sign the pkiMessage.
+ * `ra_cert` is the envelope target; `ca_bundle` is the trusted GetCACert bundle
+ * the response signer is checked against (see wolfcert_scep_pkcs_req_ex). */
 WOLFCERT_API int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
                                               const WolfCertScepCaps* caps,
                                               const uint8_t* ra_cert, size_t ra_cert_len,
+                                              const uint8_t* ca_bundle, size_t ca_bundle_len,
                                               const uint8_t* current_cert, size_t current_cert_len,
                                               const WolfCertKey* current_key,
                                               const WolfCertKey* new_key,
@@ -132,10 +143,13 @@ WOLFCERT_API int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
  * since its public key already matches signer_key. For a pending
  * RenewalReq, pass the cert being renewed as signer_cert.
  *
- * `transaction_id` must be the value returned by the prior request. */
+ * `transaction_id` must be the value returned by the prior request.
+ * `ra_cert` is the envelope target; `ca_bundle` is the trusted GetCACert bundle
+ * the response signer is checked against (see wolfcert_scep_pkcs_req_ex). */
 WOLFCERT_API int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
                                                 const WolfCertScepCaps*  caps,
                                                 const uint8_t* ra_cert, size_t ra_cert_len,
+                                                const uint8_t* ca_bundle, size_t ca_bundle_len,
                                                 const uint8_t* signer_cert, size_t signer_cert_len,
                                                 const WolfCertKey* signer_key,
                                                 const uint8_t* csr_der, size_t csr_der_len,
@@ -150,10 +164,11 @@ WOLFCERT_API int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
  * (HTTP 404).
  *
  * The response is a CMS SignedData signed by the current CA. current_ca_der is
- * the current CA certificate in DER (previously fetched via GetCACert and
- * verified out of band) and is required: the roll-over message is rejected
- * unless its SignedData signer shares that CA's public key, so a substituted
- * roll-over CA over an untrusted transport is refused. */
+ * the current CA certificate(s) in DER (one or more concatenated DER certs,
+ * e.g. the whole GetCACert bundle, previously fetched and verified out of band)
+ * and is required: the roll-over message is rejected unless its SignedData
+ * signer shares a public key with one of them, so a substituted roll-over CA
+ * over an untrusted transport is refused. */
 WOLFCERT_API int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
                                                 const uint8_t* current_ca_der,
                                                 size_t current_ca_len,

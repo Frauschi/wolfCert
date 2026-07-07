@@ -734,6 +734,7 @@ static int cmd_enroll(int argc, char** argv)
                 WolfCertScepResult scep_result = { 0 };
                 rc = wolfcert_scep_pkcs_req_ex(&srv, &caps,
                                                ca_der->buffer, ca_der->length,
+                                               ca_der->buffer, ca_der->length,
                                                key, csr.data, csr.len, &scep_result);
 
                 /* RFC 8894 section 3.3.2 polling: when the server returns
@@ -752,6 +753,7 @@ static int cmd_enroll(int argc, char** argv)
                     nanosleep(&ts, NULL);
                     WolfCertScepResult poll_result = { 0 };
                     rc = wolfcert_scep_get_cert_initial(&srv, &caps,
+                             ca_der->buffer, ca_der->length,
                              ca_der->buffer, ca_der->length,
                              NULL, 0, key, csr.data, csr.len,
                              scep_result.transaction_id, scep_result.transaction_id_len, &poll_result);
