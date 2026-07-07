@@ -677,10 +677,52 @@ static int test_signer_matches_any_bundle_cert(void)
     return 0;
 }
 
+/* When the CSR subject cannot be copied verbatim, wolfcert_scep_self_signed_rsa
+ * falls back to a common name. An empty subject (DER 30 00) trips the memchr
+ * guard against wolfSSL's XSTRLEN raw-name recovery (the 0x00 length octet),
+ * and with no CN present the signer cert gets the literal "SCEP Enrollee".
+ * (The CN-fallback branch needs an embedded-NUL or oversized DN that
+ * wc_MakeCertReq cannot produce, so only the default branch is exercised.) */
+static int test_signer_subject_fallback(void)
+{
+    RsaKey      key;
+    WC_RNG      rng;
+    uint8_t*    csr = NULL;
+    size_t      csr_len = 0;
+    uint8_t*    signer = NULL;
+    size_t      signer_len = 0;
+    DecodedCert dc;
+
+    REQUIRE(wc_InitRng(&rng) == 0);
+    REQUIRE(wc_InitRsaKey(&key, NULL) == 0);
+    REQUIRE(wc_MakeRsaKey(&key, 2048, WC_RSA_EXPONENT, &rng) == 0);
+
+    /* Empty subject: raw path skipped, no CN, so the literal is used. */
+    REQUIRE(make_csr(&key, &rng, "", "", &csr, &csr_len) == 0);
+
+    REQUIRE(wolfcert_scep_self_signed_rsa(&key, csr, csr_len,
+                                          &signer, &signer_len, NULL)
+            == WOLFCERT_OK);
+
+    wc_InitDecodedCert(&dc, signer, (word32)signer_len, NULL);
+    REQUIRE(wc_ParseCert(&dc, CERT_TYPE, NO_VERIFY, NULL) == 0);
+    REQUIRE(dc.subjectCN != NULL && dc.subjectCNLen == 13 &&
+            memcmp(dc.subjectCN, "SCEP Enrollee", 13) == 0);
+
+    wc_FreeDecodedCert(&dc);
+    WOLFCERT_XFREE(signer, NULL);
+    free(csr);
+    wc_FreeRsaKey(&key);
+    wc_FreeRng(&rng);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     if (test_non_success_has_no_envelope())
+        return 1;
+    if (test_signer_subject_fallback())
         return 1;
     if (test_signer_subject_matches_csr())
         return 1;
