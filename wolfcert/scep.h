@@ -47,6 +47,14 @@ WOLFCERT_API int wolfcert_scep_get_ca_caps(const WolfCertServerCfg* srv,
 WOLFCERT_API int wolfcert_scep_get_ca_cert(const WolfCertServerCfg* srv,
                                            WolfCertBuffer* out_ca_pem);
 
+/* Like wolfcert_scep_get_ca_cert but returns the CA/RA certificate(s) in the
+ * requested encoding. WOLFCERT_ENCODING_DER yields the whole GetCACert bundle
+ * as concatenated DER, suitable as the ca_bundle trust set for the enroll and
+ * GetNextCACert calls. */
+WOLFCERT_API int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv,
+                                               WolfCertEncoding enc,
+                                               WolfCertBuffer* out_ca);
+
 /* RFC 8894 section 3.2.1.3 pkiStatus values returned by the server in a CertRep
  * pkiMessage. PENDING means the enrollment was accepted but is waiting
  * for manual approval; the caller re-queries later via

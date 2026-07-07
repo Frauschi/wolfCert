@@ -244,15 +244,12 @@ WOLFCERT_TEST_VIS int wolfcert_pkcs7_certs_to_pem(const uint8_t* p7_der, size_t 
 WOLFCERT_TEST_VIS int wolfcert_pkcs7_certs_to_der(const uint8_t* p7_der, size_t p7_der_len,
                                                   WolfCertBuffer* out_der, void* heap);
 
-/* Encoding-aware CA retrieval. The public wolfcert_est_get_cacerts /
- * wolfcert_scep_get_ca_cert wrap these with WOLFCERT_ENCODING_PEM;
- * wolfcert_client_get_ca forwards the caller's chosen encoding. */
+/* Encoding-aware CA retrieval. The public wolfcert_est_get_cacerts wraps this
+ * with WOLFCERT_ENCODING_PEM; wolfcert_client_get_ca forwards the caller's
+ * chosen encoding. (wolfcert_scep_get_ca_cert_enc is public, in scep.h.) */
 WOLFCERT_TEST_VIS int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv,
                                                    WolfCertEncoding enc,
                                                    WolfCertBuffer* out_ca);
-WOLFCERT_TEST_VIS int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv,
-                                                    WolfCertEncoding enc,
-                                                    WolfCertBuffer* out_ca);
 WOLFCERT_TEST_VIS int wolfcert_pkcs7_build_certs_only(const uint8_t* const* certs_der,
                                                       const size_t* certs_len, size_t count,
                                                       WolfCertBuffer* out_der, void* heap);

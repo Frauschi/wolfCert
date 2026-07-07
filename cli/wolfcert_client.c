@@ -729,12 +729,25 @@ static int cmd_enroll(int argc, char** argv)
             DerBuffer* ca_der = NULL;
             if (wc_PemToDer(ca_pem.data, (long)ca_pem.len, CERT_TYPE,
                             &ca_der, NULL, NULL, NULL) == 0) {
+                /* Envelope to the first CA cert, but trust the whole GetCACert
+                 * bundle for the CertRep signer so a split CA/RA response is
+                 * accepted. Fall back to the single cert if the bundle fetch
+                 * fails. */
+                WolfCertBuffer ca_bundle = { 0 };
+                const uint8_t* bundle = ca_der->buffer;
+                size_t bundle_len = ca_der->length;
+                if (wolfcert_scep_get_ca_cert_enc(&srv, WOLFCERT_ENCODING_DER,
+                                                  &ca_bundle) == WOLFCERT_OK) {
+                    bundle = ca_bundle.data;
+                    bundle_len = ca_bundle.len;
+                }
+
                 WolfCertScepCaps caps = { 0 };
                 wolfcert_scep_get_ca_caps(&srv, &caps);
                 WolfCertScepResult scep_result = { 0 };
                 rc = wolfcert_scep_pkcs_req_ex(&srv, &caps,
                                                ca_der->buffer, ca_der->length,
-                                               ca_der->buffer, ca_der->length,
+                                               bundle, bundle_len,
                                                key, csr.data, csr.len, &scep_result);
 
                 /* RFC 8894 section 3.3.2 polling: when the server returns
@@ -754,7 +767,7 @@ static int cmd_enroll(int argc, char** argv)
                     WolfCertScepResult poll_result = { 0 };
                     rc = wolfcert_scep_get_cert_initial(&srv, &caps,
                              ca_der->buffer, ca_der->length,
-                             ca_der->buffer, ca_der->length,
+                             bundle, bundle_len,
                              NULL, 0, key, csr.data, csr.len,
                              scep_result.transaction_id, scep_result.transaction_id_len, &poll_result);
 
@@ -778,6 +791,7 @@ static int cmd_enroll(int argc, char** argv)
                 }
 
                 wolfcert_scep_result_free(&scep_result);
+                wolfcert_buffer_free(&ca_bundle);
                 wc_FreeDer(&ca_der);
             }
             else {
@@ -1007,10 +1021,18 @@ static int cmd_getnextca(int argc, char** argv)
         return 1;
     }
 
-    /* The roll-over message is signed by the current CA, so fetch that CA
-     * first and require the response to be signed by it. */
-    WolfCertBuffer ca_pem = { 0 };
-    int rc = wolfcert_scep_get_ca_cert(&srv, &ca_pem);
+    /* The roll-over message is signed by the current CA, which may be any cert
+     * in the GetCACert bundle (some servers return the RA cert first). Fetch
+     * the whole bundle in DER so verification matches the CA wherever it sits.
+     *
+     * Note: this demo CLI is stateless, so it fetches the current CA over the
+     * same (possibly plaintext) transport it then authenticates against; an
+     * active MITM could supply a consistent forged bundle and roll-over. A
+     * production caller should pass a locally-trusted, out-of-band-verified CA
+     * to wolfcert_scep_get_next_ca_cert instead. */
+    WolfCertBuffer ca_bundle = { 0 };
+    int rc = wolfcert_scep_get_ca_cert_enc(&srv, WOLFCERT_ENCODING_DER,
+                                           &ca_bundle);
     if (rc != WOLFCERT_OK) {
         fprintf(stderr, "getnextca: %s\n", wolfcert_strerror(rc));
         free(trust_hold);
@@ -1020,23 +1042,10 @@ static int cmd_getnextca(int argc, char** argv)
         return 2;
     }
 
-    DerBuffer* ca_der = NULL;
-    if (wc_PemToDer(ca_pem.data, (long)ca_pem.len, CERT_TYPE,
-                    &ca_der, NULL, NULL, NULL) != 0) {
-        fprintf(stderr, "getnextca: cannot decode current CA certificate\n");
-        wolfcert_buffer_free(&ca_pem);
-        free(trust_hold);
-        free(mt_cert);
-        free(mt_key);
-        opts_free(&opts);
-        return 2;
-    }
-
     WolfCertBuffer pem = { 0 };
-    rc = wolfcert_scep_get_next_ca_cert(&srv, ca_der->buffer, ca_der->length,
+    rc = wolfcert_scep_get_next_ca_cert(&srv, ca_bundle.data, ca_bundle.len,
                                         &pem);
-    wc_FreeDer(&ca_der);
-    wolfcert_buffer_free(&ca_pem);
+    wolfcert_buffer_free(&ca_bundle);
     if (rc != WOLFCERT_OK) {
         fprintf(stderr, "getnextca: %s\n", wolfcert_strerror(rc));
         free(trust_hold);
