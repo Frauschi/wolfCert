@@ -68,9 +68,15 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
     req->connect_ctx       = srv->connect_ctx;
 }
 
-/* RFC 7030 mandates EST over TLS. Reject an explicitly non-TLS (http://)
- * server URL; a schemeless URL already defaults to TLS in
- * wolfcert_http_url_parse(), so only an explicit http:// scheme is refused. */
+/* RFC 7030 mandates EST over TLS *and* that the client authenticate the
+ * server on every request. Reject an explicitly non-TLS (http://) server URL
+ * first; a schemeless URL already defaults to TLS in wolfcert_http_url_parse(),
+ * so only an explicit http:// scheme is refused. Then require server
+ * authentication: verify_server is the sole switch for peer verification in
+ * this transport (http.c installs WOLFSSL_VERIFY_PEER only when it is set), so
+ * verify_server off always completes an unauthenticated handshake - a pinned
+ * trust anchor is loaded but never enforced - which would leak the HTTP Basic
+ * credentials and the CSR to a MITM. */
 static int est_require_tls(const WolfCertServerCfg* srv, void* heap)
 {
     WolfCertUrl u;
@@ -84,6 +90,11 @@ static int est_require_tls(const WolfCertServerCfg* srv, void* heap)
     if (!tls)
         return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
             "EST requires TLS; refusing plaintext http:// URL (RFC 7030)");
+
+    if (!srv->verify_server)
+        return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
+            "EST requires server authentication: set verify_server to verify "
+            "the server certificate (RFC 7030)");
 
     return WOLFCERT_OK;
 }
@@ -390,6 +401,16 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
         wolfcert_http_url_free(&u);
         return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
             "EST requires TLS; refusing plaintext http:// URL (RFC 7030)");
+    }
+
+    /* EST also requires authenticating the server (RFC 7030); refuse a session
+     * that would run an unauthenticated (verify_server off) handshake, matching
+     * the one-shot est_require_tls() gate. */
+    if (!srv->verify_server) {
+        wolfcert_http_url_free(&u);
+        return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
+            "EST requires server authentication: set verify_server to verify "
+            "the server certificate (RFC 7030)");
     }
 
     size_t origin_len = strlen(u.scheme) + 3 + strlen(u.host) + 16;

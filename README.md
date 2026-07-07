@@ -109,6 +109,10 @@ The CLI also covers TLS / mutual TLS (`--trust`, `--client-cert`,
 key-policy pinning (`--csrattrs-auto`). Run `wolfcert-client --help` and
 `wolfcert-server --help` for the full set.
 
+EST mandates authenticating the server (RFC 7030), so an EST enroll needs
+`--trust PEMFILE` (or a caller-supplied trust anchor). Without it the client
+refuses rather than hand its credentials and CSR to an unverified server.
+
 To call the library directly, see `examples/enroll_est.c`,
 `examples/enroll_scep.c`, and `examples/enroll_cryptocb.c`.
 
