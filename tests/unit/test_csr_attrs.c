@@ -316,6 +316,34 @@ int main(void)
         wolfcert_csr_attrs_free(&a4);
     }
 
+    /* ---- wolfcert_csr_attrs_apply: type-only hint gets a default size ----
+     *
+     * A server can pin a key type with no accompanying size/curve: RSA
+     * never carries a modulus hint, and a bare signature-algorithm OID
+     * (e.g. ecdsa-with-SHA384) arrives without an id-ecPublicKey curve.
+     * _apply must still hand keygen a usable `param`, not leave it 0. */
+#ifdef WOLFCERT_HAVE_RSA
+    {
+        WolfCertCsrAttrs stub = { 0 };
+        stub.preferred_key_type = WOLFCERT_KEY_RSA;
+        WolfCertKeyCfg kc = { 0 };
+        REQUIRE(wolfcert_csr_attrs_apply(&stub, &kc, NULL) == WOLFCERT_OK);
+        REQUIRE(kc.type  == WOLFCERT_KEY_RSA);
+        REQUIRE(kc.param == 2048);
+    }
+#endif
+#ifdef WOLFCERT_HAVE_ECC
+    {
+        WolfCertCsrAttrs stub = { 0 };
+        stub.preferred_key_type     = WOLFCERT_KEY_ECC;
+        stub.preferred_ecc_curve_bits = 0;
+        WolfCertKeyCfg kc = { 0 };
+        REQUIRE(wolfcert_csr_attrs_apply(&stub, &kc, NULL) == WOLFCERT_OK);
+        REQUIRE(kc.type  == WOLFCERT_KEY_ECC);
+        REQUIRE(kc.param == 256);
+    }
+#endif
+
     /* ---- wolfcert_csr_attrs_apply: both args NULL-able --------- */
     {
         WolfCertCsrAttrs a5 = { 0 };

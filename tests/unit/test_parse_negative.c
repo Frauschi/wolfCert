@@ -33,6 +33,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#if defined(WOLFCERT_HAVE_SCEP) && defined(WOLFCERT_HAVE_RSA)
+#include <wolfssl/wolfcrypt/asn.h>
+#include <wolfssl/wolfcrypt/rsa.h>
+#include <wolfssl/wolfcrypt/random.h>
+#endif
+
 #define REQUIRE(cond) \
     do {                                                                    \
         if (!(cond)) {                                                      \
@@ -99,6 +105,80 @@ static int test_pkcs7(void)
 }
 #endif
 
+#if defined(WOLFCERT_HAVE_SCEP) && defined(WOLFCERT_HAVE_RSA)
+static int oid_present(const uint8_t* hay, size_t hl,
+                       const uint8_t* needle, size_t nl)
+{
+    size_t i;
+    if (nl > hl)
+        return 0;
+
+    for (i = 0; i + nl <= hl; ++i) {
+        if (memcmp(hay + i, needle, nl) == 0)
+            return 1;
+    }
+
+    return 0;
+}
+
+/* The RFC 8894 GetCACaps "AES" keyword advertises AES-128-CBC as the
+ * content cipher. wolfcert_scep_envelop must emit exactly the cipher the
+ * caller selects, not silently fall back to AES-256-CBC which a
+ * minimally-compliant peer cannot decrypt. The non-AES fallback (a peer that
+ * does not advertise "AES") selects triple DES-CBC, so verify that DES3b
+ * emits the 3DES-CBC OID too. */
+static int test_scep_envelop_alg(void)
+{
+    static const uint8_t OID_AES128_CBC[] =
+        { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x01,0x02 };
+    static const uint8_t OID_AES256_CBC[] =
+        { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x01,0x2A };
+#ifndef NO_DES3
+    static const uint8_t OID_DES3_CBC[] =
+        { 0x06,0x08,0x2A,0x86,0x48,0x86,0xF7,0x0D,0x03,0x07 };
+#endif
+    static const uint8_t payload[] = { 0x04, 0x03, 0x61, 0x62, 0x63 };
+
+    RsaKey key;
+    WC_RNG rng;
+    uint8_t* ra_der = NULL;
+    size_t ra_len = 0;
+    WolfCertBuffer env = { 0 };
+
+    REQUIRE(wc_InitRng(&rng) == 0);
+    REQUIRE(wc_InitRsaKey(&key, NULL) == 0);
+    REQUIRE(wc_MakeRsaKey(&key, 2048, 65537L, &rng) == 0);
+
+    REQUIRE(wolfcert_scep_self_signed_rsa(&key, "scep-test",
+                                          &ra_der, &ra_len, NULL) == WOLFCERT_OK);
+
+    REQUIRE(wolfcert_scep_envelop(ra_der, ra_len, payload, sizeof(payload),
+                                  AES128CBCb, &env, NULL) == WOLFCERT_OK);
+
+    REQUIRE(oid_present(env.data, env.len,
+                        OID_AES128_CBC, sizeof(OID_AES128_CBC)));
+    REQUIRE(!oid_present(env.data, env.len,
+                         OID_AES256_CBC, sizeof(OID_AES256_CBC)));
+
+    wolfcert_buffer_free(&env);
+
+#ifndef NO_DES3
+    REQUIRE(wolfcert_scep_envelop(ra_der, ra_len, payload, sizeof(payload),
+                                  DES3b, &env, NULL) == WOLFCERT_OK);
+
+    REQUIRE(oid_present(env.data, env.len,
+                        OID_DES3_CBC, sizeof(OID_DES3_CBC)));
+
+    wolfcert_buffer_free(&env);
+#endif
+
+    WOLFCERT_XFREE(ra_der, NULL);
+    wc_FreeRsaKey(&key);
+    wc_FreeRng(&rng);
+    return 0;
+}
+#endif
+
 static int test_csr_pem(void)
 {
     WolfCertBuffer der = { 0 };
@@ -119,6 +199,10 @@ int main(void)
 #endif
     if (test_csr_pem())
         return 1;
+#if defined(WOLFCERT_HAVE_SCEP) && defined(WOLFCERT_HAVE_RSA)
+    if (test_scep_envelop_alg())
+        return 1;
+#endif
     wolfcert_cleanup();
     printf("OK\n");
     return 0;

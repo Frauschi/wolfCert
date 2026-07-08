@@ -265,18 +265,16 @@ int wolfcert_scep_issuer_and_subject(const uint8_t* issuer_cert_der, size_t issu
                                      const uint8_t* csr_der,         size_t csr_len,
                                      WolfCertBuffer* out_der, void* heap);
 
-int wolfcert_scep_envelop(const uint8_t* ra_cert_der, size_t ra_cert_len,
-                          const uint8_t* payload, size_t payload_len,
-                          int hash_oid,
-                          WolfCertBuffer* out_der, void* heap);
+WOLFCERT_TEST_VIS int wolfcert_scep_envelop(const uint8_t* ra_cert_der,
+    size_t ra_cert_len, const uint8_t* payload, size_t payload_len, int enc_oid,
+    WolfCertBuffer* out_der, void* heap);
 int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_cert_len,
                             const uint8_t* recipient_key_der,  size_t recipient_key_len,
                             const uint8_t* env_der, size_t env_len,
                             WolfCertBuffer* out_plain, void* heap);
 #ifdef WOLFCERT_HAVE_RSA
-int wolfcert_scep_self_signed_rsa(RsaKey* key, const char* subject_cn,
-                                  uint8_t** out_der, size_t* out_len,
-                                  void* heap);
+WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
+    const char* subject_cn, uint8_t** out_der, size_t* out_len, void* heap);
 #endif
 WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_message(const uint8_t* envelope_der,
     size_t envelope_len, const uint8_t* signer_cert_der, size_t signer_cert_len,

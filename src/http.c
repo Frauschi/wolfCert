@@ -352,7 +352,7 @@ typedef struct {
 
 static int dyn_append(DynBuf* d, const void* data, size_t len)
 {
-    if (d->len + len > d->max)
+    if (len > d->max - d->len)
         return WOLFCERT_ERR_PROTOCOL;
 
     if (d->len + len > d->cap) {
@@ -494,7 +494,7 @@ static int decode_chunked(const uint8_t* in, size_t in_len,
             return WOLFCERT_OK;
         }
 
-        if (p + clen + 2 > in_len) {
+        if (clen > max_bytes || p + 2 > in_len || clen > in_len - p - 2) {
             WOLFCERT_XFREE(body.buf, heap);
             return WOLFCERT_ERR_PROTOCOL;
         }
@@ -827,6 +827,8 @@ static int http_write_request(WolfCertConn* c, const WolfCertUrl* u,
     }
 
     size_t head_cap = 1024 + (req->content_type ? strlen(req->content_type) : 0)
+                           + (req->content_transfer_encoding ?
+                              strlen(req->content_transfer_encoding) : 0)
                            + (req->accept ? strlen(req->accept) : 0)
                            + strlen(u->host) + strlen(u->path) + strlen(auth);
     char* head = (char*)WOLFCERT_XMALLOC(head_cap, heap);
@@ -838,6 +840,7 @@ static int http_write_request(WolfCertConn* c, const WolfCertUrl* u,
         "Host: %s%s\r\n"
         "User-Agent: wolfCert/%s\r\n"
         "Connection: %s\r\n"
+        "%s%s%s"
         "%s%s%s"
         "%s%s%s"
         "Content-Length: %zu\r\n"
@@ -853,6 +856,9 @@ static int http_write_request(WolfCertConn* c, const WolfCertUrl* u,
         req->content_type ? "Content-Type: " : "",
         req->content_type ? req->content_type : "",
         req->content_type ? "\r\n" : "",
+        req->content_transfer_encoding ? "Content-Transfer-Encoding: " : "",
+        req->content_transfer_encoding ? req->content_transfer_encoding : "",
+        req->content_transfer_encoding ? "\r\n" : "",
         req->body_len,
         auth);
 
@@ -1336,6 +1342,8 @@ static int build_head(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
         snprintf(port_frag, sizeof(port_frag), ":%d", u->port);
 
     size_t head_cap = 1024 + (req->content_type ? strlen(req->content_type) : 0)
+                           + (req->content_transfer_encoding ?
+                              strlen(req->content_transfer_encoding) : 0)
                            + (req->accept ? strlen(req->accept) : 0)
                            + strlen(u->host) + strlen(u->path) + strlen(auth);
     char* head = (char*)WOLFCERT_XMALLOC(head_cap, s->heap);
@@ -1347,6 +1355,7 @@ static int build_head(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
         "Host: %s%s\r\n"
         "User-Agent: wolfCert/%s\r\n"
         "Connection: keep-alive\r\n"
+        "%s%s%s"
         "%s%s%s"
         "%s%s%s"
         "Content-Length: %zu\r\n"
@@ -1361,6 +1370,9 @@ static int build_head(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
         req->content_type ? "Content-Type: " : "",
         req->content_type ? req->content_type : "",
         req->content_type ? "\r\n" : "",
+        req->content_transfer_encoding ? "Content-Transfer-Encoding: " : "",
+        req->content_transfer_encoding ? req->content_transfer_encoding : "",
+        req->content_transfer_encoding ? "\r\n" : "",
         req->body_len,
         auth);
 

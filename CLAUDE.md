@@ -39,7 +39,12 @@ ED25519, ED448, MLDSA). RSA, ECC, Ed25519, Ed448 and ML-DSA are each
 *optional* (absent => warning, that key type returns
 `WOLFCERT_ERR_UNSUPPORTED`), with two constraints: at least one key
 algorithm must be present, and **SCEP requires RSA** (RFC 8894 is
-RSA-only) so a `NO_RSA` wolfSSL hard-fails unless SCEP is disabled. TLS:
+RSA-only) so a `NO_RSA` wolfSSL hard-fails unless SCEP is disabled. SCEP
+content encryption uses AES-128-CBC (the RFC 8894 `AES` capability); when
+a legacy peer does not advertise `AES` the client falls back to
+triple DES-CBC, which needs a wolfSSL built with 3DES support. A wolfSSL
+built `NO_DES3` still interoperates with any AES-advertising peer, but the
+client rejects a non-AES peer with `WOLFCERT_ERR_UNSUPPORTED`. TLS:
 the HTTPS transport pins its floor to TLS 1.2, or TLS 1.3 when wolfSSL
 is built `WOLFSSL_NO_TLS12`.
 

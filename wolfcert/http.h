@@ -40,6 +40,7 @@ typedef struct {
     const char* method;            /* "GET" or "POST" */
     const char* url;               /* full URL; scheme http or https */
     const char* content_type;
+    const char* content_transfer_encoding;
     const char* accept;
     const char* basic_user;        /* optional HTTP Basic auth */
     const char* basic_pass;

@@ -176,6 +176,14 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
     if (url == NULL)
         return WOLFCERT_ERR_MEMORY;
 
+    /* RFC 7030 section 3.5 lets an EST client bind the proof-of-possession to
+     * the TLS session by carrying the tls-unique channel binding (RFC 5929)
+     * inside the CSR (typically the PKCS#9 challengePassword). This is an
+     * optional measure and we currently do not implement it: the CSR is
+     * built independently of the live TLS session and submitted as-is. If
+     * channel binding is ever required, derive tls-unique from the TLS
+     * connection and feed it to the CSR builder before this point. */
+
     WolfCertBuffer b64 = { 0 };
     int rc = wolfcert_base64_encode_mime(csr_der, csr_der_len, &b64, heap);
     if (rc != WOLFCERT_OK) {
@@ -184,12 +192,13 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
     }
 
     WolfCertHttpRequest req = {
-        .method          = "POST",
-        .url             = url,
-        .content_type    = "application/pkcs10",
-        .accept          = "application/pkcs7-mime",
-        .body            = b64.data,
-        .body_len        = b64.len,
+        .method                    = "POST",
+        .url                       = url,
+        .content_type              = "application/pkcs10",
+        .content_transfer_encoding = "base64",
+        .accept                    = "application/pkcs7-mime",
+        .body                      = b64.data,
+        .body_len                  = b64.len,
     };
     fill_common(srv, &req);
 

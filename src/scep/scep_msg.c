@@ -225,12 +225,10 @@ static int build_signed_attribs(const WolfCertScepAttrs* a,
 
 /* ---- public API --------------------------------------------------------- */
 
-int wolfcert_scep_envelop(const uint8_t* ra_cert_der, size_t ra_cert_len,
-                           const uint8_t* payload, size_t payload_len,
-                           int hash_oid,
-                           WolfCertBuffer* out_der, void* heap)
+WOLFCERT_TEST_VIS int wolfcert_scep_envelop(const uint8_t* ra_cert_der,
+    size_t ra_cert_len, const uint8_t* payload, size_t payload_len, int enc_oid,
+    WolfCertBuffer* out_der, void* heap)
 {
-    (void)hash_oid;
     PKCS7* p7 = wc_PKCS7_New(heap, WOLFCERT_DEVID_SOFTWARE);
     if (p7 == NULL)
         return WOLFCERT_ERR_MEMORY;
@@ -251,7 +249,7 @@ int wolfcert_scep_envelop(const uint8_t* ra_cert_der, size_t ra_cert_len,
     p7->content      = (byte*)payload;
     p7->contentSz    = (word32)payload_len;
     p7->contentOID   = DATA;
-    p7->encryptOID   = AES256CBCb;
+    p7->encryptOID   = enc_oid;
     p7->keyWrapOID   = 0;
 
     size_t cap = payload_len + ra_cert_len + 4096;
@@ -318,9 +316,8 @@ int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_
     return WOLFCERT_OK;
 }
 
-int wolfcert_scep_self_signed_rsa(RsaKey* key, const char* subject_cn,
-                                   uint8_t** out_der, size_t* out_len,
-                                   void* heap)
+WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
+    const char* subject_cn, uint8_t** out_der, size_t* out_len, void* heap)
 {
     Cert* cert = wc_CertNew(heap);
     if (cert == NULL)
