@@ -31,6 +31,7 @@
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/random.h>
 #include <wolfssl/wolfcrypt/rsa.h>
+#include <wolfssl/wolfcrypt/memory.h>
 
 #include <stdio.h>
 #include <string.h>
@@ -438,6 +439,7 @@ static int rsa_key_to_der(const WolfCertKey* key, void* heap,
 
     int n = wc_RsaKeyToDer((RsaKey*)key->impl, der, (word32)cap);
     if (n <= 0) {
+        wc_ForceZero(der, (word32)cap);
         WOLFCERT_XFREE(der, heap);
         return WOLFCERT_ERR_CRYPTO;
     }
@@ -489,6 +491,7 @@ int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
                             NULL, 0, out);
 
     WOLFCERT_XFREE(signer_der, heap);
+    wc_ForceZero(key_der, (word32)key_der_len);
     WOLFCERT_XFREE(key_der, heap);
     return rc;
 }
@@ -560,6 +563,7 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
                             "17", csr_der, csr_der_len,
                             NULL, 0, out);
 
+    wc_ForceZero(key_der, (word32)key_der_len);
     WOLFCERT_XFREE(key_der, heap);
     return rc;
 }
@@ -656,6 +660,7 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
                                             heap);
         if (rc != WOLFCERT_OK) {
             wolfcert_buffer_free(&ias);
+            wc_ForceZero(key_der, (word32)key_der_len);
             WOLFCERT_XFREE(key_der, heap);
             return rc;
         }
@@ -671,6 +676,7 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
                             transaction_id, transaction_id_len, out);
 
     wolfcert_buffer_free(&ias);
+    wc_ForceZero(key_der, (word32)key_der_len);
     WOLFCERT_XFREE(key_der, heap);
     WOLFCERT_XFREE(derived_signer, heap);
     return rc;

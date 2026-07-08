@@ -24,6 +24,8 @@
 #include <wolfcert/errors.h>
 #include "../internal.h"
 
+#include <wolfssl/wolfcrypt/memory.h>
+
 #include <stdio.h>
 #include <string.h>
 
@@ -66,9 +68,15 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
     req->connect_ctx       = srv->connect_ctx;
 }
 
-/* RFC 7030 mandates EST over TLS. Reject an explicitly non-TLS (http://)
- * server URL; a schemeless URL already defaults to TLS in
- * wolfcert_http_url_parse(), so only an explicit http:// scheme is refused. */
+/* RFC 7030 mandates EST over TLS *and* that the client authenticate the
+ * server on every request. Reject an explicitly non-TLS (http://) server URL
+ * first; a schemeless URL already defaults to TLS in wolfcert_http_url_parse(),
+ * so only an explicit http:// scheme is refused. Then require server
+ * authentication: verify_server is the sole switch for peer verification in
+ * this transport (http.c installs WOLFSSL_VERIFY_PEER only when it is set), so
+ * verify_server off always completes an unauthenticated handshake - a pinned
+ * trust anchor is loaded but never enforced - which would leak the HTTP Basic
+ * credentials and the CSR to a MITM. */
 static int est_require_tls(const WolfCertServerCfg* srv, void* heap)
 {
     WolfCertUrl u;
@@ -82,6 +90,11 @@ static int est_require_tls(const WolfCertServerCfg* srv, void* heap)
     if (!tls)
         return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
             "EST requires TLS; refusing plaintext http:// URL (RFC 7030)");
+
+    if (!srv->verify_server)
+        return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
+            "EST requires server authentication: set verify_server to verify "
+            "the server certificate (RFC 7030)");
 
     return WOLFCERT_OK;
 }
@@ -275,6 +288,7 @@ int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
                         current_cert, current_cert_len,
                         key_pem.data, key_pem.len, out);
 
+    wc_ForceZero(key_pem.data, (word32)key_pem.len);
     wolfcert_buffer_free(&key_pem);
     return rc;
 }
@@ -387,6 +401,16 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
         wolfcert_http_url_free(&u);
         return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
             "EST requires TLS; refusing plaintext http:// URL (RFC 7030)");
+    }
+
+    /* EST also requires authenticating the server (RFC 7030); refuse a session
+     * that would run an unauthenticated (verify_server off) handshake, matching
+     * the one-shot est_require_tls() gate. */
+    if (!srv->verify_server) {
+        wolfcert_http_url_free(&u);
+        return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
+            "EST requires server authentication: set verify_server to verify "
+            "the server certificate (RFC 7030)");
     }
 
     size_t origin_len = strlen(u.scheme) + 3 + strlen(u.host) + 16;
@@ -581,8 +605,13 @@ int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
     }
 
     if (s->in_resp.status_code != 200) {
-        int mapped = (s->in_resp.status_code == 401 || s->in_resp.status_code == 403)
-                     ? WOLFCERT_ERR_AUTH : WOLFCERT_ERR_HTTP;
+        int mapped;
+        if (s->in_resp.status_code == 202)
+            mapped = WOLFCERT_ERR_PENDING;
+        else if (s->in_resp.status_code == 401 || s->in_resp.status_code == 403)
+            mapped = WOLFCERT_ERR_AUTH;
+        else
+            mapped = WOLFCERT_ERR_HTTP;
         est_async_reset(s);
 
         return mapped;
@@ -674,8 +703,13 @@ int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
         return rc;
 
     if (resp.status_code != 200) {
-        int mapped = (resp.status_code == 401 || resp.status_code == 403)
-                     ? WOLFCERT_ERR_AUTH : WOLFCERT_ERR_HTTP;
+        int mapped;
+        if (resp.status_code == 202)
+            mapped = WOLFCERT_ERR_PENDING;
+        else if (resp.status_code == 401 || resp.status_code == 403)
+            mapped = WOLFCERT_ERR_AUTH;
+        else
+            mapped = WOLFCERT_ERR_HTTP;
         wolfcert_http_response_free(&resp);
 
         return mapped;
@@ -722,7 +756,11 @@ int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
     if (rc != WOLFCERT_OK)
         return rc;
 
-    if (resp.status_code == 204 || resp.body_len == 0) {
+    /* RFC 7030 section 4.5.2: both 204 and 404 mean the server has no CSR
+     * Attributes Response to offer; treat either (and an empty body) as a
+     * normal "no attributes" result rather than a transport error. */
+    if (resp.status_code == 204 || resp.status_code == 404 ||
+        resp.body_len == 0) {
         wolfcert_http_response_free(&resp);
         return WOLFCERT_OK;
     }

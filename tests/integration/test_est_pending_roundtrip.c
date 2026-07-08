@@ -48,6 +48,7 @@
 
 #include "tls_test_util.h"
 
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -69,6 +70,26 @@ static void* server_thread(void* arg)
 {
     wolfcert_server_run((WolfCertServer*)arg);
     return NULL;
+}
+
+/* Drive the non-blocking session enroll to a terminal result, polling the
+ * session fd between WOLFCERT_ERR_WANT_READ / _WANT_WRITE returns. Returns the
+ * terminal code as-is (WOLFCERT_OK, WOLFCERT_ERR_PENDING, or an error) so the
+ * caller can assert the 202 -> PENDING mapping on the async path directly. */
+static int pump_enroll_nb(WolfCertEstSession* s, const uint8_t* csr,
+                          size_t csr_len, WolfCertBuffer* out)
+{
+    int fd = wolfcert_est_session_fd(s);
+    for (;;) {
+        int rc = wolfcert_est_session_simple_enroll_nb(s, csr, csr_len, out);
+        if (rc != WOLFCERT_ERR_WANT_READ && rc != WOLFCERT_ERR_WANT_WRITE)
+            return rc;
+
+        struct pollfd p = { .fd = fd,
+            .events = (rc == WOLFCERT_ERR_WANT_WRITE) ? POLLOUT : POLLIN };
+        if (poll(&p, 1, 5000) <= 0)
+            return WOLFCERT_ERR_IO;
+    }
 }
 
 /* Produce a fresh CSR for a given subject so each sub-test works on an
@@ -163,6 +184,66 @@ static int pending_path(WolfCertServer* s)
 
     wolfcert_buffer_free(&csr_leg);
     wolfcert_key_free(dk_leg);
+
+    /* ---- Keep-alive session enroll surfaces PENDING the same way ----
+     * The blocking session API has no richer result struct, so a 202
+     * Accepted must come back as WOLFCERT_ERR_PENDING rather than a
+     * generic HTTP error. Use a distinct CSR so the queue starts empty. */
+    WolfCertKey* dk_sess = NULL;
+    WolfCertBuffer csr_sess = { 0 };
+    REQUIRE(make_csr("CN=device-est-pending-session", &dk_sess, &csr_sess) == 0);
+
+    WolfCertEstSession* sess = NULL;
+    REQUIRE(wolfcert_est_session_open(&cli, &sess) == WOLFCERT_OK);
+
+    WolfCertBuffer sess_out = { 0 };
+    int sess_rc = wolfcert_est_session_simple_enroll(sess, csr_sess.data,
+                                                     csr_sess.len, &sess_out);
+    REQUIRE(sess_rc == WOLFCERT_ERR_PENDING);
+    REQUIRE(sess_out.data == NULL);
+
+    /* A second call on the same session completes the approval flow. */
+    sess_rc = wolfcert_est_session_simple_enroll(sess, csr_sess.data,
+                                                 csr_sess.len, &sess_out);
+    REQUIRE(sess_rc == WOLFCERT_OK);
+    REQUIRE(sess_out.data != NULL);
+    REQUIRE(memmem(sess_out.data, sess_out.len,
+                   "BEGIN CERTIFICATE", 17) != NULL);
+    wolfcert_buffer_free(&sess_out);
+
+    wolfcert_est_session_close(sess);
+    wolfcert_buffer_free(&csr_sess);
+    wolfcert_key_free(dk_sess);
+
+    /* ---- Non-blocking session enroll surfaces PENDING the same way ----
+     * The async variant applies the identical 202 -> WOLFCERT_ERR_PENDING
+     * mapping and resets the in-flight request so the retry can reuse the
+     * connection. Drive it through poll(2) with a distinct CSR. */
+    WolfCertKey* dk_async = NULL;
+    WolfCertBuffer csr_async = { 0 };
+    REQUIRE(make_csr("CN=device-est-pending-async", &dk_async, &csr_async) == 0);
+
+    WolfCertEstSession* asess = NULL;
+    REQUIRE(wolfcert_est_session_open_async(&cli, &asess) == WOLFCERT_OK);
+
+    WolfCertBuffer async_out = { 0 };
+    int async_rc = pump_enroll_nb(asess, csr_async.data, csr_async.len,
+                                  &async_out);
+    REQUIRE(async_rc == WOLFCERT_ERR_PENDING);
+    REQUIRE(async_out.data == NULL);
+
+    /* A second drive on the same session completes the approval flow. */
+    async_rc = pump_enroll_nb(asess, csr_async.data, csr_async.len, &async_out);
+    REQUIRE(async_rc == WOLFCERT_OK);
+    REQUIRE(async_out.data != NULL);
+    REQUIRE(memmem(async_out.data, async_out.len,
+                   "BEGIN CERTIFICATE", 17) != NULL);
+    wolfcert_buffer_free(&async_out);
+
+    wolfcert_est_session_close(asess);
+    wolfcert_buffer_free(&csr_async);
+    wolfcert_key_free(dk_async);
+
     wolfcert_buffer_free(&ca_pem);
     return 0;
 }

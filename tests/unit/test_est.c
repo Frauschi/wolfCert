@@ -195,6 +195,92 @@ static void* srv_thread(void* arg)
     return NULL;
 }
 
+/* wolfcert_oid_to_dotted must decode the first two arcs correctly even when
+ * the leading byte is >= 120 (node1 == 2, node2 >= 40), not just for the
+ * common OIDs whose first byte is < 80. */
+static int test_oid_to_dotted(void)
+{
+    char out[128];
+
+    const uint8_t high[] = { 0x78, 0x03 };   /* 40*2 + 40 = 120 -> 2.40.3 */
+    wolfcert_oid_to_dotted(high, sizeof(high), out, sizeof(out));
+    REQUIRE(strcmp(out, "2.40.3") == 0);
+
+    const uint8_t low[] = { 0x2A, 0x03 };    /* 40*1 + 2 = 42 -> 1.2.3 */
+    wolfcert_oid_to_dotted(low, sizeof(low), out, sizeof(out));
+    REQUIRE(strcmp(out, "1.2.3") == 0);
+
+    /* An empty OID must still leave a valid, empty C string. */
+    memset(out, 'x', sizeof(out));
+    wolfcert_oid_to_dotted(NULL, 0, out, sizeof(out));
+    REQUIRE(out[0] == '\0');
+
+    return 0;
+}
+
+/* RFC 7030 mandates that an EST client authenticate the server. In this
+ * transport verify_server is the only switch that turns on peer verification,
+ * so any config that leaves it at its zero default must be refused - with or
+ * without a pinned trust anchor - before an HTTP Basic credential or a CSR
+ * crosses the wire, rather than silently completing a VERIFY_NONE handshake. */
+static int test_est_require_server_auth(void)
+{
+    static const uint8_t dummy_ta[]  = { 0x30, 0x03, 0x02, 0x01, 0x00 };
+    static const uint8_t dummy_csr[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
+    WolfCertServerCfg srv = {
+        .protocol      = WOLFCERT_PROTO_EST,
+        .server_url    = "https://127.0.0.1:1/.well-known/est",
+        .verify_server = 0
+    };
+    WolfCertBuffer out = { 0 };
+    WolfCertEstSession* sess = NULL;
+    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* rk = NULL;
+
+    /* verify_server off, no trust anchor: every entry point must be rejected
+     * at the TLS gate, before the transport is dialed, so the assertion is
+     * the gate's own WOLFCERT_ERR_TLS rather than a downstream connect
+     * failure. The enroll path is the one that actually transmits the Basic
+     * credentials and the CSR, so it is asserted directly; the gate fires
+     * before the CSR bytes are parsed, so a placeholder CSR is fine. */
+    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_TLS);
+    REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == WOLFCERT_ERR_TLS);
+    REQUIRE(wolfcert_est_simple_enroll(&srv, dummy_csr, sizeof(dummy_csr),
+                                       &out) == WOLFCERT_ERR_TLS);
+
+    /* Reenroll shares the same gate, but it fires inside post_enroll_ex after
+     * the current key is serialized to PEM, so it needs a real key to reach
+     * the gate rather than tripping an earlier argument check. */
+    REQUIRE(wolfcert_key_generate(&kcfg, &rk) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_simple_reenroll(&srv, dummy_csr, sizeof(dummy_csr), rk,
+                                         dummy_csr, sizeof(dummy_csr), &out)
+            == WOLFCERT_ERR_TLS);
+    wolfcert_key_free(rk);
+
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_TLS);
+    REQUIRE(sess == NULL);
+
+    /* A pinned trust anchor is not enough: verify_server alone drives peer
+     * verification, so verify_server=0 stays refused even with a trust anchor.
+     * The gate must not be fooled into treating a loaded-but-unenforced trust
+     * anchor as server authentication. */
+    srv.trust_anchors     = dummy_ta;
+    srv.trust_anchors_len = sizeof(dummy_ta);
+    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_TLS);
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_TLS);
+
+    /* An authenticated config (verify_server on) passes the gate and reaches
+     * the transport, failing only because nothing is listening on port 1,
+     * which surfaces as WOLFCERT_ERR_IO - proving the gate does not
+     * over-refuse a legitimate request. */
+    srv.verify_server = 1;
+    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_IO);
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_IO);
+
+    return 0;
+}
+
 int main(void)
 {
     /* The mock TLS responder may wolfSSL_write() after the client has read its
@@ -203,6 +289,12 @@ int main(void)
     signal(SIGPIPE, SIG_IGN);
 
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+
+    if (test_oid_to_dotted())
+        return 1;
+
+    if (test_est_require_server_auth())
+        return 1;
 
     uint8_t ca_der[4096];
     size_t ca_len = 0;

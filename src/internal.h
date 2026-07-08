@@ -236,6 +236,13 @@ WOLFCERT_TEST_VIS int wolfcert_pkcs7_build_certs_only(const uint8_t* const* cert
                                                       const size_t* certs_len, size_t count,
                                                       WolfCertBuffer* out_der, void* heap);
 
+/* Render a DER OID (the subidentifier bytes) as a dotted-decimal string into
+ * `out`, always NUL-terminating when out_cap > 0. Follows snprintf return
+ * semantics: the count is what would have been written and may exceed out_cap
+ * on truncation, so it is not a safe string length. */
+WOLFCERT_TEST_VIS size_t wolfcert_oid_to_dotted(const uint8_t* oid, size_t oid_len,
+                                                char* out, size_t out_cap);
+
 /* SCEP pkiMessage helpers. */
 typedef struct {
     const uint8_t* transaction_id;

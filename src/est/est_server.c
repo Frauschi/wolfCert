@@ -484,6 +484,10 @@ static void send_accepted_retry_after(WolfCertServer* s, int fd, int retry_after
     send_all(s, fd, hdr, (size_t)n);
 }
 
+/* HTTP Basic authentication scheme token, including its trailing space. */
+#define EST_BASIC_AUTH_SCHEME     "Basic "
+#define EST_BASIC_AUTH_SCHEME_LEN (sizeof(EST_BASIC_AUTH_SCHEME) - 1)
+
 static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
 {
     if (s->cfg_basic_user == NULL)
@@ -492,7 +496,8 @@ static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
     if (auth_header == NULL)
         return 0;
 
-    if (strncasecmp(auth_header, "Basic ", 6) != 0)
+    if (strncasecmp(auth_header, EST_BASIC_AUTH_SCHEME,
+                    EST_BASIC_AUTH_SCHEME_LEN) != 0)
         return 0;
 
     size_t ul = strlen(s->cfg_basic_user);
@@ -510,7 +515,17 @@ static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
     if (wolfcert_base64_encode(raw, ul + 1 + pl, &enc, s->heap) != WOLFCERT_OK)
         return 0;
 
-    int ok = strncmp(auth_header + 6, (char*)enc.data, enc.len) == 0;
+    /* Constant-time, full-length comparison of the base64 credential: reject
+     * on a length mismatch, then accumulate byte differences so the timing
+     * does not leak the length of the matching prefix. */
+    const char* tok = auth_header + EST_BASIC_AUTH_SCHEME_LEN;
+    int ok = (strlen(tok) == enc.len);
+    if (ok) {
+        unsigned acc = 0;
+        for (size_t i = 0; i < enc.len; ++i)
+            acc |= (unsigned)((unsigned char)tok[i] ^ enc.data[i]);
+        ok = (acc == 0);
+    }
     wolfcert_buffer_free(&enc);
 
     return ok;
@@ -785,29 +800,44 @@ static int csr_attrs_enforce(const WolfCertServer* s,
     return missing ? WOLFCERT_ERR_PROTOCOL : WOLFCERT_OK;
 }
 
+WOLFCERT_TEST_VIS size_t wolfcert_oid_to_dotted(const uint8_t* oid, size_t oid_len,
+                                                char* out, size_t out_cap)
+{
+    size_t off = 0;
+
+    /* Always leave a valid C string, even for an empty OID or zero capacity. */
+    if (out_cap > 0)
+        out[0] = '\0';
+
+    if (oid_len >= 1) {
+        /* First byte holds the first two arcs as 40*node1 + node2. node1 is
+         * capped at 2, so for a first byte >= 80 node2 is the remainder above
+         * 80 (node2 can exceed 40 only when node1 == 2). */
+        unsigned first  = oid[0] < 80 ? oid[0] / 40 : 2;
+        unsigned second = oid[0] < 80 ? oid[0] % 40 : oid[0] - 80u;
+        off += (size_t)snprintf(out + off, out_cap - off, "%u.%u",
+                                first, second);
+    }
+
+    unsigned long n = 0;
+    for (size_t i = 1; i < oid_len && off + 16 < out_cap; ++i) {
+        n = (n << 7) | (oid[i] & 0x7F);
+        if ((oid[i] & 0x80) == 0) {
+            off += (size_t)snprintf(out + off, out_cap - off, ".%lu", n);
+            n = 0;
+        }
+    }
+
+    return off;
+}
+
 /* Emit a 400 Bad Request whose body lists the missing OID in dotted
  * decimal. Helpful for humans debugging the round-trip. */
 static void send_missing_oid(WolfCertServer* s, int fd,
                              const uint8_t* oid, size_t oid_len)
 {
-    /* Render the OID. First byte holds first two arcs (40*a + b). */
     char txt[128];
-    size_t off = 0;
-    if (oid_len >= 1) {
-        unsigned first  = oid[0] / 40;
-        unsigned second = oid[0] % 40;
-        off += (size_t)snprintf(txt + off, sizeof(txt) - off, "%u.%u",
-                                first, second);
-    }
-
-    unsigned long n = 0;
-    for (size_t i = 1; i < oid_len && off + 16 < sizeof(txt); ++i) {
-        n = (n << 7) | (oid[i] & 0x7F);
-        if ((oid[i] & 0x80) == 0) {
-            off += (size_t)snprintf(txt + off, sizeof(txt) - off, ".%lu", n);
-            n = 0;
-        }
-    }
+    wolfcert_oid_to_dotted(oid, oid_len, txt, sizeof(txt));
 
     char body[192];
     int bl = snprintf(body, sizeof(body),

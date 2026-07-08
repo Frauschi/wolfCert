@@ -36,6 +36,7 @@
 #include <wolfssl/wolfcrypt/ecc.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/memory.h>
 #ifdef WOLFCERT_HAVE_ED25519
 #  include <wolfssl/wolfcrypt/ed25519.h>
 #endif
@@ -297,6 +298,8 @@ void wolfcert_ca_free(WolfCertCa* ca)
     }
 
     WOLFCERT_XFREE(ca->cert_der, ca->heap);
+    if (ca->key_der != NULL && ca->key_der_len > 0)
+        wc_ForceZero(ca->key_der, ca->key_der_len);
     WOLFCERT_XFREE(ca->key_der,  ca->heap);
     memset(ca, 0, sizeof(*ca));
 }
@@ -604,8 +607,8 @@ static int flatten_csr_san(DecodedCert* dc, Cert* nc, void* heap)
     } while (0)
 
 int wolfcert_ca_issue(WolfCertCa* ca,
-                       const uint8_t* csr_der, size_t csr_len,
-                       uint8_t** out_cert, size_t* out_len)
+                      const uint8_t* csr_der, size_t csr_len,
+                      uint8_t** out_cert, size_t* out_len)
 {
     if (ca == NULL || csr_der == NULL || out_cert == NULL || out_len == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -615,9 +618,13 @@ int wolfcert_ca_issue(WolfCertCa* ca,
     if (ca_alg == NULL)
         return WOLFCERT_ERR_UNSUPPORTED;
 
+    /* Verify the PKCS#10 self-signature: it is the proof-of-possession that
+     * the requester holds the private key for the public key being certified.
+     * Parsing with VERIFY makes wolfSSL confirm the CertificationRequest
+     * signature against the embedded SubjectPublicKeyInfo. */
     DecodedCert dc;
     wc_InitDecodedCert(&dc, (byte*)csr_der, (word32)csr_len, heap);
-    int rc = wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL);
+    int rc = wc_ParseCert(&dc, CERTREQ_TYPE, VERIFY, NULL);
     if (rc != 0) {
         wc_FreeDecodedCert(&dc);
         return WOLFCERT_ERR_WC(rc, "ca", "ParseCert(CSR)");

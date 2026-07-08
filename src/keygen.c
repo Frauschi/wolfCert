@@ -25,6 +25,8 @@
 #include "internal.h"
 #include "key_algs.h"
 
+#include <wolfssl/wolfcrypt/memory.h>
+
 #include <string.h>
 
 static WolfCertKey* alloc_shell(WolfCertKeyType type, int dev_id,
@@ -234,6 +236,7 @@ static int key_export_der(const WolfCertKey* key, uint8_t** out_der,
 
     int der_len = alg->priv_to_der(key, der, (word32)der_cap);
     if (der_len <= 0) {
+        wc_ForceZero(der, der_cap);
         WOLFCERT_XFREE(der, heap);
         return WOLFCERT_ERR_WC(der_len, "keygen", "priv_to_der");
     }
@@ -281,14 +284,19 @@ int wolfcert_key_to_pem(const WolfCertKey* key, WolfCertBuffer* out_pem)
     size_t pem_cap = (size_t)der_len * 2 + 256;
     uint8_t* pem = (uint8_t*)WOLFCERT_XMALLOC(pem_cap, heap);
     if (pem == NULL) {
+        wc_ForceZero(der, (word32)der_len);
         WOLFCERT_XFREE(der, heap);
         return WOLFCERT_ERR_MEMORY;
     }
 
     int pem_len = wc_DerToPem(der, (word32)der_len, pem, (word32)pem_cap, alg->pem_type);
 
+    wc_ForceZero(der, (word32)der_len);
     WOLFCERT_XFREE(der, heap);
     if (pem_len <= 0) {
+        /* wc_DerToPem may have written partial base64 of the private key
+         * before failing, so scrub the buffer before releasing it. */
+        wc_ForceZero(pem, (word32)pem_cap);
         WOLFCERT_XFREE(pem, heap);
         return WOLFCERT_ERR_WC(pem_len, "keygen", "DerToPem");
     }
