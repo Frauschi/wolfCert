@@ -471,58 +471,56 @@ static int fill_client_ident(const Opts* opts, WolfCertServerCfg* cfg,
 static int cmd_getcacerts(int argc, char** argv)
 {
     Opts opts;
-    if (parse_common(argc, argv, &opts) != 0) {
-        opts_free(&opts);
-        return 1;
-    }
-
-    WolfCertProtocol p;
-    if (proto_of(opts.proto, &p) != 0) {
-        opts_free(&opts);
-        return 1;
-    }
-
     uint8_t* trust_hold = NULL;
     uint8_t* mt_cert = NULL;
     uint8_t* mt_key = NULL;
+    WolfCertProtocol p = 0;
+    WolfCertBuffer pem = { 0 };
+    int rc = WOLFCERT_ERR_UNSUPPORTED;
+    int ret = 0;
+    int wrc = 0;
+
+    if (parse_common(argc, argv, &opts) != 0)
+        ret = 1;
+
+    if (ret == 0 && proto_of(opts.proto, &p) != 0)
+        ret = 1;
+
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
                               .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
 
-    fill_trust(&opts, &srv, &trust_hold);
-    if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0) {
-        free(trust_hold);
-        opts_free(&opts);
-        return 1;
+    if (ret == 0) {
+        fill_trust(&opts, &srv, &trust_hold);
+        if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
+            ret = 1;
     }
 
-    WolfCertBuffer pem = { 0 };
-    int rc = WOLFCERT_ERR_UNSUPPORTED;
-
-    if (p == WOLFCERT_PROTO_EST) {
+    if (ret == 0) {
+        if (p == WOLFCERT_PROTO_EST) {
 #ifdef WOLFCERT_HAVE_EST
-        rc = wolfcert_est_get_cacerts(&srv, &pem);
+            rc = wolfcert_est_get_cacerts(&srv, &pem);
 #endif
-    }
-    else {
+        }
+        else {
 #ifdef WOLFCERT_HAVE_SCEP
-        rc = wolfcert_scep_get_ca_cert(&srv, &pem);
+            rc = wolfcert_scep_get_ca_cert(&srv, &pem);
 #endif
+        }
+
+        if (rc != WOLFCERT_OK) {
+            fprintf(stderr, "getcacerts: %s\n", wolfcert_strerror(rc));
+            ret = 2;
+        }
     }
 
-    if (rc != WOLFCERT_OK) {
-        fprintf(stderr, "getcacerts: %s\n", wolfcert_strerror(rc));
-        free(trust_hold);
-        free(mt_cert);
-        free(mt_key);
-        opts_free(&opts);
-        return 2;
-    }
-
-    int wrc = write_file(opts.out_cert, pem.data, pem.len, 0);
-    if (wrc != 0) {
-        fprintf(stderr, "getcacerts: cannot write %s\n",
-                opts.out_cert ? opts.out_cert : "<stdout>");
+    if (ret == 0) {
+        wrc = write_file(opts.out_cert, pem.data, pem.len, 0);
+        if (wrc != 0) {
+            fprintf(stderr, "getcacerts: cannot write %s\n",
+                    opts.out_cert ? opts.out_cert : "<stdout>");
+            ret = 2;
+        }
     }
 
     wolfcert_buffer_free(&pem);
@@ -530,64 +528,41 @@ static int cmd_getcacerts(int argc, char** argv)
     free(mt_cert);
     free(mt_key);
     opts_free(&opts);
-
-    return wrc != 0 ? 2 : 0;
+    return ret;
 }
 
 static int cmd_enroll(int argc, char** argv)
 {
     Opts opts;
-    if (parse_common(argc, argv, &opts) != 0) {
-        opts_free(&opts);
-        return 1;
-    }
+    uint8_t* trust_hold = NULL;
+    uint8_t* mt_cert = NULL;
+    uint8_t* mt_key = NULL;
+    WolfCertKey* key = NULL;
+    WolfCertBuffer csr = { 0 };
+    WolfCertBuffer issued = { 0 };
+    WolfCertKeyCfg kcfg = { .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertProtocol p = 0;
+    int rc = WOLFCERT_ERR_UNSUPPORTED;
+    int ret = 0;
+    int wrc = 0;
 
-    WolfCertProtocol p;
-    if (proto_of(opts.proto, &p) != 0) {
-        opts_free(&opts);
-        return 1;
-    }
+    if (parse_common(argc, argv, &opts) != 0)
+        ret = 1;
 
-    if (opts.subject == NULL) {
+    if (ret == 0 && proto_of(opts.proto, &p) != 0)
+        ret = 1;
+
+    if (ret == 0 && opts.subject == NULL) {
         fprintf(stderr, "enroll: --subject required\n");
-        opts_free(&opts);
-        return 1;
+        ret = 1;
     }
 
     /* Build the server cfg first - needed by --csrattrs-auto before we
      * pick a key type. The key cfg + meta are populated below, then
      * optionally overlaid with /csrattrs hints, then used to generate. */
-    uint8_t* trust_hold = NULL;
-    uint8_t* mt_cert = NULL;
-    uint8_t* mt_key = NULL;
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
                               .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
-
-    fill_trust(&opts, &srv, &trust_hold);
-    if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0) {
-        free(trust_hold);
-        opts_free(&opts);
-        return 1;
-    }
-
-    WolfCertKeyCfg kcfg = { .dev_id = WOLFCERT_DEVID_SOFTWARE };
-    if (opts.key_type != NULL) {
-        WolfCertKeyType kt = 0;
-        int kparam = 0;
-        if (parse_key_type(opts.key_type, &kt, &kparam) != 0) {
-            fprintf(stderr, "enroll: bad --key-type\n");
-            free(trust_hold);
-            free(mt_cert);
-            free(mt_key);
-            opts_free(&opts);
-            return 1;
-        }
-
-        kcfg.type = kt;
-        kcfg.param = kparam;
-    }
-
     WolfCertCertMeta meta = { .subject_dn = opts.subject,
                               .san_dns = opts.san_dns, .san_dns_len = opts.san_dns_len,
                               .san_ip = opts.san_ip, .san_ip_len = opts.san_ip_len,
@@ -595,41 +570,53 @@ static int cmd_enroll(int argc, char** argv)
                               .san_email = opts.san_email, .san_email_len = opts.san_email_len,
                               .challenge_password = opts.challenge };
 
-    if (opts.csrattrs_auto && p == WOLFCERT_PROTO_EST) {
+    if (ret == 0) {
+        fill_trust(&opts, &srv, &trust_hold);
+        if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
+            ret = 1;
+    }
+
+    if (ret == 0 && opts.key_type != NULL) {
+        WolfCertKeyType kt = 0;
+        int kparam = 0;
+        if (parse_key_type(opts.key_type, &kt, &kparam) != 0) {
+            fprintf(stderr, "enroll: bad --key-type\n");
+            ret = 1;
+        }
+        else {
+            kcfg.type = kt;
+            kcfg.param = kparam;
+        }
+    }
+
+    if (ret == 0 && opts.csrattrs_auto && p == WOLFCERT_PROTO_EST) {
 #ifdef WOLFCERT_HAVE_EST
         WolfCertBuffer raw = { 0 };
-        int rc = wolfcert_est_get_csr_attrs(&srv, &raw);
+        rc = wolfcert_est_get_csr_attrs(&srv, &raw);
         if (rc != WOLFCERT_OK) {
             fprintf(stderr, "csrattrs: %s\n", wolfcert_strerror(rc));
-            free(trust_hold);
-            free(mt_cert);
-            free(mt_key);
-            opts_free(&opts);
-            return 2;
+            ret = 2;
         }
+        else {
+            if (raw.data != NULL && raw.len > 0) {
+                WolfCertCsrAttrs attrs;
+                rc = wolfcert_est_parse_csr_attrs(raw.data, raw.len, &attrs);
+                if (rc == WOLFCERT_OK)
+                    rc = wolfcert_csr_attrs_apply(&attrs, &kcfg, &meta);
+                wolfcert_csr_attrs_free(&attrs);
+            }
 
-        if (raw.data != NULL && raw.len > 0) {
-            WolfCertCsrAttrs attrs;
-            rc = wolfcert_est_parse_csr_attrs(raw.data, raw.len, &attrs);
-            if (rc == WOLFCERT_OK)
-                rc = wolfcert_csr_attrs_apply(&attrs, &kcfg, &meta);
-            wolfcert_csr_attrs_free(&attrs);
-        }
-
-        wolfcert_buffer_free(&raw);
-        if (rc != WOLFCERT_OK) {
-            fprintf(stderr, "csrattrs: %s\n", wolfcert_strerror(rc));
-            free(trust_hold);
-            free(mt_cert);
-            free(mt_key);
-            opts_free(&opts);
-            return 2;
+            wolfcert_buffer_free(&raw);
+            if (rc != WOLFCERT_OK) {
+                fprintf(stderr, "csrattrs: %s\n", wolfcert_strerror(rc));
+                ret = 2;
+            }
         }
 #endif
     }
 
     /* Fallback default when neither --key-type nor /csrattrs pinned one. */
-    if (kcfg.type == 0) {
+    if (ret == 0 && kcfg.type == 0) {
         WolfCertKeyType kt = 0;
         int kparam = 0;
         parse_key_type("ecc:256", &kt, &kparam);
@@ -637,32 +624,26 @@ static int cmd_enroll(int argc, char** argv)
         kcfg.param = kparam;
     }
 
-    WolfCertKey* key = NULL;
-    int rc = wolfcert_key_generate(&kcfg, &key);
-    if (rc != WOLFCERT_OK) {
-        fprintf(stderr, "keygen: %s\n", wolfcert_strerror(rc));
-        free(trust_hold);
-        free(mt_cert);
-        free(mt_key);
-        opts_free(&opts);
-        return 2;
+    if (ret == 0) {
+        rc = wolfcert_key_generate(&kcfg, &key);
+        if (rc != WOLFCERT_OK) {
+            fprintf(stderr, "keygen: %s\n", wolfcert_strerror(rc));
+            ret = 2;
+        }
     }
 
-    WolfCertBuffer csr = { 0 };
-    rc = wolfcert_csr_build(key, &meta, &csr);
-    if (rc != WOLFCERT_OK) {
-        fprintf(stderr, "csr: %s\n", wolfcert_strerror(rc));
-        wolfcert_key_free(key);
-        free(trust_hold);
-        free(mt_cert);
-        free(mt_key);
-        opts_free(&opts);
-        return 2;
+    if (ret == 0) {
+        rc = wolfcert_csr_build(key, &meta, &csr);
+        if (rc != WOLFCERT_OK) {
+            fprintf(stderr, "csr: %s\n", wolfcert_strerror(rc));
+            ret = 2;
+        }
     }
 
-    WolfCertBuffer issued = { 0 };
-    rc = WOLFCERT_ERR_UNSUPPORTED;
-    if (p == WOLFCERT_PROTO_EST) {
+    if (ret == 0)
+        rc = WOLFCERT_ERR_UNSUPPORTED;
+
+    if (ret == 0 && p == WOLFCERT_PROTO_EST) {
 #ifdef WOLFCERT_HAVE_EST
         if (opts.pha) {
             /* Keep-alive + TLS 1.3 post-handshake auth: open one session,
@@ -721,7 +702,7 @@ static int cmd_enroll(int argc, char** argv)
         }
 #endif
     }
-    else {
+    else if (ret == 0) {
 #ifdef WOLFCERT_HAVE_SCEP
         WolfCertBuffer ca_pem = { 0 };
         rc = wolfcert_scep_get_ca_cert(&srv, &ca_pem);
@@ -803,182 +784,160 @@ static int cmd_enroll(int argc, char** argv)
 #endif
     }
 
-    if (rc != WOLFCERT_OK) {
+    if (ret == 0 && rc != WOLFCERT_OK) {
         fprintf(stderr, "enroll: %s\n", wolfcert_strerror(rc));
         const char* m = wolfcert_last_error_message();
         if (m && *m) {
             fprintf(stderr, "enroll: detail (wolfssl_err=%d): %s\n",
                 wolfcert_last_wolfssl_err(), m);
         }
-
-        wolfcert_buffer_free(&csr);
-        wolfcert_key_free(key);
-        free(trust_hold);
-        free(mt_cert);
-        free(mt_key);
-        opts_free(&opts);
-        return 2;
+        ret = 2;
     }
 
-    int wrc = 0;
-    if (opts.out_cert) {
-        wrc = write_file(opts.out_cert, issued.data, issued.len, 0);
-    }
-    else {
-        fwrite(issued.data, 1, issued.len, stdout);
-    }
+    if (ret == 0) {
+        if (opts.out_cert)
+            wrc = write_file(opts.out_cert, issued.data, issued.len, 0);
+        else
+            fwrite(issued.data, 1, issued.len, stdout);
 
-    if (wrc != 0) {
-        fprintf(stderr, "enroll: cannot write %s\n", opts.out_cert);
-    }
+        if (wrc != 0)
+            fprintf(stderr, "enroll: cannot write %s\n", opts.out_cert);
 
-    if (opts.out_key) {
-        WolfCertBuffer key_pem = { 0 };
-        if (wolfcert_key_to_pem(key, &key_pem) == WOLFCERT_OK) {
-            if (write_file(opts.out_key, key_pem.data, key_pem.len, 1) != 0) {
-                fprintf(stderr, "enroll: cannot write %s\n", opts.out_key);
-                wrc = -1;
+        if (opts.out_key) {
+            WolfCertBuffer key_pem = { 0 };
+            if (wolfcert_key_to_pem(key, &key_pem) == WOLFCERT_OK) {
+                if (write_file(opts.out_key, key_pem.data, key_pem.len, 1) != 0) {
+                    fprintf(stderr, "enroll: cannot write %s\n", opts.out_key);
+                    wrc = -1;
+                }
             }
+            wolfcert_buffer_free(&key_pem);
         }
-        wolfcert_buffer_free(&key_pem);
+
+        if (wrc != 0)
+            ret = 2;
     }
 
     wolfcert_buffer_free(&csr);
     wolfcert_buffer_free(&issued);
-    wolfcert_key_free(key);
+    if (key != NULL)
+        wolfcert_key_free(key);
     free(trust_hold);
     free(mt_cert);
     free(mt_key);
     opts_free(&opts);
-
-    return wrc != 0 ? 2 : 0;
+    return ret;
 }
 
 static int cmd_reenroll(int argc, char** argv)
 {
     Opts opts;
-    if (parse_common(argc, argv, &opts) != 0) {
-        opts_free(&opts);
-        return 1;
-    }
-
-    WolfCertProtocol p;
-    if (proto_of(opts.proto, &p) != 0) {
-        opts_free(&opts);
-        return 1;
-    }
-
-    if (p != WOLFCERT_PROTO_EST) {
-        fprintf(stderr, "reenroll: only EST is supported in the CLI today\n");
-        opts_free(&opts);
-        return 2;
-    }
-
-    if (opts.subject == NULL || opts.cert_file == NULL || opts.key_file == NULL) {
-        fprintf(stderr, "reenroll: --subject, --cert, --key required\n");
-        opts_free(&opts);
-        return 1;
-    }
-
-    size_t cert_len = 0, key_len = 0;
-    uint8_t* cert_pem = read_whole(opts.cert_file, &cert_len);
-    uint8_t* key_pem  = read_whole(opts.key_file,  &key_len);
-    if (cert_pem == NULL || key_pem == NULL) {
-        fprintf(stderr, "reenroll: cannot read --cert/--key files\n");
-        free(cert_pem);
-        free(key_pem);
-        opts_free(&opts);
-        return 2;
-    }
-
-    WolfCertKey* current_key = NULL;
-    if (wolfcert_key_from_pem(key_pem, key_len, NULL, &current_key) != WOLFCERT_OK) {
-        fprintf(stderr, "reenroll: bad current key PEM\n");
-        free(cert_pem);
-        free(key_pem);
-        opts_free(&opts);
-        return 2;
-    }
-
-    WolfCertCertMeta meta = { .subject_dn = opts.subject,
-                              .san_dns = opts.san_dns, .san_dns_len = opts.san_dns_len,
-                              .san_ip = opts.san_ip, .san_ip_len = opts.san_ip_len,
-                              .san_uri = opts.san_uri, .san_uri_len = opts.san_uri_len,
-                              .san_email = opts.san_email, .san_email_len = opts.san_email_len,
-                              .challenge_password = opts.challenge };
-    WolfCertBuffer csr = { 0 };
-    int rc = wolfcert_csr_build(current_key, &meta, &csr);
-
-    if (rc != WOLFCERT_OK) {
-        fprintf(stderr, "reenroll csr: %s\n", wolfcert_strerror(rc));
-        wolfcert_key_free(current_key);
-        free(cert_pem);
-        free(key_pem);
-        opts_free(&opts);
-        return 2;
-    }
-
     uint8_t* trust_hold = NULL;
     uint8_t* mt_cert = NULL;
     uint8_t* mt_key = NULL;
+    uint8_t* cert_pem = NULL;
+    uint8_t* key_pem = NULL;
+    WolfCertKey* current_key = NULL;
+    WolfCertBuffer csr = { 0 };
+    WolfCertBuffer issued = { 0 };
+    WolfCertProtocol p = 0;
+    size_t cert_len = 0, key_len = 0;
+    int rc = WOLFCERT_ERR_UNSUPPORTED;
+    int ret = 0;
+    int wrc = 0;
+
+    if (parse_common(argc, argv, &opts) != 0)
+        ret = 1;
+
+    if (ret == 0 && proto_of(opts.proto, &p) != 0)
+        ret = 1;
+
+    if (ret == 0 && p != WOLFCERT_PROTO_EST) {
+        fprintf(stderr, "reenroll: only EST is supported in the CLI today\n");
+        ret = 2;
+    }
+
+    if (ret == 0 &&
+        (opts.subject == NULL || opts.cert_file == NULL || opts.key_file == NULL)) {
+        fprintf(stderr, "reenroll: --subject, --cert, --key required\n");
+        ret = 1;
+    }
+
+    if (ret == 0) {
+        cert_pem = read_whole(opts.cert_file, &cert_len);
+        key_pem  = read_whole(opts.key_file,  &key_len);
+        if (cert_pem == NULL || key_pem == NULL) {
+            fprintf(stderr, "reenroll: cannot read --cert/--key files\n");
+            ret = 2;
+        }
+    }
+
+    if (ret == 0 &&
+        wolfcert_key_from_pem(key_pem, key_len, NULL, &current_key) != WOLFCERT_OK) {
+        fprintf(stderr, "reenroll: bad current key PEM\n");
+        ret = 2;
+    }
+
+    if (ret == 0) {
+        WolfCertCertMeta meta = { .subject_dn = opts.subject,
+                                  .san_dns = opts.san_dns, .san_dns_len = opts.san_dns_len,
+                                  .san_ip = opts.san_ip, .san_ip_len = opts.san_ip_len,
+                                  .san_uri = opts.san_uri, .san_uri_len = opts.san_uri_len,
+                                  .san_email = opts.san_email, .san_email_len = opts.san_email_len,
+                                  .challenge_password = opts.challenge };
+        rc = wolfcert_csr_build(current_key, &meta, &csr);
+        if (rc != WOLFCERT_OK) {
+            fprintf(stderr, "reenroll csr: %s\n", wolfcert_strerror(rc));
+            ret = 2;
+        }
+    }
+
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
                               .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
 
-    fill_trust(&opts, &srv, &trust_hold);
-    if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0) {
-        wolfcert_buffer_free(&csr);
-        wolfcert_key_free(current_key);
-        free(cert_pem);
-        free(key_pem);
-        free(trust_hold);
-        opts_free(&opts);
-        return 1;
+    if (ret == 0) {
+        fill_trust(&opts, &srv, &trust_hold);
+        if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
+            ret = 1;
     }
 
-    WolfCertBuffer issued = { 0 };
+    if (ret == 0) {
 #ifdef WOLFCERT_HAVE_EST
-    rc = wolfcert_est_simple_reenroll(&srv, cert_pem, cert_len, current_key,
-                                      csr.data, csr.len, &issued);
+        rc = wolfcert_est_simple_reenroll(&srv, cert_pem, cert_len, current_key,
+                                          csr.data, csr.len, &issued);
 #else
-    rc = WOLFCERT_ERR_UNSUPPORTED;
+        rc = WOLFCERT_ERR_UNSUPPORTED;
 #endif
-
-    if (rc != WOLFCERT_OK) {
-        fprintf(stderr, "reenroll: %s\n", wolfcert_strerror(rc));
-        wolfcert_buffer_free(&csr);
-        wolfcert_key_free(current_key);
-        free(cert_pem);
-        free(key_pem);
-        free(trust_hold);
-        free(mt_cert);
-        free(mt_key);
-        opts_free(&opts);
-        return 2;
+        if (rc != WOLFCERT_OK) {
+            fprintf(stderr, "reenroll: %s\n", wolfcert_strerror(rc));
+            ret = 2;
+        }
     }
 
-    int wrc = 0;
-    if (opts.out_cert) {
-        wrc = write_file(opts.out_cert, issued.data, issued.len, 0);
-    }
-    else {
-        fwrite(issued.data, 1, issued.len, stdout);
-    }
-    if (wrc != 0) {
-        fprintf(stderr, "reenroll: cannot write %s\n", opts.out_cert);
+    if (ret == 0) {
+        if (opts.out_cert)
+            wrc = write_file(opts.out_cert, issued.data, issued.len, 0);
+        else
+            fwrite(issued.data, 1, issued.len, stdout);
+
+        if (wrc != 0) {
+            fprintf(stderr, "reenroll: cannot write %s\n", opts.out_cert);
+            ret = 2;
+        }
     }
 
     wolfcert_buffer_free(&csr);
     wolfcert_buffer_free(&issued);
-    wolfcert_key_free(current_key);
+    if (current_key != NULL)
+        wolfcert_key_free(current_key);
     free(cert_pem);
     free(key_pem);
     free(trust_hold);
     free(mt_cert);
     free(mt_key);
     opts_free(&opts);
-
-    return wrc != 0 ? 2 : 0;
+    return ret;
 }
 
 static int cmd_getnextca(int argc, char** argv)
@@ -990,35 +949,35 @@ static int cmd_getnextca(int argc, char** argv)
     return 1;
 #else
     Opts opts;
-    if (parse_common(argc, argv, &opts) != 0) {
-        opts_free(&opts);
-        return 1;
-    }
-
-    WolfCertProtocol p;
-    if (proto_of(opts.proto, &p) != 0) {
-        opts_free(&opts);
-        return 1;
-    }
-
-    if (p != WOLFCERT_PROTO_SCEP) {
-        fprintf(stderr, "getnextca: only --proto scep is supported\n");
-        opts_free(&opts);
-        return 1;
-    }
-
     uint8_t* trust_hold = NULL;
     uint8_t* mt_cert = NULL;
     uint8_t* mt_key = NULL;
+    WolfCertProtocol p = 0;
+    WolfCertBuffer ca_bundle = { 0 };
+    WolfCertBuffer pem = { 0 };
+    int rc = WOLFCERT_ERR_UNSUPPORTED;
+    int ret = 0;
+    int wrc = 0;
+
+    if (parse_common(argc, argv, &opts) != 0)
+        ret = 1;
+
+    if (ret == 0 && proto_of(opts.proto, &p) != 0)
+        ret = 1;
+
+    if (ret == 0 && p != WOLFCERT_PROTO_SCEP) {
+        fprintf(stderr, "getnextca: only --proto scep is supported\n");
+        ret = 1;
+    }
+
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
                               .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
 
-    fill_trust(&opts, &srv, &trust_hold);
-    if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0) {
-        free(trust_hold);
-        opts_free(&opts);
-        return 1;
+    if (ret == 0) {
+        fill_trust(&opts, &srv, &trust_hold);
+        if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
+            ret = 1;
     }
 
     /* The roll-over message is signed by the current CA, which may be any cert
@@ -1031,44 +990,40 @@ static int cmd_getnextca(int argc, char** argv)
      * consistent forged bundle and roll-over. An application integrating
      * wolfCert should pass a locally-trusted, out-of-band-verified CA to
      * wolfcert_scep_get_next_ca_cert instead. */
-    WolfCertBuffer ca_bundle = { 0 };
-    int rc = wolfcert_scep_get_ca_cert_enc(&srv, WOLFCERT_ENCODING_DER,
+    if (ret == 0) {
+        rc = wolfcert_scep_get_ca_cert_enc(&srv, WOLFCERT_ENCODING_DER,
                                            &ca_bundle);
-    if (rc != WOLFCERT_OK) {
-        fprintf(stderr, "getnextca: %s\n", wolfcert_strerror(rc));
-        free(trust_hold);
-        free(mt_cert);
-        free(mt_key);
-        opts_free(&opts);
-        return 2;
+        if (rc != WOLFCERT_OK) {
+            fprintf(stderr, "getnextca: %s\n", wolfcert_strerror(rc));
+            ret = 2;
+        }
     }
 
-    WolfCertBuffer pem = { 0 };
-    rc = wolfcert_scep_get_next_ca_cert(&srv, ca_bundle.data, ca_bundle.len,
-                                        &pem);
+    if (ret == 0) {
+        rc = wolfcert_scep_get_next_ca_cert(&srv, ca_bundle.data, ca_bundle.len,
+                                            &pem);
+        if (rc != WOLFCERT_OK) {
+            fprintf(stderr, "getnextca: %s\n", wolfcert_strerror(rc));
+            ret = 2;
+        }
+    }
+
+    if (ret == 0) {
+        wrc = write_file(opts.out_cert, pem.data, pem.len, 0);
+        if (wrc != 0) {
+            fprintf(stderr, "getnextca: cannot write %s\n",
+                    opts.out_cert ? opts.out_cert : "<stdout>");
+            ret = 2;
+        }
+    }
+
     wolfcert_buffer_free(&ca_bundle);
-    if (rc != WOLFCERT_OK) {
-        fprintf(stderr, "getnextca: %s\n", wolfcert_strerror(rc));
-        free(trust_hold);
-        free(mt_cert);
-        free(mt_key);
-        opts_free(&opts);
-        return 2;
-    }
-
-    int wrc = write_file(opts.out_cert, pem.data, pem.len, 0);
-    if (wrc != 0) {
-        fprintf(stderr, "getnextca: cannot write %s\n",
-                opts.out_cert ? opts.out_cert : "<stdout>");
-    }
-
     wolfcert_buffer_free(&pem);
     free(trust_hold);
     free(mt_cert);
     free(mt_key);
     opts_free(&opts);
-
-    return wrc != 0 ? 2 : 0;
+    return ret;
 #endif
 }
 

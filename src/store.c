@@ -60,51 +60,51 @@ static int posix_read(void* ctx_, const char* key, WolfCertBuffer* out)
 {
     PosixCtx* ctx = (PosixCtx*)ctx_;
     char* path = NULL;
+    FILE* f = NULL;
+    uint8_t* buf = NULL;
+    long len = 0;
+    size_t n = 0;
     int rc = posix_join(ctx->root, key, &path, out->heap);
     if (rc != WOLFCERT_OK)
         return rc;
 
-    FILE* f = fopen(path, "rb");
-    if (f == NULL) {
+    f = fopen(path, "rb");
+    if (f == NULL)
         rc = (errno == ENOENT) ? WOLFCERT_ERR_NOT_FOUND : WOLFCERT_ERR_IO;
-        WOLFCERT_XFREE(path, out->heap);
-        return rc;
+
+    if (rc == WOLFCERT_OK && fseek(f, 0, SEEK_END) != 0)
+        rc = WOLFCERT_ERR_IO;
+
+    if (rc == WOLFCERT_OK) {
+        len = ftell(f);
+        rewind(f);
+        if (len < 0)
+            rc = WOLFCERT_ERR_IO;
     }
 
-    if (fseek(f, 0, SEEK_END) != 0) {
+    if (rc == WOLFCERT_OK) {
+        buf = (uint8_t*)WOLFCERT_XMALLOC((size_t)len, out->heap);
+        if (buf == NULL)
+            rc = WOLFCERT_ERR_MEMORY;
+    }
+
+    if (rc == WOLFCERT_OK) {
+        n = fread(buf, 1, (size_t)len, f);
+        if (n != (size_t)len)
+            rc = WOLFCERT_ERR_IO;
+    }
+
+    if (rc == WOLFCERT_OK) {
+        out->data = buf;
+        out->len = (size_t)len;
+        buf = NULL;   /* ownership moves to out */
+    }
+
+    if (f != NULL)
         fclose(f);
-        WOLFCERT_XFREE(path, out->heap);
-        return WOLFCERT_ERR_IO;
-    }
-
-    long len = ftell(f);
-    rewind(f);
-    if (len < 0) {
-        fclose(f);
-        WOLFCERT_XFREE(path, out->heap);
-        return WOLFCERT_ERR_IO;
-    }
-
-    uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC((size_t)len, out->heap);
-    if (buf == NULL) {
-        fclose(f);
-        WOLFCERT_XFREE(path, out->heap);
-        return WOLFCERT_ERR_MEMORY;
-    }
-
-    size_t n = fread(buf, 1, (size_t)len, f);
-
-    fclose(f);
     WOLFCERT_XFREE(path, out->heap);
-    if (n != (size_t)len) {
-        WOLFCERT_XFREE(buf, out->heap);
-        return WOLFCERT_ERR_IO;
-    }
-
-    out->data = buf;
-    out->len = (size_t)len;
-
-    return WOLFCERT_OK;
+    WOLFCERT_XFREE(buf, out->heap);
+    return rc;
 }
 
 static int posix_write(void* ctx_, const char* key,

@@ -674,55 +674,48 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
 
     WolfCertBuffer ias = { 0 };
-    int rc = wolfcert_scep_issuer_and_subject(ra_cert, ra_cert_len,
-                                               csr_der, csr_der_len,
-                                               &ias, heap);
-    if (rc != WOLFCERT_OK)
-        return rc;
-
     uint8_t* key_der = NULL;
     size_t key_der_len = 0;
-    rc = rsa_key_to_der(signer_key, heap, &key_der, &key_der_len);
-    if (rc != WOLFCERT_OK) {
-        wolfcert_buffer_free(&ias);
-        return rc;
-    }
+    uint8_t* derived_signer = NULL;
+    size_t derived_signer_len = 0;
+    const uint8_t* eff_signer     = signer_cert;
+    size_t         eff_signer_len = signer_cert_len;
+
+    int rc = wolfcert_scep_issuer_and_subject(ra_cert, ra_cert_len,
+                                              csr_der, csr_der_len, &ias, heap);
+
+    if (rc == WOLFCERT_OK)
+        rc = rsa_key_to_der(signer_key, heap, &key_der, &key_der_len);
 
     /* For a pending PKCSReq the caller has no long-lived cert carrying
      * signer_key's pubkey, so we regenerate the same transient
      * self-signed cert (subject copied from the CSR) that pkcs_req_ex
      * wraps the original request with. RenewalReq callers supply their
      * existing cert directly. */
-    uint8_t* derived_signer = NULL;
-    size_t derived_signer_len = 0;
-    const uint8_t* eff_signer     = signer_cert;
-    size_t         eff_signer_len = signer_cert_len;
-    if (signer_cert == NULL) {
+    if (rc == WOLFCERT_OK && signer_cert == NULL) {
         rc = wolfcert_scep_self_signed_rsa((RsaKey*)signer_key->impl,
                                             csr_der, csr_der_len,
                                             &derived_signer, &derived_signer_len,
                                             heap);
-        if (rc != WOLFCERT_OK) {
-            wolfcert_buffer_free(&ias);
-            wc_ForceZero(key_der, (word32)key_der_len);
-            WOLFCERT_XFREE(key_der, heap);
-            return rc;
+        if (rc == WOLFCERT_OK) {
+            eff_signer     = derived_signer;
+            eff_signer_len = derived_signer_len;
         }
-
-        eff_signer     = derived_signer;
-        eff_signer_len = derived_signer_len;
     }
 
-    rc = do_scep_round_trip(srv, caps, ra_cert, ra_cert_len,
-                            ca_bundle, ca_bundle_len,
-                            eff_signer, eff_signer_len,
-                            key_der, key_der_len,
-                            "20", ias.data, ias.len,
-                            transaction_id, transaction_id_len, out);
+    if (rc == WOLFCERT_OK)
+        rc = do_scep_round_trip(srv, caps, ra_cert, ra_cert_len,
+                                ca_bundle, ca_bundle_len,
+                                eff_signer, eff_signer_len,
+                                key_der, key_der_len,
+                                "20", ias.data, ias.len,
+                                transaction_id, transaction_id_len, out);
 
     wolfcert_buffer_free(&ias);
-    wc_ForceZero(key_der, (word32)key_der_len);
-    WOLFCERT_XFREE(key_der, heap);
+    if (key_der != NULL) {
+        wc_ForceZero(key_der, (word32)key_der_len);
+        WOLFCERT_XFREE(key_der, heap);
+    }
     WOLFCERT_XFREE(derived_signer, heap);
     return rc;
 }
