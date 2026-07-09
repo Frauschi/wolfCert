@@ -67,6 +67,19 @@
 #define WOLFCERT_SCEP_PKI_SLACK   (8 * 1024)
 #endif
 
+/* Upper bound on a SCEP message body handed to the PKCS#7 helpers: the CSR in
+ * wolfcert_scep_self_signed_rsa and the enveloped CertRep in
+ * wolfcert_scep_deenvelop, each of which drives a `len + 4096` one-shot
+ * allocation. In the client/server flow these already arrive bounded by the
+ * HTTP body cap (WOLFCERT_HTTP_DEFAULT_MAX_BODY, also 64 KiB), so this is the
+ * helpers' own last-resort limit that keeps a direct caller from driving a
+ * huge speculative malloc. The default matches the HTTP cap so it never
+ * rejects a body the transport would have accepted; override (compiler -D or
+ * user_settings) to trim it on constrained targets, see docs/EMBEDDED.md. */
+#ifndef WOLFCERT_SCEP_MAX_MSG_SZ
+#define WOLFCERT_SCEP_MAX_MSG_SZ  (64 * 1024)
+#endif
+
 /* ---- key ---------------------------------------------------------------- */
 
 struct WolfCertKey {

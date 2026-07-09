@@ -154,7 +154,7 @@ Two related buffers are intentionally **not** exposed as knobs:
 Encoding a SCEP SignedData pkiMessage allocates a one-shot heap buffer
 sized `envelope + signer-cert + WOLFCERT_SCEP_PKI_SLACK`. The slack bounds
 everything else in the message (signed attributes, signature, ASN.1
-framing); see the macro comment in `src/internal.h`.
+framing); see the `WOLFCERT_SCEP_PKI_SLACK` comment in `src/internal.h`.
 
 | Macro | Default | Bounds |
 |-------|---------|--------|
@@ -168,6 +168,26 @@ RSA key size). Example:
 
 ```c
 #define WOLFCERT_SCEP_PKI_SLACK (6 * 1024)
+```
+
+On the decode side, `wolfcert_scep_self_signed_rsa` (the CSR) and
+`wolfcert_scep_deenvelop` (the enveloped CertRep) each allocate a one-shot
+buffer sized `body + 4 KiB`. `WOLFCERT_SCEP_MAX_MSG_SZ` caps the accepted
+`body` so a malformed or hostile length cannot drive a huge allocation; an
+over-large body is rejected with `WOLFCERT_ERR_BAD_ARG` before any `malloc`.
+
+| Macro | Default | Bounds |
+|-------|---------|--------|
+| `WOLFCERT_SCEP_MAX_MSG_SZ` | `65536` | largest CSR / enveloped CertRep accepted by the SCEP PKCS#7 helpers |
+
+In the normal client/server flow these bodies already arrive bounded by the
+HTTP body cap (`WOLFCERT_HTTP_DEFAULT_MAX_BODY`, also 64 KiB), so this is a
+last-resort limit for direct callers. Real CSRs are `< 4 KiB` and a typical
+RSA cert chain is `< 16 KiB`, so this can be trimmed well below the default on
+constrained targets. Example:
+
+```c
+#define WOLFCERT_SCEP_MAX_MSG_SZ (16 * 1024)
 ```
 
 ## 4. Heap / static-memory pools

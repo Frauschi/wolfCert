@@ -280,6 +280,13 @@ int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_
                              const uint8_t* env_der, size_t env_len,
                              WolfCertBuffer* out_plain, void* heap)
 {
+    /* env_len is server-controlled and drives cap = env_len + 4096 (plus a
+     * word32 cast into wolfSSL). Reject an empty or over-large envelope so the
+     * allocation stays bounded on constrained targets; see
+     * WOLFCERT_SCEP_MAX_MSG_SZ. */
+    if (env_len == 0 || env_len > WOLFCERT_SCEP_MAX_MSG_SZ)
+        return WOLFCERT_ERR_BAD_ARG;
+
     PKCS7* p7 = wc_PKCS7_New(heap, WOLFCERT_DEVID_SOFTWARE);
     if (p7 == NULL)
         return WOLFCERT_ERR_MEMORY;
@@ -324,13 +331,19 @@ WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
     Cert*    cert;
     WC_RNG   rng;
     uint8_t* der;
-    size_t   cap = csr_len + 4096;
-    int      cn;
+    size_t   cap;
     int      n;
     int      rc;
 
     if (key == NULL || csr_der == NULL || out_der == NULL || out_len == NULL)
         return WOLFCERT_ERR_BAD_ARG;
+
+    /* csr_len drives cap = csr_len + 4096 (plus a word32 cast into wolfSSL).
+     * Reject an empty or over-large request so the allocation stays bounded on
+     * constrained targets; see WOLFCERT_SCEP_MAX_MSG_SZ. */
+    if (csr_len == 0 || csr_len > WOLFCERT_SCEP_MAX_MSG_SZ)
+        return WOLFCERT_ERR_BAD_ARG;
+    cap = csr_len + 4096;
 
     cert = wc_CertNew(heap);
     if (cert == NULL)
@@ -365,8 +378,8 @@ WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
         cert->issRaw[dc.subjectRawLen] = '\0';
     }
     else if (dc.subjectCN != NULL && dc.subjectCNLen > 0) {
-        cn = dc.subjectCNLen < CTC_NAME_SIZE - 1
-             ? dc.subjectCNLen : CTC_NAME_SIZE - 1;
+        int cn = dc.subjectCNLen < CTC_NAME_SIZE - 1
+                 ? dc.subjectCNLen : CTC_NAME_SIZE - 1;
         memcpy(cert->subject.commonName, dc.subjectCN, (size_t)cn);
         cert->subject.commonName[cn] = '\0';
     }

@@ -365,6 +365,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
         return rc;
 
     WolfCertBuffer resp_env = { 0 };
+    WolfCertBuffer inner = { 0 };
     char*   status = NULL;
     char* resp_mt = NULL;
     uint8_t* rx_tid = NULL;
@@ -381,103 +382,80 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
 
     WOLFCERT_XFREE(resp,   heap);
     WOLFCERT_XFREE(rx_sn,  heap);
-    if (rc != WOLFCERT_OK) {
-        WOLFCERT_XFREE(resp_mt, heap);
-        WOLFCERT_XFREE(rx_signer, heap);
-        WOLFCERT_XFREE(rx_rn,  heap);
-        WOLFCERT_XFREE(status, heap);
-        WOLFCERT_XFREE(rx_tid, heap);
-        wolfcert_buffer_free(&resp_env);
-        return rc;
-    }
 
     /* RFC 8894: an enrollment response is a CertRep (messageType 3) whose
      * transactionID echoes the one we sent. Reject a response that claims a
      * different type or transaction before consuming it. */
-    rc = wolfcert_scep_check_cert_rep(resp_mt, rx_tid, rx_tid_len,
-                                      txid, txid_len);
-    WOLFCERT_XFREE(resp_mt, heap);
-    if (rc != WOLFCERT_OK) {
-        WOLFCERT_XFREE(rx_signer, heap);
-        WOLFCERT_XFREE(rx_rn,  heap);
-        WOLFCERT_XFREE(status, heap);
-        WOLFCERT_XFREE(rx_tid, heap);
-        wolfcert_buffer_free(&resp_env);
-        return WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
-                            "CertRep messageType or transactionID does not "
-                            "match the request");
+    if (rc == WOLFCERT_OK) {
+        rc = wolfcert_scep_check_cert_rep(resp_mt, rx_tid, rx_tid_len,
+                                          txid, txid_len);
+        if (rc != WOLFCERT_OK)
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
+                              "CertRep messageType or transactionID does not "
+                              "match the request");
     }
+    WOLFCERT_XFREE(resp_mt, heap);
 
     /* wolfcert_scep_parse_pki_message only verifies the CMS signature against
      * the cert embedded in the response, so a MITM on the (often plaintext)
      * SCEP transport could forge a fully signed CertRep. Authenticate the
      * response by requiring its signer to be one of the CA/RA certs from the
      * GetCACert bundle before trusting anything it carries. */
-    rc = wolfcert_scep_verify_rep_signer(rx_signer, rx_signer_len,
-                                         ca_bundle, ca_bundle_len, heap);
-    WOLFCERT_XFREE(rx_signer, heap);
-    if (rc != WOLFCERT_OK) {
-        WOLFCERT_XFREE(rx_rn,  heap);
-        WOLFCERT_XFREE(status, heap);
-        WOLFCERT_XFREE(rx_tid, heap);
-        wolfcert_buffer_free(&resp_env);
-        return WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "scep",
-                            "CertRep is not signed by the CA/RA certificate");
+    if (rc == WOLFCERT_OK) {
+        rc = wolfcert_scep_verify_rep_signer(rx_signer, rx_signer_len,
+                                             ca_bundle, ca_bundle_len, heap);
+        if (rc != WOLFCERT_OK)
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "scep",
+                              "CertRep is not signed by the CA/RA certificate");
     }
+    WOLFCERT_XFREE(rx_signer, heap);
 
     /* RFC 8894 section 3.2.1.2: the CertRep MUST carry a recipientNonce that
      * echoes the senderNonce we sent. An absent or mismatched recipientNonce
      * means the response cannot be tied to our request (stale / replayed /
      * cross-talk / cannot verify) -> reject. */
-    if (rx_rn == NULL || rx_rn_len != sizeof(nonce) ||
-        memcmp(rx_rn, nonce, sizeof(nonce)) != 0) {
-        WOLFCERT_XFREE(rx_rn,  heap);
-        WOLFCERT_XFREE(status, heap);
-        WOLFCERT_XFREE(rx_tid, heap);
-        wolfcert_buffer_free(&resp_env);
-        return WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
-                            "CertRep recipientNonce missing or does not echo "
-                            "senderNonce");
+    if (rc == WOLFCERT_OK &&
+        (rx_rn == NULL || rx_rn_len != sizeof(nonce) ||
+         memcmp(rx_rn, nonce, sizeof(nonce)) != 0)) {
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
+                          "CertRep recipientNonce missing or does not echo "
+                          "senderNonce");
     }
     WOLFCERT_XFREE(rx_rn, heap);
 
-    /* Echo the transactionID in the result so callers can poll later. */
-    out->transaction_id     = rx_tid;
-    out->transaction_id_len = rx_tid_len;
+    if (rc == WOLFCERT_OK) {
+        /* Echo the transactionID in the result so callers can poll later;
+         * ownership of rx_tid moves to out. */
+        out->transaction_id     = rx_tid;
+        out->transaction_id_len = rx_tid_len;
+        rx_tid = NULL;
 
-    if (status != NULL && strcmp(status, "3") == 0) {
-        WOLFCERT_XFREE(status, heap);
-        wolfcert_buffer_free(&resp_env);
-        out->status = WOLFCERT_SCEP_STATUS_PENDING;
-        return WOLFCERT_OK;
+        if (status != NULL && strcmp(status, "3") == 0) {
+            out->status = WOLFCERT_SCEP_STATUS_PENDING;
+        }
+        else if (status == NULL || strcmp(status, "0") != 0) {
+            out->status = WOLFCERT_SCEP_STATUS_FAILURE;
+        }
+        else {
+            /* status "0" is SUCCESS: de-envelop the CertRep and convert the
+             * issued certificate(s) to PEM for the caller. */
+            rc = wolfcert_scep_deenvelop(signer_cert, signer_cert_len,
+                                          signer_key, signer_key_len,
+                                          resp_env.data, resp_env.len, &inner,
+                                          heap);
+            if (rc == WOLFCERT_OK)
+                rc = wolfcert_pkcs7_certs_to_pem(inner.data, inner.len,
+                                                 &out->cert_pem, heap);
+            if (rc == WOLFCERT_OK)
+                out->status = WOLFCERT_SCEP_STATUS_SUCCESS;
+        }
     }
 
-    if (status == NULL || strcmp(status, "0") != 0) {
-        WOLFCERT_XFREE(status, heap);
-        wolfcert_buffer_free(&resp_env);
-        out->status = WOLFCERT_SCEP_STATUS_FAILURE;
-        return WOLFCERT_OK;
-    }
-
+    WOLFCERT_XFREE(rx_tid, heap);
     WOLFCERT_XFREE(status, heap);
-
-    WolfCertBuffer inner = { 0 };
-    rc = wolfcert_scep_deenvelop(signer_cert, signer_cert_len,
-                                  signer_key, signer_key_len,
-                                  resp_env.data, resp_env.len, &inner, heap);
-
-    wolfcert_buffer_free(&resp_env);
-    if (rc != WOLFCERT_OK)
-        return rc;
-
-    rc = wolfcert_pkcs7_certs_to_pem(inner.data, inner.len, &out->cert_pem, heap);
-
     wolfcert_buffer_free(&inner);
-    if (rc != WOLFCERT_OK)
-        return rc;
-
-    out->status = WOLFCERT_SCEP_STATUS_SUCCESS;
-    return WOLFCERT_OK;
+    wolfcert_buffer_free(&resp_env);
+    return rc;
 }
 
 /* Serialize the private key half of a WolfCertKey to DER for PKCS#7 use.

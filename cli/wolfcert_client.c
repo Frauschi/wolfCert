@@ -18,7 +18,7 @@
  */
 
 /*
- * wolfcert-client - CLI driver around the wolfCert library.
+ * wolfcert-client - command-line enrollment client for wolfCert.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -1025,11 +1025,12 @@ static int cmd_getnextca(int argc, char** argv)
      * in the GetCACert bundle (some servers return the RA cert first). Fetch
      * the whole bundle in DER so verification matches the CA wherever it sits.
      *
-     * Note: this demo CLI is stateless, so it fetches the current CA over the
-     * same (possibly plaintext) transport it then authenticates against; an
-     * active MITM could supply a consistent forged bundle and roll-over. A
-     * production caller should pass a locally-trusted, out-of-band-verified CA
-     * to wolfcert_scep_get_next_ca_cert instead. */
+     * Note: the standalone CLI holds no persistent trust state, so this
+     * command fetches the current CA over the same (possibly plaintext)
+     * transport it then authenticates against; an active MITM could supply a
+     * consistent forged bundle and roll-over. An application integrating
+     * wolfCert should pass a locally-trusted, out-of-band-verified CA to
+     * wolfcert_scep_get_next_ca_cert instead. */
     WolfCertBuffer ca_bundle = { 0 };
     int rc = wolfcert_scep_get_ca_cert_enc(&srv, WOLFCERT_ENCODING_DER,
                                            &ca_bundle);
