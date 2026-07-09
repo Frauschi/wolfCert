@@ -283,6 +283,7 @@ static int run_pki_op(const WolfCertServerCfg* srv,
 static int do_scep_round_trip(const WolfCertServerCfg* srv,
                               const WolfCertScepCaps*   caps,
                               const uint8_t* ra_cert, size_t ra_cert_len,
+                              const uint8_t* ca_bundle, size_t ca_bundle_len,
                               const uint8_t* signer_cert, size_t signer_cert_len,
                               const uint8_t* signer_key,  size_t signer_key_len,
                               const char* msg_type,
@@ -364,6 +365,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
         return rc;
 
     WolfCertBuffer resp_env = { 0 };
+    WolfCertBuffer inner = { 0 };
     char*   status = NULL;
     char* resp_mt = NULL;
     uint8_t* rx_tid = NULL;
@@ -372,76 +374,88 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
     size_t rx_sn_len  = 0;
     uint8_t* rx_rn  = NULL;
     size_t rx_rn_len  = 0;
+    uint8_t* rx_signer = NULL;
+    size_t rx_signer_len = 0;
     rc = wolfcert_scep_parse_pki_message(resp, resp_len, &resp_env,
             &rx_tid, &rx_tid_len, &rx_sn, &rx_sn_len, &rx_rn, &rx_rn_len,
-            &resp_mt, &status, NULL, NULL, heap);
+            &resp_mt, &status, &rx_signer, &rx_signer_len, heap);
 
     WOLFCERT_XFREE(resp,   heap);
     WOLFCERT_XFREE(rx_sn,  heap);
-    WOLFCERT_XFREE(resp_mt, heap);
-    if (rc != WOLFCERT_OK) {
-        WOLFCERT_XFREE(rx_rn,  heap);
-        WOLFCERT_XFREE(status, heap);
-        WOLFCERT_XFREE(rx_tid, heap);
-        wolfcert_buffer_free(&resp_env);
-        return rc;
-    }
 
-    /* RFC 8894 section 3.2.1.2: when the CertRep carries a recipientNonce it
-     * MUST echo the senderNonce we sent. A mismatch means the response was
-     * not generated for our request (stale / replayed / cross-talk) -> reject.
-     * A missing recipientNonce is tolerated so we still interoperate with a
-     * peer that cannot emit it (e.g. a WOLFSSL_NO_MALLOC server stuck at the
-     * default MAX_SIGNED_ATTRIBS_SZ). */
-    if (rx_rn != NULL &&
-        (rx_rn_len != sizeof(nonce) ||
+    /* RFC 8894: an enrollment response is a CertRep (messageType 3) whose
+     * transactionID echoes the one we sent. Reject a response that claims a
+     * different type or transaction before consuming it. */
+    if (rc == WOLFCERT_OK) {
+        rc = wolfcert_scep_check_cert_rep(resp_mt, rx_tid, rx_tid_len,
+                                          txid, txid_len);
+        if (rc != WOLFCERT_OK)
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
+                              "CertRep messageType or transactionID does not "
+                              "match the request");
+    }
+    WOLFCERT_XFREE(resp_mt, heap);
+
+    /* wolfcert_scep_parse_pki_message only verifies the CMS signature against
+     * the cert embedded in the response, so a MITM on the (often plaintext)
+     * SCEP transport could forge a fully signed CertRep. Authenticate the
+     * response by requiring its signer to be one of the CA/RA certs from the
+     * GetCACert bundle before trusting anything it carries. */
+    if (rc == WOLFCERT_OK) {
+        rc = wolfcert_scep_verify_rep_signer(rx_signer, rx_signer_len,
+                                             ca_bundle, ca_bundle_len, heap);
+        if (rc != WOLFCERT_OK)
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "scep",
+                              "CertRep is not signed by the CA/RA certificate");
+    }
+    WOLFCERT_XFREE(rx_signer, heap);
+
+    /* RFC 8894 section 3.2.1.2: the CertRep MUST carry a recipientNonce that
+     * echoes the senderNonce we sent. An absent or mismatched recipientNonce
+     * means the response cannot be tied to our request (stale / replayed /
+     * cross-talk / cannot verify) -> reject. */
+    if (rc == WOLFCERT_OK &&
+        (rx_rn == NULL || rx_rn_len != sizeof(nonce) ||
          memcmp(rx_rn, nonce, sizeof(nonce)) != 0)) {
-        WOLFCERT_XFREE(rx_rn,  heap);
-        WOLFCERT_XFREE(status, heap);
-        WOLFCERT_XFREE(rx_tid, heap);
-        wolfcert_buffer_free(&resp_env);
-        return WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
-                            "CertRep recipientNonce does not echo senderNonce");
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
+                          "CertRep recipientNonce missing or does not echo "
+                          "senderNonce");
     }
     WOLFCERT_XFREE(rx_rn, heap);
 
-    /* Echo the transactionID in the result so callers can poll later. */
-    out->transaction_id     = rx_tid;
-    out->transaction_id_len = rx_tid_len;
+    if (rc == WOLFCERT_OK) {
+        /* Echo the transactionID in the result so callers can poll later;
+         * ownership of rx_tid moves to out. */
+        out->transaction_id     = rx_tid;
+        out->transaction_id_len = rx_tid_len;
+        rx_tid = NULL;
 
-    if (status != NULL && strcmp(status, "3") == 0) {
-        WOLFCERT_XFREE(status, heap);
-        wolfcert_buffer_free(&resp_env);
-        out->status = WOLFCERT_SCEP_STATUS_PENDING;
-        return WOLFCERT_OK;
+        if (status != NULL && strcmp(status, "3") == 0) {
+            out->status = WOLFCERT_SCEP_STATUS_PENDING;
+        }
+        else if (status == NULL || strcmp(status, "0") != 0) {
+            out->status = WOLFCERT_SCEP_STATUS_FAILURE;
+        }
+        else {
+            /* status "0" is SUCCESS: de-envelop the CertRep and convert the
+             * issued certificate(s) to PEM for the caller. */
+            rc = wolfcert_scep_deenvelop(signer_cert, signer_cert_len,
+                                          signer_key, signer_key_len,
+                                          resp_env.data, resp_env.len, &inner,
+                                          heap);
+            if (rc == WOLFCERT_OK)
+                rc = wolfcert_pkcs7_certs_to_pem(inner.data, inner.len,
+                                                 &out->cert_pem, heap);
+            if (rc == WOLFCERT_OK)
+                out->status = WOLFCERT_SCEP_STATUS_SUCCESS;
+        }
     }
 
-    if (status == NULL || strcmp(status, "0") != 0) {
-        WOLFCERT_XFREE(status, heap);
-        wolfcert_buffer_free(&resp_env);
-        out->status = WOLFCERT_SCEP_STATUS_FAILURE;
-        return WOLFCERT_OK;
-    }
-
+    WOLFCERT_XFREE(rx_tid, heap);
     WOLFCERT_XFREE(status, heap);
-
-    WolfCertBuffer inner = { 0 };
-    rc = wolfcert_scep_deenvelop(signer_cert, signer_cert_len,
-                                  signer_key, signer_key_len,
-                                  resp_env.data, resp_env.len, &inner, heap);
-
-    wolfcert_buffer_free(&resp_env);
-    if (rc != WOLFCERT_OK)
-        return rc;
-
-    rc = wolfcert_pkcs7_certs_to_pem(inner.data, inner.len, &out->cert_pem, heap);
-
     wolfcert_buffer_free(&inner);
-    if (rc != WOLFCERT_OK)
-        return rc;
-
-    out->status = WOLFCERT_SCEP_STATUS_SUCCESS;
-    return WOLFCERT_OK;
+    wolfcert_buffer_free(&resp_env);
+    return rc;
 }
 
 /* Serialize the private key half of a WolfCertKey to DER for PKCS#7 use.
@@ -471,12 +485,13 @@ static int rsa_key_to_der(const WolfCertKey* key, void* heap,
 int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
                               const WolfCertScepCaps*  caps,
                               const uint8_t* ra_cert, size_t ra_cert_len,
+                              const uint8_t* ca_bundle, size_t ca_bundle_len,
                               const WolfCertKey*       new_key,
                               const uint8_t* csr_der, size_t csr_der_len,
                               WolfCertScepResult*      out)
 {
-    if (srv == NULL || ra_cert == NULL || new_key == NULL ||
-        csr_der == NULL || out == NULL)
+    if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
+        new_key == NULL || csr_der == NULL || out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     if (new_key->type != WOLFCERT_KEY_RSA)
@@ -490,7 +505,7 @@ int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
     uint8_t* signer_der = NULL;
     size_t signer_len = 0;
     int rc = wolfcert_scep_self_signed_rsa((RsaKey*)new_key->impl,
-                                            "SCEP Enrollee",
+                                            csr_der, csr_der_len,
                                             &signer_der, &signer_len, heap);
     if (rc != WOLFCERT_OK)
         return rc;
@@ -504,6 +519,7 @@ int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
     }
 
     rc = do_scep_round_trip(srv, caps, ra_cert, ra_cert_len,
+                            ca_bundle, ca_bundle_len,
                             signer_der, signer_len, key_der, key_der_len,
                             "19", csr_der, csr_der_len,
                             NULL, 0, out);
@@ -524,8 +540,11 @@ int wolfcert_scep_pkcs_req(const WolfCertServerCfg* srv,
     if (out_cert_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
+    /* Single-cert form: the envelope target doubles as the one-cert trust
+     * bundle. Callers with a CA/RA bundle should use the _ex form. */
     WolfCertScepResult r = { 0 };
     int rc = wolfcert_scep_pkcs_req_ex(srv, caps, ra_cert, ra_cert_len,
+                                       ra_cert, ra_cert_len,
                                        new_key, csr_der, csr_der_len, &r);
     if (rc != WOLFCERT_OK) {
         wolfcert_scep_result_free(&r);
@@ -550,6 +569,7 @@ int wolfcert_scep_pkcs_req(const WolfCertServerCfg* srv,
 int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
                                  const WolfCertScepCaps*  caps,
                                  const uint8_t* ra_cert, size_t ra_cert_len,
+                                 const uint8_t* ca_bundle, size_t ca_bundle_len,
                                  const uint8_t* current_cert, size_t current_cert_len,
                                  const WolfCertKey* current_key,
                                  const WolfCertKey* new_key,
@@ -557,8 +577,9 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
                                  WolfCertScepResult* out)
 {
     (void)new_key;
-    if (srv == NULL || ra_cert == NULL || current_cert == NULL ||
-            current_key == NULL || csr_der == NULL || out == NULL)
+    if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
+            current_cert == NULL || current_key == NULL || csr_der == NULL ||
+            out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     if (current_key->type != WOLFCERT_KEY_RSA)
@@ -576,6 +597,7 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
         return rc;
 
     rc = do_scep_round_trip(srv, caps, ra_cert, ra_cert_len,
+                            ca_bundle, ca_bundle_len,
                             current_cert, current_cert_len,
                             key_der, key_der_len,
                             "17", csr_der, csr_der_len,
@@ -598,8 +620,11 @@ int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
     if (out_cert_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
+    /* Single-cert form: the envelope target doubles as the one-cert trust
+     * bundle. Callers with a CA/RA bundle should use the _ex form. */
     WolfCertScepResult r = { 0 };
     int rc = wolfcert_scep_renewal_req_ex(srv, caps, ra_cert, ra_cert_len,
+                                          ra_cert, ra_cert_len,
                                           current_cert, current_cert_len,
                                           current_key, new_key,
                                           csr_der, csr_der_len, &r);
@@ -627,6 +652,7 @@ int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
 int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
                                    const WolfCertScepCaps*  caps,
                                    const uint8_t* ra_cert, size_t ra_cert_len,
+                                   const uint8_t* ca_bundle, size_t ca_bundle_len,
                                    const uint8_t* signer_cert, size_t signer_cert_len,
                                    const WolfCertKey* signer_key,
                                    const uint8_t* csr_der, size_t csr_der_len,
@@ -634,7 +660,7 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
                                    size_t transaction_id_len,
                                    WolfCertScepResult* out)
 {
-    if (srv == NULL || ra_cert == NULL ||
+    if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
             signer_key == NULL || csr_der == NULL ||
             transaction_id == NULL || transaction_id_len == 0 || out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -664,16 +690,16 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
 
     /* For a pending PKCSReq the caller has no long-lived cert carrying
      * signer_key's pubkey, so we regenerate the same transient
-     * self-signed "SCEP Enrollee" cert that pkcs_req_ex wraps the
-     * original request with. RenewalReq callers supply their existing
-     * cert directly. */
+     * self-signed cert (subject copied from the CSR) that pkcs_req_ex
+     * wraps the original request with. RenewalReq callers supply their
+     * existing cert directly. */
     uint8_t* derived_signer = NULL;
     size_t derived_signer_len = 0;
     const uint8_t* eff_signer     = signer_cert;
     size_t         eff_signer_len = signer_cert_len;
     if (signer_cert == NULL) {
         rc = wolfcert_scep_self_signed_rsa((RsaKey*)signer_key->impl,
-                                            "SCEP Enrollee",
+                                            csr_der, csr_der_len,
                                             &derived_signer, &derived_signer_len,
                                             heap);
         if (rc != WOLFCERT_OK) {
@@ -688,6 +714,7 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
     }
 
     rc = do_scep_round_trip(srv, caps, ra_cert, ra_cert_len,
+                            ca_bundle, ca_bundle_len,
                             eff_signer, eff_signer_len,
                             key_der, key_der_len,
                             "20", ias.data, ias.len,
@@ -701,9 +728,12 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
 }
 
 int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
+                                   const uint8_t* current_ca_der,
+                                   size_t current_ca_len,
                                    WolfCertBuffer* out_next_ca_pem)
 {
-    if (srv == NULL || srv->server_url == NULL || out_next_ca_pem == NULL)
+    if (srv == NULL || srv->server_url == NULL ||
+            current_ca_der == NULL || out_next_ca_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
@@ -732,10 +762,13 @@ int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
         return WOLFCERT_ERR_HTTP;
     }
 
-    /* The body is a degenerate certs-only PKCS#7 per RFC 8894 section 4.6.1,
-     * so we can reuse the certs-to-PEM extractor. */
-    rc = wolfcert_pkcs7_certs_to_pem(resp.body, resp.body_len,
-                                      out_next_ca_pem, heap);
+    /* RFC 8894 section 4.6.1: the body is a SignedData signed by the current
+     * CA whose content is a degenerate certs-only bundle carrying the next CA
+     * certificate. Verify the signature, bind it to the trusted current CA,
+     * then extract the certs from the signed content rather than the outer
+     * signer certificate. */
+    rc = wolfcert_scep_verify_next_ca_response(resp.body, resp.body_len,
+            current_ca_der, current_ca_len, out_next_ca_pem, heap);
 
     wolfcert_http_response_free(&resp);
     return rc;

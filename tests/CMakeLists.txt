@@ -92,6 +92,13 @@ if(WOLFCERT_ENABLE_EST)
     endif()
 endif()
 
+if(WOLFCERT_ENABLE_SCEP)
+    add_executable(test_scep_msg unit/test_scep_msg.c)
+    target_include_directories(test_scep_msg PRIVATE ${CMAKE_SOURCE_DIR}/src)
+    target_link_libraries(test_scep_msg PRIVATE wolfcert)
+    add_test(NAME scep_msg COMMAND test_scep_msg)
+endif()
+
 if(WOLFCERT_ENABLE_SCEP AND WOLFCERT_ENABLE_SERVER)
     add_executable(test_scep_roundtrip integration/test_scep_roundtrip.c)
     target_include_directories(test_scep_roundtrip PRIVATE ${CMAKE_SOURCE_DIR}/src)

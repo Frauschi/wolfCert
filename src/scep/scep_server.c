@@ -77,7 +77,27 @@ typedef struct {
      * self-contained; NOT installed as the active issuing CA. */
     WolfCertCa   next_ca;
     int          next_ca_ready;
+#if defined(WOLFCERT_BUILD_TESTING)
+    /* Client-side rejection tests: deliberately emit a non-compliant or forged
+     * CertRep. Set via wolfcert_scep_server_set_faults; never present in a
+     * production build. wrong_ca is a throwaway signer generated on first use. */
+    int          fault_omit_recipient_nonce;
+    int          fault_sign_with_wrong_key;
+    WolfCertCa   wrong_ca;
+    int          wrong_ca_ready;
+#endif
 } ScepPriv;
+
+#if defined(WOLFCERT_BUILD_TESTING)
+WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
+    int omit_recipient_nonce, int sign_with_wrong_key)
+{
+    ScepPriv* p = (ScepPriv*)s->priv;
+
+    p->fault_omit_recipient_nonce = omit_recipient_nonce;
+    p->fault_sign_with_wrong_key  = sign_with_wrong_key;
+}
+#endif
 
 static void free_req(ScepRequest* r)
 {
@@ -268,11 +288,9 @@ static void handle_get_ca_cert(WolfCertServer* s, int fd)
     send_bin(s, fd, "application/x-x509-ca-cert", s->ca.cert_der, s->ca.cert_der_len);
 }
 
-/* Materialize the rolled-over CA on first request and return its cert as
- * a degenerate certs-only PKCS#7. Strict RFC 8894 section 4.6.1 wants the
- * response signed by the current CA; in practice all deployed SCEP
- * clients we've interoperated with accept the degenerate form, and this
- * keeps the test server honest about what it actually produces. */
+/* Materialize the rolled-over CA on first request and return it wrapped in a
+ * SignedData signed by the current CA, per RFC 8894 section 4.6.1, so the
+ * client can bind the rollover certificate to the CA it already trusts. */
 static void handle_get_next_ca_cert(WolfCertServer* s, int fd)
 {
     if (!s->cfg.scep_enable_next_ca) {
@@ -291,11 +309,13 @@ static void handle_get_next_ca_cert(WolfCertServer* s, int fd)
         p->next_ca_ready = 1;
     }
 
-    const uint8_t* cs[1] = { p->next_ca.cert_der };
-    size_t         cl[1] = { p->next_ca.cert_der_len };
-    WolfCertBuffer p7    = { 0 };
+    WolfCertBuffer p7 = { 0 };
 
-    if (wolfcert_pkcs7_build_certs_only(cs, cl, 1, &p7, s->heap) != WOLFCERT_OK) {
+    if (wolfcert_scep_build_next_ca_response(p->next_ca.cert_der,
+                                             p->next_ca.cert_der_len,
+                                             s->ca.cert_der, s->ca.cert_der_len,
+                                             s->ca.key_der, s->ca.key_der_len,
+                                             &p7, s->heap) != WOLFCERT_OK) {
         send_text(s, fd, 500, "Server Error", "text/plain", "");
         return;
     }
@@ -478,24 +498,9 @@ static int send_cert_rep(WolfCertServer* s, int fd,
             return rc;
         }
     }
-    else {
-        /* RFC 8894 section 3.2.2: CertRep with pkiStatus != SUCCESS has no
-         * enveloped messageData. Build an EnvelopedData around an
-         * empty OCTET STRING (0x04 0x00) so wolfSSL's wc_PKCS7 path
-         * - which refuses zero-length content - still produces a
-         * wrappable payload. The client's parser only inspects
-         * signed attributes in this case; the envelope content is
-         * unused. */
-        static const uint8_t EMPTY_OCTET[2] = { 0x04, 0x00 };
-        rc = wolfcert_scep_envelop(env_target, env_target_len,
-                                    EMPTY_OCTET, sizeof(EMPTY_OCTET),
-                                    AES128CBCb, &resp_env, s->heap);
-
-        if (rc != WOLFCERT_OK) {
-            send_text(s, fd, 500, "Server Error", "text/plain", "");
-            return rc;
-        }
-    }
+    /* RFC 8894 section 3.2.2: a CertRep with pkiStatus PENDING ("3") or
+     * FAILURE ("2") carries no enveloped messageData. resp_env is left empty
+     * so the signed pkiMessage is built with an absent pkcsPKIEnvelope. */
 
     WC_RNG rng;
     wc_InitRng_ex(&rng, s->heap, WOLFCERT_DEVID_SOFTWARE);
@@ -528,11 +533,46 @@ static int send_cert_rep(WolfCertServer* s, int fd,
     (void)snonce_len;
     (void)fail_info;
 #endif
+#if defined(WOLFCERT_BUILD_TESTING)
+    ScepPriv* p = (ScepPriv*)s->priv;
+
+    if (p->fault_omit_recipient_nonce) {
+        attrs.recipient_nonce     = NULL;
+        attrs.recipient_nonce_len = 0;
+    }
+#endif
+
+    /* Sign with the CA key. The client-side signer-trust test can force a
+     * throwaway key generated on first use to forge an untrusted signer. */
+    const uint8_t* sign_cert     = s->ca.cert_der;
+    size_t         sign_cert_len = s->ca.cert_der_len;
+    const uint8_t* sign_key      = s->ca.key_der;
+    size_t         sign_key_len  = s->ca.key_der_len;
+#if defined(WOLFCERT_BUILD_TESTING)
+    if (p->fault_sign_with_wrong_key) {
+        if (!p->wrong_ca_ready) {
+            WolfCertKeyType kt = s->cfg.ca_key_type ? s->cfg.ca_key_type
+                                                    : WOLFCERT_KEY_RSA;
+            rc = wolfcert_ca_generate(&p->wrong_ca, kt, s->cfg.ca_key_param,
+                                      s->heap);
+            if (rc != WOLFCERT_OK) {
+                wolfcert_buffer_free(&resp_env);
+                send_text(s, fd, 500, "Server Error", "text/plain", "");
+                return rc;
+            }
+            p->wrong_ca_ready = 1;
+        }
+        sign_cert     = p->wrong_ca.cert_der;
+        sign_cert_len = p->wrong_ca.cert_der_len;
+        sign_key      = p->wrong_ca.key_der;
+        sign_key_len  = p->wrong_ca.key_der_len;
+    }
+#endif
 
     WolfCertBuffer pki_out = { 0 };
     rc = wolfcert_scep_build_pki_message(resp_env.data, resp_env.len,
-                                          s->ca.cert_der, s->ca.cert_der_len,
-                                          s->ca.key_der,  s->ca.key_der_len,
+                                          sign_cert, sign_cert_len,
+                                          sign_key,  sign_key_len,
                                           SHA256h, &attrs, &pki_out, s->heap);
 
     wolfcert_buffer_free(&resp_env);
@@ -818,6 +858,10 @@ static void scep_free_priv(WolfCertServer* srv)
     WOLFCERT_XFREE(p->items, srv->heap);
     if (p->next_ca_ready)
         wolfcert_ca_free(&p->next_ca);
+#if defined(WOLFCERT_BUILD_TESTING)
+    if (p->wrong_ca_ready)
+        wolfcert_ca_free(&p->wrong_ca);
+#endif
     WOLFCERT_XFREE(p, srv->heap);
     srv->priv = NULL;
 }

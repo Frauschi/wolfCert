@@ -197,7 +197,11 @@ array on the heap past the inline `MAX_SIGNED_ATTRIBS_SZ` (default 7), so this
 encodes fine on any malloc-enabled build. Only a `WOLFSSL_NO_MALLOC` build with
 the default inline cap can't fit it, and there wolfCert drops
 `recipientNonce`/`failInfo` unless wolfSSL is rebuilt with
-`-DMAX_SIGNED_ATTRIBS_SZ>=9`.
+`-DMAX_SIGNED_ATTRIBS_SZ>=9`. The client requires the `recipientNonce`
+(RFC 8894 §3.2.1.2) and rejects a CertRep that omits it, so a
+`WOLFSSL_NO_MALLOC` server that drops it will not interoperate with a wolfCert
+client until wolfSSL is rebuilt with that cap raised. Raise
+`-DMAX_SIGNED_ATTRIBS_SZ>=9` on both peers of a `WOLFSSL_NO_MALLOC` deployment.
 
 ## 4. MCU / CryptoCb integration guide
 

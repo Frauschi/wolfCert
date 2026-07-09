@@ -55,6 +55,31 @@
 #define WOLFCERT_HTTP_AUTH_BUF_SZ 512   /* client Basic-auth header line      */
 #endif
 
+/* Heap headroom added on top of (envelope + signer cert) when encoding a SCEP
+ * SignedData pkiMessage. wolfSSL's PKCS#7 encoder mutates internal state per
+ * call, so it is given a single right-sized one-shot buffer rather than
+ * size-then-encode retried. This slack bounds everything else in the message:
+ * the signed-attribute set (~2 KiB), the RSA signature (<=1 KiB at RSA-8192),
+ * and the SignerInfo identifier plus ASN.1 framing (~1 KiB). 8 KiB is a safe
+ * default; override (compiler -D or user_settings) to trim it on constrained
+ * targets, see docs/EMBEDDED.md. */
+#ifndef WOLFCERT_SCEP_PKI_SLACK
+#define WOLFCERT_SCEP_PKI_SLACK   (8 * 1024)
+#endif
+
+/* Upper bound on a SCEP message body handed to the PKCS#7 helpers: the CSR in
+ * wolfcert_scep_self_signed_rsa and the enveloped CertRep in
+ * wolfcert_scep_deenvelop, each of which drives a `len + 4096` one-shot
+ * allocation. In the client/server flow these already arrive bounded by the
+ * HTTP body cap (WOLFCERT_HTTP_DEFAULT_MAX_BODY, also 64 KiB), so this is the
+ * helpers' own last-resort limit that keeps a direct caller from driving a
+ * huge speculative malloc. The default matches the HTTP cap so it never
+ * rejects a body the transport would have accepted; override (compiler -D or
+ * user_settings) to trim it on constrained targets, see docs/EMBEDDED.md. */
+#ifndef WOLFCERT_SCEP_MAX_MSG_SZ
+#define WOLFCERT_SCEP_MAX_MSG_SZ  (64 * 1024)
+#endif
+
 /* ---- key ---------------------------------------------------------------- */
 
 struct WolfCertKey {
@@ -140,6 +165,15 @@ ssize_t wolfcert_io_send(WolfCertServer* srv, int fd, const void* buf, size_t le
 WOLFCERT_API const WolfCertServerOps* wolfcert_est_server_ops(void);
 WOLFCERT_API const WolfCertServerOps* wolfcert_scep_server_ops(void);
 
+#if defined(WOLFCERT_BUILD_TESTING)
+/* Test-only fault injection for a started SCEP server: make it emit a CertRep
+ * without a recipientNonce, and/or sign the CertRep with a throwaway key
+ * instead of the CA key. Used to drive the client-side rejection paths. Call
+ * after wolfcert_server_start and before the client request. */
+WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
+    int omit_recipient_nonce, int sign_with_wrong_key);
+#endif
+
 /* ---- error reporting --------------------------------------------------- */
 
 int  wolfcert_map_wc_err(int wc_rc);
@@ -223,15 +257,12 @@ WOLFCERT_TEST_VIS int wolfcert_pkcs7_certs_to_pem(const uint8_t* p7_der, size_t 
 WOLFCERT_TEST_VIS int wolfcert_pkcs7_certs_to_der(const uint8_t* p7_der, size_t p7_der_len,
                                                   WolfCertBuffer* out_der, void* heap);
 
-/* Encoding-aware CA retrieval. The public wolfcert_est_get_cacerts /
- * wolfcert_scep_get_ca_cert wrap these with WOLFCERT_ENCODING_PEM;
- * wolfcert_client_get_ca forwards the caller's chosen encoding. */
+/* Encoding-aware CA retrieval. The public wolfcert_est_get_cacerts wraps this
+ * with WOLFCERT_ENCODING_PEM; wolfcert_client_get_ca forwards the caller's
+ * chosen encoding. (wolfcert_scep_get_ca_cert_enc is public, in scep.h.) */
 WOLFCERT_TEST_VIS int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv,
                                                    WolfCertEncoding enc,
                                                    WolfCertBuffer* out_ca);
-WOLFCERT_TEST_VIS int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv,
-                                                    WolfCertEncoding enc,
-                                                    WolfCertBuffer* out_ca);
 WOLFCERT_TEST_VIS int wolfcert_pkcs7_build_certs_only(const uint8_t* const* certs_der,
                                                       const size_t* certs_len, size_t count,
                                                       WolfCertBuffer* out_der, void* heap);
@@ -274,7 +305,7 @@ int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_
                             WolfCertBuffer* out_plain, void* heap);
 #ifdef WOLFCERT_HAVE_RSA
 WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
-    const char* subject_cn, uint8_t** out_der, size_t* out_len, void* heap);
+    const uint8_t* csr_der, size_t csr_len, uint8_t** out_der, size_t* out_len, void* heap);
 #endif
 WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_message(const uint8_t* envelope_der,
     size_t envelope_len, const uint8_t* signer_cert_der, size_t signer_cert_len,
@@ -287,9 +318,44 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     char** out_pki_status, uint8_t** out_signer_cert, size_t* out_signer_cert_len,
     void* heap);
 
+/* Build the GetNextCACert response (RFC 8894 section 4.6.1): wrap the next CA
+ * certificate in a degenerate certs-only SignedData and sign that with the
+ * current CA key, so the client can bind the rollover certificate to trust it
+ * already holds. */
+WOLFCERT_TEST_VIS int wolfcert_scep_build_next_ca_response(
+    const uint8_t* next_ca_cert, size_t next_ca_cert_len,
+    const uint8_t* ca_cert, size_t ca_cert_len,
+    const uint8_t* ca_key, size_t ca_key_len,
+    WolfCertBuffer* out_der, void* heap);
+
 /* Extract the SubjectPublicKeyInfo bytes from a DER certificate or CSR.
  * Result is heap-allocated; caller frees with WOLFCERT_XFREE(..., heap). */
 int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
                           uint8_t** out_spki, size_t* out_len, void* heap);
+
+/* RFC 8894: a CertRep must be signed by the CA or its RA. Confirm the response
+ * signer certificate shares a public key with some certificate in the trusted
+ * GetCACert bundle (one or more concatenated DER certs). Returns WOLFCERT_OK on
+ * match, WOLFCERT_ERR_AUTH otherwise. */
+WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(
+    const uint8_t* signer_cert, size_t signer_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len, void* heap);
+
+/* RFC 8894: an enrollment response must be a CertRep (messageType "3") whose
+ * transactionID echoes the one the client sent. Returns WOLFCERT_OK when both
+ * hold, WOLFCERT_ERR_PROTOCOL otherwise. */
+WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
+    const uint8_t* rx_tid, size_t rx_tid_len,
+    const uint8_t* sent_tid, size_t sent_tid_len);
+
+/* Validate a GetNextCACert response (RFC 8894 section 4.6.1): verify it is a
+ * SignedData, bind its signer to a certificate in the trusted current-CA
+ * bundle (current_ca_der is one or more concatenated DER certs; required), and
+ * extract the enclosed rollover certificate(s) as PEM. Rejects an unsigned
+ * response or one not signed by a cert in the bundle. */
+WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(
+    const uint8_t* resp_der, size_t resp_len,
+    const uint8_t* current_ca_der, size_t current_ca_len,
+    WolfCertBuffer* out_pem, void* heap);
 
 #endif /* WOLFCERT_INTERNAL_H */
