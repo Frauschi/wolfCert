@@ -610,11 +610,25 @@ int wolfcert_ca_issue(WolfCertCa* ca,
                       const uint8_t* csr_der, size_t csr_len,
                       uint8_t** out_cert, size_t* out_len)
 {
+    DecodedCert dc;
+    WC_RNG rng;
+    Cert* nc = NULL;
+    void* sub_impl = NULL;
+    const WolfCertKeyAlg* sub_alg = NULL;
+    const WolfCertKeyAlg* ca_alg;
+    uint8_t* der = NULL;
+    void* heap;
+    size_t der_cap = 8192;
+    int body_sz = 0;
+    int sig_sz = 0;
+    int rng_ok = 0;
+    int rc;
+
     if (ca == NULL || csr_der == NULL || out_cert == NULL || out_len == NULL)
         return WOLFCERT_ERR_BAD_ARG;
-    void* heap = ca->heap;
+    heap = ca->heap;
 
-    const WolfCertKeyAlg* ca_alg = wolfcert_key_alg(ca->type);
+    ca_alg = wolfcert_key_alg(ca->type);
     if (ca_alg == NULL)
         return WOLFCERT_ERR_UNSUPPORTED;
 
@@ -622,102 +636,88 @@ int wolfcert_ca_issue(WolfCertCa* ca,
      * the requester holds the private key for the public key being certified.
      * Parsing with VERIFY makes wolfSSL confirm the CertificationRequest
      * signature against the embedded SubjectPublicKeyInfo. */
-    DecodedCert dc;
     wc_InitDecodedCert(&dc, (byte*)csr_der, (word32)csr_len, heap);
-    int rc = wc_ParseCert(&dc, CERTREQ_TYPE, VERIFY, NULL);
-    if (rc != 0) {
-        wc_FreeDecodedCert(&dc);
-        return WOLFCERT_ERR_WC(rc, "ca", "ParseCert(CSR)");
+    rc = wc_ParseCert(&dc, CERTREQ_TYPE, VERIFY, NULL);
+    if (rc != 0)
+        rc = WOLFCERT_ERR_WC(rc, "ca", "ParseCert(CSR)");
+
+    if (rc == 0) {
+        nc = wc_CertNew(heap);
+        if (nc == NULL)
+            rc = WOLFCERT_ERR_MEMORY;
     }
 
-    Cert* nc = wc_CertNew(heap);
-    if (nc == NULL) {
-        wc_FreeDecodedCert(&dc);
-        return WOLFCERT_ERR_MEMORY;
-    }
-    wc_InitCert_ex(nc, heap, WOLFCERT_DEVID_SOFTWARE);
+    if (rc == 0) {
+        wc_InitCert_ex(nc, heap, WOLFCERT_DEVID_SOFTWARE);
 
-    COPY_SUBJ(subjectCN, nc->subject.commonName);
-    COPY_SUBJ(subjectO,  nc->subject.org);
-    COPY_SUBJ(subjectOU, nc->subject.unit);
-    COPY_SUBJ(subjectC,  nc->subject.country);
-    COPY_SUBJ(subjectST, nc->subject.state);
-    COPY_SUBJ(subjectL,  nc->subject.locality);
+        COPY_SUBJ(subjectCN, nc->subject.commonName);
+        COPY_SUBJ(subjectO,  nc->subject.org);
+        COPY_SUBJ(subjectOU, nc->subject.unit);
+        COPY_SUBJ(subjectC,  nc->subject.country);
+        COPY_SUBJ(subjectST, nc->subject.state);
+        COPY_SUBJ(subjectL,  nc->subject.locality);
 
-    rc = wc_SetIssuerBuffer(nc, ca->cert_der, (int)ca->cert_der_len);
-    if (rc != 0) {
-        wc_CertFree(nc);
-        wc_FreeDecodedCert(&dc);
-        return WOLFCERT_ERR_CRYPTO;
+        if (wc_SetIssuerBuffer(nc, ca->cert_der, (int)ca->cert_der_len) != 0)
+            rc = WOLFCERT_ERR_CRYPTO;
     }
 
-    nc->sigType   = ca_alg->ctc_sig_default;
-    nc->daysValid = 365;
-    nc->isCA      = 0;
+    if (rc == 0) {
+        nc->sigType   = ca_alg->ctc_sig_default;
+        nc->daysValid = 365;
+        nc->isCA      = 0;
 
-    /* Carry the requested subjectAltName from the CSR into the issued cert. */
-    rc = flatten_csr_san(&dc, nc, heap);
-    if (rc != WOLFCERT_OK) {
-        wc_CertFree(nc);
-        wc_FreeDecodedCert(&dc);
-        return rc;
+        /* Carry the requested subjectAltName from the CSR into the issued
+         * cert. */
+        rc = flatten_csr_san(&dc, nc, heap);
     }
 
-    /* Decode the subject's public key into a wolfSSL struct. */
-    void* sub_impl = NULL;
-    const WolfCertKeyAlg* sub_alg = NULL;
-    rc = decode_subject_pubkey(dc.keyOID, dc.publicKey, dc.pubKeySize,
-                               heap, &sub_impl, &sub_alg);
-    if (rc != WOLFCERT_OK) {
-        wc_CertFree(nc);
-        wc_FreeDecodedCert(&dc);
-        return rc;
+    if (rc == 0) {
+        /* Decode the subject's public key into a wolfSSL struct. */
+        rc = decode_subject_pubkey(dc.keyOID, dc.publicKey, dc.pubKeySize,
+                                   heap, &sub_impl, &sub_alg);
     }
 
-    size_t der_cap = 8192;
-    uint8_t* der = (uint8_t*)WOLFCERT_XMALLOC(der_cap, heap);
-    if (der == NULL) {
-        free_subject_pubkey(dc.keyOID, sub_impl, heap);
-        wc_CertFree(nc);
-        wc_FreeDecodedCert(&dc);
-        return WOLFCERT_ERR_MEMORY;
+    if (rc == 0) {
+        der = (uint8_t*)WOLFCERT_XMALLOC(der_cap, heap);
+        if (der == NULL)
+            rc = WOLFCERT_ERR_MEMORY;
     }
 
-    WC_RNG rng;
-    if (wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE) != 0) {
-        WOLFCERT_XFREE(der, heap);
-        free_subject_pubkey(dc.keyOID, sub_impl, heap);
-        wc_CertFree(nc);
-        wc_FreeDecodedCert(&dc);
-        return WOLFCERT_ERR_CRYPTO;
+    if (rc == 0) {
+        if (wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE) != 0)
+            rc = WOLFCERT_ERR_CRYPTO;
+        else
+            rng_ok = 1;
     }
 
-    int body_sz = wc_MakeCert_ex(nc, der, (word32)der_cap,
+    if (rc == 0) {
+        body_sz = wc_MakeCert_ex(nc, der, (word32)der_cap,
                                  sub_alg->wc_keytype_enum, sub_impl, &rng);
-    if (body_sz <= 0) {
-        int mapped = WOLFCERT_ERR_WC(body_sz, "ca", "MakeCert_ex(issue keyOID=%u)",
-                                     (unsigned)dc.keyOID);
-        WOLFCERT_XFREE(der, heap);
-        wc_FreeRng(&rng);
-        free_subject_pubkey(dc.keyOID, sub_impl, heap);
-        wc_CertFree(nc);
-        wc_FreeDecodedCert(&dc);
-        return mapped;
+        if (body_sz <= 0)
+            rc = WOLFCERT_ERR_WC(body_sz, "ca", "MakeCert_ex(issue keyOID=%u)",
+                                 (unsigned)dc.keyOID);
     }
 
-    int sig_sz = wc_SignCert_ex(body_sz, nc->sigType, der, (word32)der_cap,
+    if (rc == 0) {
+        sig_sz = wc_SignCert_ex(body_sz, nc->sigType, der, (word32)der_cap,
                                 ca_alg->wc_keytype_enum, ca->impl, &rng);
-
-    wc_FreeRng(&rng);
-    free_subject_pubkey(dc.keyOID, sub_impl, heap);
-    wc_CertFree(nc);
-    wc_FreeDecodedCert(&dc);
-    if (sig_sz <= 0) {
-        WOLFCERT_XFREE(der, heap);
-        return WOLFCERT_ERR_WC(sig_sz, "ca", "SignCert_ex(issue)");
+        if (sig_sz <= 0)
+            rc = WOLFCERT_ERR_WC(sig_sz, "ca", "SignCert_ex(issue)");
     }
 
-    *out_cert = der;
-    *out_len  = (size_t)sig_sz;
-    return WOLFCERT_OK;
+    if (rc == 0) {
+        *out_cert = der;
+        *out_len  = (size_t)sig_sz;
+        der = NULL;   /* ownership moves to the caller */
+    }
+
+    if (rng_ok)
+        wc_FreeRng(&rng);
+    if (sub_impl != NULL)
+        free_subject_pubkey(dc.keyOID, sub_impl, heap);
+    if (nc != NULL)
+        wc_CertFree(nc);
+    wc_FreeDecodedCert(&dc);
+    WOLFCERT_XFREE(der, heap);
+    return rc;
 }
