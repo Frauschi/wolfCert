@@ -43,6 +43,13 @@
 #include <wolfssl/wolfcrypt/pkcs7.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/random.h>
+#ifndef NO_SHA
+#include <wolfssl/wolfcrypt/sha.h>
+#endif
+#include <wolfssl/wolfcrypt/sha256.h>
+#ifdef WOLFSSL_SHA512
+#include <wolfssl/wolfcrypt/sha512.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -729,10 +736,121 @@ static int test_signer_subject_fallback(void)
     return 0;
 }
 
+/* All fingerprint assertions run against a caller-owned CA DER so the buffer is
+ * freed exactly once by test_ca_fingerprint no matter which REQUIRE fires - the
+ * same ownership split as check_no_envelope / test_non_success_has_no_envelope. */
+static int check_ca_fingerprint(const uint8_t* ca_der, size_t ca_len)
+{
+    uint8_t sha256[WC_SHA256_DIGEST_SIZE];
+    uint8_t tampered[WC_SHA256_DIGEST_SIZE];
+#ifndef NO_SHA
+    uint8_t sha1[WC_SHA_DIGEST_SIZE];
+#else
+    uint8_t sha1_absent[20];    /* SHA-1 digest length; algorithm not compiled in */
+#endif
+#ifdef WOLFSSL_SHA512
+    uint8_t sha512[WC_SHA512_DIGEST_SIZE];
+#else
+    uint8_t sha512_absent[64];  /* SHA-512 digest length; algorithm not compiled in */
+#endif
+
+    REQUIRE(wc_Sha256Hash(ca_der, (word32)ca_len, sha256) == 0);
+
+    /* Explicit SHA-256 and AUTO (by length) both accept the real digest. */
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha256,
+                sizeof(sha256), WOLFCERT_SCEP_FP_SHA256) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha256,
+                sizeof(sha256), WOLFCERT_SCEP_FP_AUTO) == WOLFCERT_OK);
+
+    /* A single flipped bit must be rejected as a mismatch. */
+    memcpy(tampered, sha256, sizeof(tampered));
+    tampered[0] ^= 0x01;
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, tampered,
+                sizeof(tampered), WOLFCERT_SCEP_FP_SHA256) == WOLFCERT_ERR_AUTH);
+
+    /* Explicit algorithm with a length that doesn't match the digest -> BAD_ARG. */
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha256, 20,
+                WOLFCERT_SCEP_FP_SHA256) == WOLFCERT_ERR_BAD_ARG);
+    /* AUTO with an unrecognized length -> BAD_ARG. */
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha256, 33,
+                WOLFCERT_SCEP_FP_AUTO) == WOLFCERT_ERR_BAD_ARG);
+    /* NULL / zero inputs -> BAD_ARG. */
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(NULL, 0, sha256, sizeof(sha256),
+                WOLFCERT_SCEP_FP_SHA256) == WOLFCERT_ERR_BAD_ARG);
+
+#ifndef NO_SHA
+    REQUIRE(wc_ShaHash(ca_der, (word32)ca_len, sha1) == 0);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1,
+                sizeof(sha1), WOLFCERT_SCEP_FP_SHA1) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1,
+                sizeof(sha1), WOLFCERT_SCEP_FP_AUTO) == WOLFCERT_OK);
+    /* A single flipped bit must be rejected on the SHA-1 path too. */
+    sha1[0] ^= 0x01;
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1,
+                sizeof(sha1), WOLFCERT_SCEP_FP_SHA1) == WOLFCERT_ERR_AUTH);
+#else
+    /* SHA-1 absent: an explicit SHA-1 request, and AUTO with a 20-byte
+     * (SHA-1-length) fingerprint, both fall to the outer switch default and
+     * must report the algorithm unsupported rather than mis-dispatching. The
+     * buffer contents are irrelevant - the algorithm check precedes the
+     * fingerprint compare. */
+    memset(sha1_absent, 0, sizeof(sha1_absent));
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1_absent,
+                sizeof(sha1_absent), WOLFCERT_SCEP_FP_SHA1)
+            == WOLFCERT_ERR_UNSUPPORTED);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1_absent,
+                sizeof(sha1_absent), WOLFCERT_SCEP_FP_AUTO)
+            == WOLFCERT_ERR_UNSUPPORTED);
+#endif
+
+#ifdef WOLFSSL_SHA512
+    REQUIRE(wc_Sha512Hash(ca_der, (word32)ca_len, sha512) == 0);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha512,
+                sizeof(sha512), WOLFCERT_SCEP_FP_SHA512) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha512,
+                sizeof(sha512), WOLFCERT_SCEP_FP_AUTO) == WOLFCERT_OK);
+    /* A single flipped bit must be rejected on the SHA-512 path too. */
+    sha512[0] ^= 0x01;
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha512,
+                sizeof(sha512), WOLFCERT_SCEP_FP_SHA512) == WOLFCERT_ERR_AUTH);
+#else
+    /* SHA-512 absent: same as the SHA-1 case for the 64-byte path. */
+    memset(sha512_absent, 0, sizeof(sha512_absent));
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha512_absent,
+                sizeof(sha512_absent), WOLFCERT_SCEP_FP_SHA512)
+            == WOLFCERT_ERR_UNSUPPORTED);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha512_absent,
+                sizeof(sha512_absent), WOLFCERT_SCEP_FP_AUTO)
+            == WOLFCERT_ERR_UNSUPPORTED);
+#endif
+
+    return 0;
+}
+
+/* wolfcert_scep_verify_ca_fingerprint: correct digest verifies, a tampered one
+ * is rejected, AUTO dispatches on length, and length/argument misuse is caught. */
+static int test_ca_fingerprint(void)
+{
+    uint8_t* ca_der  = NULL;
+    uint8_t* key_der = NULL;
+    size_t   ca_len  = 0, key_len = 0;
+    int      rc;
+
+    REQUIRE(make_ca(&ca_der, &ca_len, &key_der, &key_len) == 0);
+
+    rc = check_ca_fingerprint(ca_der, ca_len);
+
+    free(ca_der);
+    free(key_der);
+    return rc;
+}
+
 int main(void)
 {
     REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+    if (test_ca_fingerprint())
+        return 1;
     if (test_non_success_has_no_envelope())
         return 1;
     if (test_signer_subject_fallback())

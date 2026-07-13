@@ -190,6 +190,14 @@ or `FAILURE`.
 `WOLFCERT_ERR_UNSUPPORTED` — this is a protocol constraint, not a wolfCert
 limitation. Use EST for Ed25519 / Ed448 / ML-DSA.
 
+**Trust bootstrap.** A `GetCACert` response is only trustworthy once its
+fingerprint has been checked against a value obtained out of band.
+`wolfcert_scep_verify_ca_fingerprint` hashes the DER CA certificate (SHA-256,
+or SHA-1 / SHA-512, with `WOLFCERT_SCEP_FP_AUTO` selecting the algorithm from
+the fingerprint length) and constant-time-compares it, returning
+`WOLFCERT_ERR_AUTH` on mismatch. Verify the bundle this way before using it as
+the `ca_bundle` trust set for enrollment.
+
 **Signed attributes.** The CertRep carries the full RFC 8894 §3.1
 signed-attribute set (including `recipientNonce`) — up to 9 entries alongside
 the CMS auto-defaults. wolfSSL's PKCS#7 encoder grows its signed-attribute

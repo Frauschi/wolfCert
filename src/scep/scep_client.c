@@ -32,6 +32,13 @@
 #include <wolfssl/wolfcrypt/random.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/memory.h>
+#ifndef NO_SHA
+#include <wolfssl/wolfcrypt/sha.h>
+#endif
+#include <wolfssl/wolfcrypt/sha256.h>
+#ifdef WOLFSSL_SHA512
+#include <wolfssl/wolfcrypt/sha512.h>
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -222,6 +229,80 @@ int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv, WolfCertEncoding
 out:
     wolfcert_http_response_free(&resp);
     return rc;
+}
+
+/* Constant-time buffer comparison: returns 0 iff the two buffers are equal.
+ * Fingerprints are not secret, but a timing-independent compare keeps the
+ * trust check uniform and avoids leaking match position. */
+static int ct_diff(const uint8_t* a, const uint8_t* b, size_t n)
+{
+    uint8_t d = 0;
+    for (size_t i = 0; i < n; ++i)
+        d |= (uint8_t)(a[i] ^ b[i]);
+    return d;
+}
+
+int wolfcert_scep_verify_ca_fingerprint(const uint8_t* ca_der, size_t ca_der_len,
+                                        const uint8_t* expected, size_t expected_len,
+                                        WolfCertScepFpAlg alg)
+{
+    /* SHA-512 (64 bytes) is the widest digest we produce. */
+    uint8_t digest[64];
+    size_t  digest_len = 0;
+    int     rc = 0;
+
+    if (ca_der == NULL || ca_der_len == 0 || expected == NULL || expected_len == 0)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    /* AUTO: identify the algorithm from the supplied fingerprint length. This
+     * is a legacy convenience; a 20-byte value maps to collision-weak SHA-1, so
+     * callers that know the digest should pass it explicitly (see scep.h). */
+    if (alg == WOLFCERT_SCEP_FP_AUTO) {
+        switch (expected_len) {
+            case 20: alg = WOLFCERT_SCEP_FP_SHA1;   break; /* SHA-1 (legacy) */
+            case 32: alg = WOLFCERT_SCEP_FP_SHA256; break; /* SHA-256 */
+            case 64: alg = WOLFCERT_SCEP_FP_SHA512; break; /* SHA-512 */
+            default:
+                return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+                    "fingerprint length does not match SHA-1/SHA-256/SHA-512");
+        }
+    }
+
+    switch (alg) {
+        case WOLFCERT_SCEP_FP_SHA256:
+            digest_len = WC_SHA256_DIGEST_SIZE;
+            rc = wc_Sha256Hash(ca_der, (word32)ca_der_len, digest);
+            break;
+#ifndef NO_SHA
+        case WOLFCERT_SCEP_FP_SHA1:
+            digest_len = WC_SHA_DIGEST_SIZE;
+            rc = wc_ShaHash(ca_der, (word32)ca_der_len, digest);
+            break;
+#endif
+#ifdef WOLFSSL_SHA512
+        case WOLFCERT_SCEP_FP_SHA512:
+            digest_len = WC_SHA512_DIGEST_SIZE;
+            rc = wc_Sha512Hash(ca_der, (word32)ca_der_len, digest);
+            break;
+#endif
+        default:
+            return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+                "requested fingerprint digest is not compiled into wolfSSL");
+    }
+
+    if (rc != 0)
+        return WOLFCERT_ERR_WC(rc, "scep", "fingerprint hash");
+
+    /* An explicit algorithm with a mismatched length is a caller error. */
+    if (expected_len != digest_len)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "expected fingerprint length does not match the digest size");
+
+    if (ct_diff(expected, digest, digest_len) != 0)
+        return WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "scep",
+            "CA certificate fingerprint mismatch");
+
+    return WOLFCERT_OK;
 }
 
 /* ---- PKCSReq / RenewalReq ---------------------------------------------- */

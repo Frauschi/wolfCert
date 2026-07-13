@@ -55,6 +55,42 @@ WOLFCERT_API int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv,
                                                WolfCertEncoding enc,
                                                WolfCertBuffer* out_ca);
 
+/* Digest algorithm for wolfcert_scep_verify_ca_fingerprint. AUTO selects the
+ * algorithm from the expected fingerprint length (20 => SHA-1, 32 => SHA-256,
+ * 64 => SHA-512). SHA-256 is always available; SHA-1 and SHA-512 depend on the
+ * wolfSSL build and yield WOLFCERT_ERR_UNSUPPORTED when absent. MD5 is
+ * intentionally not offered.
+ *
+ * AUTO is a legacy convenience for fingerprints of unknown provenance: a
+ * 20-byte value selects SHA-1, whose collision resistance is broken, so an
+ * attacker who controls the out-of-band fingerprint source could bind a forged
+ * CA certificate to it. When the fingerprint's origin and digest are known,
+ * pass WOLFCERT_SCEP_FP_SHA256 (or SHA-512) explicitly instead of relying on
+ * AUTO. */
+typedef enum {
+    WOLFCERT_SCEP_FP_AUTO   = 0,
+    WOLFCERT_SCEP_FP_SHA256 = 1,
+    WOLFCERT_SCEP_FP_SHA1   = 2,
+    WOLFCERT_SCEP_FP_SHA512 = 3
+} WolfCertScepFpAlg;
+
+/* Verify that a CA/RA certificate matches a fingerprint obtained out of band,
+ * the standard SCEP trust-bootstrap check on a GetCACert response before it is
+ * used as a trust anchor. The fingerprint is a hash over the whole DER-encoded
+ * certificate `ca_der` (pass one certificate, e.g. the leaf of a GetCACert
+ * bundle), compared in constant time against `expected`.
+ *
+ * Returns WOLFCERT_OK on match, WOLFCERT_ERR_AUTH on mismatch,
+ * WOLFCERT_ERR_BAD_ARG on NULL/zero inputs or an `expected_len` that does not
+ * match the chosen algorithm (or any known length under AUTO), and
+ * WOLFCERT_ERR_UNSUPPORTED when the requested digest is not compiled into
+ * wolfSSL. */
+WOLFCERT_API int wolfcert_scep_verify_ca_fingerprint(const uint8_t* ca_der,
+                                                     size_t ca_der_len,
+                                                     const uint8_t* expected,
+                                                     size_t expected_len,
+                                                     WolfCertScepFpAlg alg);
+
 /* RFC 8894 section 3.2.1.3 pkiStatus values returned by the server in a CertRep
  * pkiMessage. PENDING means the enrollment was accepted but is waiting
  * for manual approval; the caller re-queries later via
