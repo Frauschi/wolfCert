@@ -75,7 +75,7 @@ miscompile.
 |----------|----------------|--------------|--------------|
 | wolfSSL `Cert` (CSR / cert build) | **heap** (`wc_CertNew`) | ~20+ KB | `altNames[16384]` |
 | wolfSSL `DecodedCert` (cert parse) | **stack**, transient | several KB | parse scratch |
-| HTTP request handling | **stack** | 2-3 KB | request read buffer |
+| HTTP request handling | **stack** (EST + client); **heap** (SCEP server) | 2-3 KB stack | request read buffer |
 
 The good news: wolfCert never stack-allocates a `Cert`. Every CSR/cert
 build path (`src/csr.c`, `src/ca_issue.c`, `src/scep/scep_msg.c`) obtains
@@ -121,24 +121,32 @@ Trade-offs:
 ## 2. wolfCert HTTP stack buffers
 
 The in-tree test server and HTTP client size a few request-handling
-buffers on the stack. They are tunable with `#ifndef`-guarded macros in
-`src/internal.h`; override via `-D` or your `user_settings`-style config
-header.
+buffers with `#ifndef`-guarded macros in `src/internal.h`; override via `-D`
+or your `user_settings`-style config header. The EST server and the client
+place these on the stack; the SCEP server, whose GET `PKIOperation` read
+buffer is by far the largest, allocates it on the **heap** (freed as soon as
+the request completes) so it never counts against the stack budget.
 
 | Macro | Default | Buffer |
 |-------|---------|--------|
-| `WOLFCERT_HTTP_REQ_BUF_SZ` | `2048` | server request-header read buffer (`est_server.c`, `scep_server.c`) |
-| `WOLFCERT_HTTP_PATH_SZ` | `512` | server request `path` / `query` fields; the SCEP `full` reconstruction buffer is `2 ×` this |
+| `WOLFCERT_HTTP_REQ_BUF_SZ` | `2048` | server request-header read buffer. The SCEP server adds `WOLFCERT_HTTP_QUERY_SZ` to it (so a base64 GET `PKIOperation` fits) and allocates the result on the heap; the EST server keeps its `2048`-byte buffer on the stack (`est_server.c`, `scep_server.c`) |
+| `WOLFCERT_HTTP_PATH_SZ` | `512` | EST server request `path` field (the SCEP server points `path`/`query` into its heap read buffer instead) |
+| `WOLFCERT_HTTP_QUERY_SZ` | `8192` | sized to hold a base64 GET `PKIOperation` message; on the SCEP server it extends the heap read buffer (`REQ_BUF_SZ + QUERY_SZ`) that `query` points into |
 | `WOLFCERT_HTTP_AUTH_BUF_SZ` | `512` | client Basic-auth header line (`http.c`) |
+| `WOLFCERT_HTTP_MAX_PATH_LEN` | `8192` | client-side ceiling on a request URL's path+query (`http.c`) |
+| `WOLFCERT_SCEP_MAX_GET_URL` | `8192` | client cap on a GET `PKIOperation` URL; a larger message is refused with `WOLFCERT_ERR_UNSUPPORTED` so the caller POSTs (`internal.h`) |
 
 Shrinking `WOLFCERT_HTTP_REQ_BUF_SZ` lowers the largest request header
-block the server accepts; `WOLFCERT_HTTP_PATH_SZ` lowers the longest
-request path/query; `WOLFCERT_HTTP_AUTH_BUF_SZ` lowers the longest
-Basic-auth credential the client can send. Example:
+block the server accepts; `WOLFCERT_HTTP_PATH_SZ` / `WOLFCERT_HTTP_QUERY_SZ`
+lower the longest request path / query; `WOLFCERT_HTTP_AUTH_BUF_SZ` lowers the
+longest Basic-auth credential the client can send. A POST-only SCEP deployment
+can trim `WOLFCERT_HTTP_QUERY_SZ` (and, on the client, `WOLFCERT_SCEP_MAX_GET_URL`
+and `WOLFCERT_HTTP_MAX_PATH_LEN`) back down. Example:
 
 ```c
 #define WOLFCERT_HTTP_REQ_BUF_SZ 768
 #define WOLFCERT_HTTP_PATH_SZ    128
+#define WOLFCERT_HTTP_QUERY_SZ   256
 #define WOLFCERT_HTTP_AUTH_BUF_SZ 128
 ```
 

@@ -39,6 +39,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
 
 #define REQUIRE(cond) \
     do {                                                                    \
@@ -52,6 +57,132 @@ static void* server_thread(void* arg)
 {
     wolfcert_server_run((WolfCertServer*)arg);
     return NULL;
+}
+
+/* Send a raw HTTP/1.1 GET to the plain-HTTP SCEP server on the loopback port
+ * and return the numeric response status (or -1 on transport failure). An
+ * optional body (with a matching Content-Length) is sent when `body` is
+ * non-NULL. Used to exercise the server's malformed-GET rejection branches and
+ * the GET-with-body free path, which the client API cannot produce. */
+static int raw_http_status(uint16_t port, const char* target, const char* body)
+{
+    struct sockaddr_in addr;
+    struct timeval tv;
+    char req[512];
+    char resp[128];
+    size_t body_len = body != NULL ? strlen(body) : 0;
+    int fd;
+    int n;
+    ssize_t r;
+    int status = -1;
+
+    fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+
+    tv.tv_sec = 5;
+    tv.tv_usec = 0;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    if (body_len > 0)
+        n = snprintf(req, sizeof(req),
+                     "GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n"
+                     "Content-Length: %zu\r\n\r\n%s",
+                     target, body_len, body);
+    else
+        n = snprintf(req, sizeof(req),
+                     "GET %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                     target);
+    if (n < 0 || (size_t)n >= sizeof(req)) {
+        close(fd);
+        return -1;
+    }
+    if (write(fd, req, (size_t)n) != (ssize_t)n) {
+        close(fd);
+        return -1;
+    }
+
+    r = read(fd, resp, sizeof(resp) - 1);
+    if (r > 0) {
+        resp[r] = '\0';
+        if (strncmp(resp, "HTTP/1.1 ", 9) == 0)
+            status = atoi(resp + 9);
+    }
+
+    close(fd);
+    return status;
+}
+
+/* Exercise the HTTP GET PKIOperation fallback (RFC 8894 section 4.1): with a
+ * caps set that does not advertise POSTPKIOperation the client carries the
+ * pkiMessage base64-encoded in a GET query and the server decodes and issues
+ * exactly as for POST. The issued cert is verified to chain to the CA that
+ * answered the GET - the same trust check the POST path runs in main, not just
+ * a PEM-marker match. The device key, CSR, issued buffer, cert manager and
+ * decoded DER are owned here and freed on every return path, so a failing check
+ * cannot leak them. Returns WOLFCERT_OK on success, a negative wolfCert error,
+ * or -1 on a content/verification mismatch. */
+static int check_get_fallback(const WolfCertServerCfg* cli,
+                              const WolfCertScepCaps* caps,
+                              const WolfCertKeyCfg* kcfg,
+                              const uint8_t* ca_der_buf, size_t ca_der_len)
+{
+    WolfCertScepCaps      caps_get = *caps;
+    WolfCertCertMeta      meta_get = { .subject_dn = "CN=device-scep-get" };
+    WolfCertKey*          dkg = NULL;
+    WolfCertBuffer        csr_get = { 0 };
+    WolfCertBuffer        issued_get = { 0 };
+    WOLFSSL_CERT_MANAGER* cm = NULL;
+    DerBuffer*            issued_der = NULL;
+    int rc;
+
+    caps_get.post_pki_operation = 0;
+
+    rc = wolfcert_key_generate(kcfg, &dkg);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_csr_build(dkg, &meta_get, &csr_get);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_scep_pkcs_req(cli, &caps_get, ca_der_buf, ca_der_len,
+                                    dkg, csr_get.data, csr_get.len, &issued_get);
+
+    /* The issued cert must chain to the CA that answered the GET, not merely
+     * look like a PEM certificate. */
+    if (rc == WOLFCERT_OK) {
+        cm = wolfSSL_CertManagerNew();
+        if (cm == NULL)
+            rc = -1;
+    }
+    if (rc == WOLFCERT_OK &&
+            wolfSSL_CertManagerLoadCABuffer(cm, ca_der_buf, (long)ca_der_len,
+                WOLFSSL_FILETYPE_ASN1) != WOLFSSL_SUCCESS)
+        rc = -1;
+    if (rc == WOLFCERT_OK &&
+            wc_PemToDer(issued_get.data, (long)issued_get.len, CERT_TYPE,
+                &issued_der, NULL, NULL, NULL) != 0)
+        rc = -1;
+    if (rc == WOLFCERT_OK &&
+            wolfSSL_CertManagerVerifyBuffer(cm, issued_der->buffer,
+                (long)issued_der->length, WOLFSSL_FILETYPE_ASN1)
+                    != WOLFSSL_SUCCESS)
+        rc = -1;
+
+    wc_FreeDer(&issued_der);
+    if (cm != NULL)
+        wolfSSL_CertManagerFree(cm);
+    wolfcert_buffer_free(&issued_get);
+    wolfcert_buffer_free(&csr_get);
+    wolfcert_key_free(dkg);
+    return rc;
 }
 
 int main(void)
@@ -106,6 +237,30 @@ int main(void)
                                             (long)issued_der->length,
                                             WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS);
     wolfSSL_CertManagerFree(cm);
+
+    /* ---- HTTP GET PKIOperation fallback (RFC 8894 section 4.1) ------------
+     * Driven from a helper that owns and frees the device key, CSR and issued
+     * buffer so a failing assertion cannot leak them. */
+    REQUIRE(check_get_fallback(&cli, &caps, &kcfg,
+                               ca_der->buffer, ca_der->length) == WOLFCERT_OK);
+
+    /* Negative GET PKIOperation branches (RFC 8894 section 4.1): the server must
+     * reject each malformed request with 400. These cannot be produced by the
+     * client API, so drive the running server over a raw socket. */
+    REQUIRE(raw_http_status(wolfcert_server_port(s),
+                "/scep?operation=PKIOperation", NULL) == 400);              /* no message= */
+    REQUIRE(raw_http_status(wolfcert_server_port(s),
+                "/scep?operation=PKIOperation&message=%ZZ", NULL) == 400);  /* bad %-escape */
+    REQUIRE(raw_http_status(wolfcert_server_port(s),
+                "/scep?operation=PKIOperation&message=@@@@", NULL) == 400); /* bad base64  */
+
+    /* A GET carrying a spurious Content-Length body: read_request allocates
+     * req->body for it, and handle_pki_op_get must free that before installing
+     * the decoded message or it leaks (caught under ASan). "QUJD" is valid
+     * base64 so the decode succeeds and the free path runs; the payload is not a
+     * real pkiMessage, so the request is rejected with 400. */
+    REQUIRE(raw_http_status(wolfcert_server_port(s),
+                "/scep?operation=PKIOperation&message=QUJD", "XYZ") == 400); /* body freed */
 
 #ifdef WOLFCERT_HAVE_ED25519
     /* Ed25519 signer must be rejected cleanly (RFC 8894 requires RSA). */

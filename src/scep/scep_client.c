@@ -319,22 +319,117 @@ static int pick_hash_oid(const WolfCertScepCaps* caps)
     return SHA256h;
 }
 
+/* Percent-encode `in` into a freshly allocated NUL-terminated string, escaping
+ * every byte outside the RFC 3986 unreserved set so the base64 pkiMessage is
+ * safe inside a URL query value. Returns NULL on allocation failure. */
+static char* url_encode(const uint8_t* in, size_t in_len, void* heap)
+{
+    static const char HEX[] = "0123456789ABCDEF";
+    /* Worst case each byte expands to "%XX" (3 chars), plus the NUL. */
+    char* out = (char*)WOLFCERT_XMALLOC(in_len * 3 + 1, heap);
+    if (out == NULL)
+        return NULL;
+
+    size_t o = 0;
+    for (size_t i = 0; i < in_len; ++i) {
+        unsigned char c = in[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            out[o++] = (char)c;
+        }
+        else {
+            out[o++] = '%';
+            out[o++] = HEX[c >> 4];
+            out[o++] = HEX[c & 0x0F];
+        }
+    }
+    out[o] = '\0';
+
+    return out;
+}
+
+/* Build the HTTP GET URL for a PKIOperation fallback (RFC 8894 section 4.1):
+ *   base?operation=PKIOperation&message=<url-encoded base64 pkiMessage>
+ * Returns WOLFCERT_OK with *out_url owned by the caller, WOLFCERT_ERR_MEMORY,
+ * or WOLFCERT_ERR_UNSUPPORTED when the encoded URL would exceed
+ * WOLFCERT_SCEP_MAX_GET_URL (message too large for GET). */
+WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_get_url(const char* base,
+                             const uint8_t* pki_msg,
+                             size_t pki_len, void* heap, char** out_url)
+{
+    WolfCertBuffer b64 = { 0 };
+    int rc = wolfcert_base64_encode(pki_msg, pki_len, &b64, heap);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    char* enc = url_encode(b64.data, b64.len, heap);
+    wolfcert_buffer_free(&b64);
+    if (enc == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    char* head = append_query(base, "PKIOperation", heap);
+    if (head == NULL) {
+        WOLFCERT_XFREE(enc, heap);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    size_t need = strlen(head) + strlen("&message=") + strlen(enc) + 1;
+    if (need > WOLFCERT_SCEP_MAX_GET_URL) {
+        WOLFCERT_XFREE(enc, heap);
+        WOLFCERT_XFREE(head, heap);
+        return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+            "pkiMessage too large for an HTTP GET; the CA must advertise "
+            "POSTPKIOperation");
+    }
+
+    char* url = (char*)WOLFCERT_XMALLOC(need, heap);
+    if (url == NULL) {
+        WOLFCERT_XFREE(enc, heap);
+        WOLFCERT_XFREE(head, heap);
+        return WOLFCERT_ERR_MEMORY;
+    }
+    snprintf(url, need, "%s&message=%s", head, enc);
+
+    WOLFCERT_XFREE(enc, heap);
+    WOLFCERT_XFREE(head, heap);
+    *out_url = url;
+
+    return WOLFCERT_OK;
+}
+
 static int run_pki_op(const WolfCertServerCfg* srv,
+                      const WolfCertScepCaps* caps,
                       const uint8_t* pki_msg, size_t pki_len,
                       uint8_t** out_resp, size_t* out_resp_len)
 {
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
-    char* url = append_query(srv->server_url, "PKIOperation", heap);
-    if (url == NULL)
-        return WOLFCERT_ERR_MEMORY;
 
-    WolfCertHttpRequest req = {
-        .method       = "POST",
-        .url          = url,
-        .content_type = "application/x-pki-message",
-        .body         = pki_msg,
-        .body_len     = pki_len,
-    };
+    /* RFC 8894 section 4.1: POST the pkiMessage when the CA advertises
+     * POSTPKIOperation (assumed when caps are unknown), otherwise fall back to
+     * carrying it base64-encoded in an HTTP GET query. */
+    int use_post = (caps == NULL || caps->post_pki_operation);
+
+    char* url = NULL;
+    WolfCertHttpRequest req = { 0 };
+    if (use_post) {
+        url = append_query(srv->server_url, "PKIOperation", heap);
+        if (url == NULL)
+            return WOLFCERT_ERR_MEMORY;
+        req.method       = "POST";
+        req.url          = url;
+        req.content_type = "application/x-pki-message";
+        req.body         = pki_msg;
+        req.body_len     = pki_len;
+    }
+    else {
+        int grc = wolfcert_scep_build_pki_get_url(srv->server_url, pki_msg,
+                                                  pki_len, heap, &url);
+        if (grc != WOLFCERT_OK)
+            return grc;
+        req.method = "GET";
+        req.url    = url;
+    }
 
     fill_common(srv, &req);
     WolfCertHttpResponse resp = { 0 };
@@ -439,7 +534,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
 
     uint8_t* resp = NULL;
     size_t resp_len = 0;
-    rc = run_pki_op(srv, pki.data, pki.len, &resp, &resp_len);
+    rc = run_pki_op(srv, caps, pki.data, pki.len, &resp, &resp_len);
 
     wolfcert_buffer_free(&pki);
     if (rc != WOLFCERT_OK)

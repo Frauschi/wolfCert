@@ -845,11 +845,104 @@ static int test_ca_fingerprint(void)
     return rc;
 }
 
+/* Map one hex digit to its nibble value, or -1 if it is not a hex digit. */
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    return -1;
+}
+
+/* Percent-decode `in` into `out` (which must hold at least strlen(in) bytes),
+ * reversing url_encode()'s "%XX" escaping. Returns the decoded byte count, or
+ * -1 on a malformed escape. */
+static int percent_decode(const char* in, uint8_t* out)
+{
+    int    hi, lo;
+    size_t i = 0, o = 0;
+
+    while (in[i] != '\0') {
+        if (in[i] == '%') {
+            if (in[i + 1] == '\0' || in[i + 2] == '\0')
+                return -1;
+            hi = hex_nibble(in[i + 1]);
+            lo = hex_nibble(in[i + 2]);
+            if (hi < 0 || lo < 0)
+                return -1;
+            out[o++] = (uint8_t)((hi << 4) | lo);
+            i += 3;
+        }
+        else {
+            out[o++] = (uint8_t)in[i];
+            i += 1;
+        }
+    }
+    return (int)o;
+}
+
+/* wolfcert_scep_build_pki_get_url: builds a well-formed GET URL for small
+ * messages and refuses one that would exceed WOLFCERT_SCEP_MAX_GET_URL. */
+static int test_pki_get_url(void)
+{
+    const char* base = "http://ca.example/scep";
+    const char* pfx  = "http://ca.example/scep?operation=PKIOperation&message=";
+    int         prefix_ok, msg_ok = 0, rc;
+
+    uint8_t small[64];
+    for (size_t i = 0; i < sizeof(small); i++)
+        small[i] = (uint8_t)(i * 7 + 3);   /* spans bytes that must be escaped */
+
+    char* url = NULL;
+    REQUIRE(wolfcert_scep_build_pki_get_url(base, small, sizeof(small), NULL, &url)
+            == WOLFCERT_OK);
+    REQUIRE(url != NULL);
+    /* Capture the assertions, then free url before the REQUIREs so a failing
+     * check cannot leak the heap-allocated URL. */
+    prefix_ok = (strncmp(url, pfx, strlen(pfx)) == 0);
+    /* Round-trip the message= value rather than only checking it is non-empty:
+     * percent-decode, then base64-decode, and confirm it reproduces the
+     * original bytes. A url_encode that dropped the mandatory base64 escaping
+     * (+, /, =) would corrupt this and be caught here. */
+    if (prefix_ok) {
+        uint8_t        decoded_b64[sizeof(small) * 2];  /* holds the ~88-char b64 */
+        WolfCertBuffer raw = { 0 };
+        int            declen = percent_decode(url + strlen(pfx), decoded_b64);
+        if (declen > 0 && wolfcert_base64_decode(decoded_b64, (size_t)declen,
+                                                 &raw, NULL) == WOLFCERT_OK) {
+            msg_ok = (raw.len == sizeof(small) &&
+                      memcmp(raw.data, small, sizeof(small)) == 0);
+        }
+        wolfcert_buffer_free(&raw);
+    }
+    WOLFCERT_XFREE(url, NULL);   /* url came from the wolfCert heap, not malloc */
+    REQUIRE(prefix_ok);
+    REQUIRE(msg_ok);
+
+    /* A pkiMessage too large for a GET must be refused so the caller POSTs. */
+    size_t big_len = WOLFCERT_SCEP_MAX_GET_URL;   /* base64 alone exceeds the cap */
+    uint8_t* big = (uint8_t*)malloc(big_len);
+    REQUIRE(big != NULL);
+    memset(big, 0xA5, big_len);
+    char* url2 = NULL;
+    rc = wolfcert_scep_build_pki_get_url(base, big, big_len, NULL, &url2);
+    free(big);
+    WOLFCERT_XFREE(url2, NULL);   /* NULL on the expected UNSUPPORTED path */
+    REQUIRE(rc == WOLFCERT_ERR_UNSUPPORTED);
+
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     if (test_ca_fingerprint())
+        return 1;
+    if (test_pki_get_url())
         return 1;
     if (test_non_success_has_no_envelope())
         return 1;
