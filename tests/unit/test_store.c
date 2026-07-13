@@ -22,6 +22,9 @@
 #define _DARWIN_C_SOURCE   /* expose memmem/strcasestr/INADDR_LOOPBACK on macOS */
 
 #include <wolfcert/wolfcert.h>
+#include "../test_static_mem.h"
+
+#include "../integration/tls_test_util.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -45,7 +48,7 @@ static int test_posix(void)
     WolfCertStoreOps* store = wolfcert_store_posix_open(dir, NULL);
     REQUIRE(store != NULL);
 
-    WolfCertKeyCfg cfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+    WolfCertKeyCfg cfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* k = NULL;
     REQUIRE(wolfcert_key_generate(&cfg, &k) == WOLFCERT_OK);
@@ -102,6 +105,7 @@ static int test_memory(void)
 
 int main(void)
 {
+    REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     if (test_posix())
         return 1;

@@ -34,6 +34,12 @@
 
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/settings.h>
+/* wolfssl/wolfcrypt/random.h declares a `pid_t` member under HAVE_GETPID
+ * (e.g. static-memory builds). Pull in its POSIX declaration first so that
+ * header compiles; harmless on configs that don't reference it. */
+#if defined(HAVE_GETPID) && !defined(WOLFSSL_NO_GETPID)
+    #include <sys/types.h>
+#endif
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/ecc.h>
 #include <wolfssl/wolfcrypt/rsa.h>

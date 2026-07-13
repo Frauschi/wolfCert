@@ -26,7 +26,9 @@
 
 #include <wolfcert/wolfcert.h>
 #include <wolfcert/server.h>
-#include <wolfcert/est.h>
+#ifdef WOLFCERT_HAVE_EST
+#  include <wolfcert/est.h>
+#endif
 
 #include <getopt.h>
 #include <signal.h>
@@ -306,7 +308,10 @@ int main(int argc, char** argv)
 
     /* Parse --csrattrs-file at startup so a bad blob fails fast with a
      * clear operator-facing message instead of an obscure error from
-     * the first /csrattrs hit. */
+     * the first /csrattrs hit. CsrAttrs is an EST-only concept (RFC 7030
+     * section 4.5.2), so the validation is compiled only when EST is built;
+     * a SCEP-only server ignores the blob. */
+#ifdef WOLFCERT_HAVE_EST
     if (csr_attrs_blob != NULL && csr_attrs_blob_len > 0) {
         WolfCertCsrAttrs check;
         int prc = wolfcert_est_parse_csr_attrs(csr_attrs_blob,
@@ -326,6 +331,7 @@ int main(int argc, char** argv)
         }
         wolfcert_csr_attrs_free(&check);
     }
+#endif
 
     WolfCertServerCfgSrv cfg = {
         .protocol                   = sel,

@@ -42,6 +42,7 @@
 
 #include <wolfssl/wolfcrypt/asn.h>
 
+#include <stdio.h>
 #include <string.h>
 
 /* ---- minimal DER parsing helpers --------------------------------------- */
@@ -633,4 +634,40 @@ int wolfcert_csr_attrs_apply(const WolfCertCsrAttrs* attrs,
     }
 
     return WOLFCERT_OK;
+}
+
+/* Render a DER-encoded OID as a dotted-decimal string into `out` (always
+ * NUL-terminated when out_cap > 0). Returns the number of bytes written
+ * (excluding the terminator). A general OID utility used by the EST server's
+ * missing-attribute diagnostic and unit-tested directly; it lives here rather
+ * than in est_server.c so it is available in EST builds without the server. */
+WOLFCERT_TEST_VIS size_t wolfcert_oid_to_dotted(const uint8_t* oid, size_t oid_len,
+                                                char* out, size_t out_cap)
+{
+    size_t off = 0;
+
+    /* Always leave a valid C string, even for an empty OID or zero capacity. */
+    if (out_cap > 0)
+        out[0] = '\0';
+
+    if (oid_len >= 1) {
+        /* First byte holds the first two arcs as 40*node1 + node2. node1 is
+         * capped at 2, so for a first byte >= 80 node2 is the remainder above
+         * 80 (node2 can exceed 40 only when node1 == 2). */
+        unsigned first  = oid[0] < 80 ? oid[0] / 40 : 2;
+        unsigned second = oid[0] < 80 ? oid[0] % 40 : oid[0] - 80u;
+        off += (size_t)snprintf(out + off, out_cap - off, "%u.%u",
+                                first, second);
+    }
+
+    unsigned long n = 0;
+    for (size_t i = 1; i < oid_len && off + 16 < out_cap; ++i) {
+        n = (n << 7) | (oid[i] & 0x7F);
+        if ((oid[i] & 0x80) == 0) {
+            off += (size_t)snprintf(out + off, out_cap - off, ".%lu", n);
+            n = 0;
+        }
+    }
+
+    return off;
 }

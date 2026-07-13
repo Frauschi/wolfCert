@@ -28,6 +28,7 @@
 #define _DEFAULT_SOURCE
 
 #include <wolfcert/wolfcert.h>
+#include "../test_static_mem.h"
 #include "internal.h"
 
 #include <stdio.h>
@@ -213,6 +214,7 @@ static int test_csr_pem(void)
 
 int main(void)
 {
+    REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     if (test_url())
         return 1;

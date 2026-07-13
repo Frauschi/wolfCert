@@ -31,6 +31,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include <wolfcert/wolfcert.h>
+#include "../test_static_mem.h"
 #include <wolfcert/est.h>
 
 #include <stdint.h>
@@ -72,6 +73,7 @@ static const uint8_t OID_SECP384R1[] = { 0x2B, 0x81, 0x04, 0x00, 0x22 };
 
 int main(void)
 {
+    REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
     /* ---- Empty input -> OK, no items, all hint fields zero. */

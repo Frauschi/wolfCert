@@ -18,6 +18,9 @@
  */
 
 #include <wolfcert/wolfcert.h>
+#include "../test_static_mem.h"
+
+#include <wolfssl/options.h>   /* WOLFSSL_NO_ML_DSA_{44,65,87} for per-level gating */
 
 #include <stdio.h>
 #include <string.h>
@@ -68,13 +71,18 @@ static int roundtrip(WolfCertKeyType type, int param)
 
 int main(void)
 {
+    REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+#ifdef WOLFCERT_HAVE_ECC
     if (roundtrip(WOLFCERT_KEY_ECC, 256))
         return 1;
     if (roundtrip(WOLFCERT_KEY_ECC, 384))
         return 1;
+#endif
+#ifdef WOLFCERT_HAVE_RSA
     if (roundtrip(WOLFCERT_KEY_RSA, 2048))
         return 1;
+#endif
 #ifdef WOLFCERT_HAVE_ED25519
     if (roundtrip(WOLFCERT_KEY_ED25519, 0))
         return 1;
@@ -84,12 +92,20 @@ int main(void)
         return 1;
 #endif
 #ifdef WOLFCERT_HAVE_MLDSA
+    /* Each ML-DSA level can be disabled independently in wolfSSL
+     * (WOLFSSL_NO_ML_DSA_{44,65,87}); only exercise the ones present. */
+#ifndef WOLFSSL_NO_ML_DSA_44
     if (roundtrip(WOLFCERT_KEY_MLDSA44, 0))
         return 1;
+#endif
+#ifndef WOLFSSL_NO_ML_DSA_65
     if (roundtrip(WOLFCERT_KEY_MLDSA65, 0))
         return 1;
+#endif
+#ifndef WOLFSSL_NO_ML_DSA_87
     if (roundtrip(WOLFCERT_KEY_MLDSA87, 0))
         return 1;
+#endif
 #else
     /* Runtime rejection when the wolfSSL build lacks Dilithium. */
     {

@@ -150,9 +150,16 @@ int main(void)
     REQUIRE(wolfcert_est_get_cacerts(&client_cfg, &ca_pem) == WOLFCERT_OK);
 
     int rc = 0;
+    /* Each level can be disabled independently (WOLFSSL_NO_ML_DSA_{44,65,87}). */
+#ifndef WOLFSSL_NO_ML_DSA_44
     rc |= enroll_mldsa(&client_cfg, WOLFCERT_KEY_MLDSA44, "mldsa44", &ca_pem);
+#endif
+#ifndef WOLFSSL_NO_ML_DSA_65
     rc |= enroll_mldsa(&client_cfg, WOLFCERT_KEY_MLDSA65, "mldsa65", &ca_pem);
+#endif
+#ifndef WOLFSSL_NO_ML_DSA_87
     rc |= enroll_mldsa(&client_cfg, WOLFCERT_KEY_MLDSA87, "mldsa87", &ca_pem);
+#endif
 
     wolfcert_server_stop(s);
     pthread_join(tid, NULL);
