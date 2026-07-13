@@ -242,7 +242,7 @@ int main(void)
         char    *w_mt = NULL,  *w_st = NULL;
         REQUIRE(wolfcert_scep_parse_pki_message(wmsg.data, wmsg.len, &wenv,
                     &w_tid, &w_tidl, &w_sn, &w_snl, &w_rn, &w_rnl,
-                    &w_mt, &w_st, &w_sc, &w_scl, NULL) == WOLFCERT_OK);
+                    &w_mt, &w_st, &w_sc, &w_scl, NULL, NULL) == WOLFCERT_OK);
         REQUIRE(w_rn != NULL);                              /* present */
         REQUIRE(w_rnl == sizeof(rnonce));
         REQUIRE(memcmp(w_rn, rnonce, sizeof(rnonce)) == 0); /* unchanged */

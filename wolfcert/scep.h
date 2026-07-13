@@ -123,14 +123,17 @@ WOLFCERT_API int wolfcert_scep_pkcs_req(const WolfCertServerCfg* srv,
 
 /* RenewalReq: re-enroll using an existing cert/key to sign the pkiMessage.
  * `ra_cert` is the envelope target; `ca_bundle` is the trusted GetCACert bundle
- * the response signer is checked against (see wolfcert_scep_pkcs_req_ex). */
+ * the response signer is checked against (see wolfcert_scep_pkcs_req_ex).
+ *
+ * The renewed key pair is conveyed entirely inside `csr_der`: the CSR carries
+ * the new public key and `current_key` signs the enclosing pkiMessage. There
+ * is deliberately no separate new-key argument. */
 WOLFCERT_API int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
                                               const WolfCertScepCaps* caps,
                                               const uint8_t* ra_cert, size_t ra_cert_len,
                                               const uint8_t* ca_bundle, size_t ca_bundle_len,
                                               const uint8_t* current_cert, size_t current_cert_len,
                                               const WolfCertKey* current_key,
-                                              const WolfCertKey* new_key,
                                               const uint8_t* csr_der, size_t csr_der_len,
                                               WolfCertScepResult* out);
 
@@ -139,7 +142,6 @@ WOLFCERT_API int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
                                            const uint8_t* ra_cert, size_t ra_cert_len,
                                            const uint8_t* current_cert, size_t current_cert_len,
                                            const WolfCertKey* current_key,
-                                           const WolfCertKey* new_key,
                                            const uint8_t* csr_der, size_t csr_der_len,
                                            WolfCertBuffer* out_cert_pem);
 

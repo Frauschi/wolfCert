@@ -322,7 +322,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     size_t* out_tid_len, uint8_t** out_sender_nonce,   size_t* out_snonce_len,
     uint8_t** out_recipient_nonce,size_t* out_rnonce_len, char** out_message_type,
     char** out_pki_status, uint8_t** out_signer_cert, size_t* out_signer_cert_len,
-    void* heap);
+    char** out_fail_info, void* heap);
 
 /* Build the GetNextCACert response (RFC 8894 section 4.6.1): wrap the next CA
  * certificate in a degenerate certs-only SignedData and sign that with the

@@ -147,6 +147,9 @@ static int poll_path(WolfCertServer* s)
                                         &r3);
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(r3.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    /* The server reports failInfo "4" (badCertId) for an unknown transaction;
+     * the client must surface it in the result. */
+    REQUIRE(r3.fail_info == 4);
 
     wolfcert_scep_result_free(&r1);
     wolfcert_scep_result_free(&r2);

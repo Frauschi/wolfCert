@@ -734,7 +734,7 @@ static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
 
     int rc = wolfcert_scep_parse_pki_message(req->body, req->body_len, &env,
             &tid, &tid_len, &snonce, &snonce_len, &rnonce, &rnonce_len,
-            &mt, &ps, &signer_cert, &signer_cert_len, s->heap);
+            &mt, &ps, &signer_cert, &signer_cert_len, NULL, s->heap);
     if (rc != WOLFCERT_OK) {
         send_text(s, fd, 400, "Bad Request", "text/plain", "");
         goto out;

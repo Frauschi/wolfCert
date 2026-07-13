@@ -367,6 +367,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
     WolfCertBuffer resp_env = { 0 };
     WolfCertBuffer inner = { 0 };
     char*   status = NULL;
+    char*   fail_info = NULL;
     char* resp_mt = NULL;
     uint8_t* rx_tid = NULL;
     size_t rx_tid_len = 0;
@@ -378,7 +379,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
     size_t rx_signer_len = 0;
     rc = wolfcert_scep_parse_pki_message(resp, resp_len, &resp_env,
             &rx_tid, &rx_tid_len, &rx_sn, &rx_sn_len, &rx_rn, &rx_rn_len,
-            &resp_mt, &status, &rx_signer, &rx_signer_len, heap);
+            &resp_mt, &status, &rx_signer, &rx_signer_len, &fail_info, heap);
 
     WOLFCERT_XFREE(resp,   heap);
     WOLFCERT_XFREE(rx_sn,  heap);
@@ -435,6 +436,14 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
         }
         else if (status == NULL || strcmp(status, "0") != 0) {
             out->status = WOLFCERT_SCEP_STATUS_FAILURE;
+            /* RFC 8894 section 3.2.1.4: a FAILURE CertRep carries a failInfo
+             * PrintableString of "0".."4". Surface it to the caller; leave the
+             * default -1 when the server omitted the attribute. */
+            if (fail_info != NULL &&
+                fail_info[0] >= '0' && fail_info[0] <= '4' &&
+                fail_info[1] == '\0') {
+                out->fail_info = fail_info[0] - '0';
+            }
         }
         else {
             /* status "0" is SUCCESS: de-envelop the CertRep and convert the
@@ -453,6 +462,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
 
     WOLFCERT_XFREE(rx_tid, heap);
     WOLFCERT_XFREE(status, heap);
+    WOLFCERT_XFREE(fail_info, heap);
     wolfcert_buffer_free(&inner);
     wolfcert_buffer_free(&resp_env);
     return rc;
@@ -572,11 +582,9 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
                                  const uint8_t* ca_bundle, size_t ca_bundle_len,
                                  const uint8_t* current_cert, size_t current_cert_len,
                                  const WolfCertKey* current_key,
-                                 const WolfCertKey* new_key,
                                  const uint8_t* csr_der, size_t csr_der_len,
                                  WolfCertScepResult* out)
 {
-    (void)new_key;
     if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
             current_cert == NULL || current_key == NULL || csr_der == NULL ||
             out == NULL)
@@ -613,7 +621,6 @@ int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
                               const uint8_t* ra_cert, size_t ra_cert_len,
                               const uint8_t* current_cert, size_t current_cert_len,
                               const WolfCertKey* current_key,
-                              const WolfCertKey* new_key,
                               const uint8_t* csr_der, size_t csr_der_len,
                               WolfCertBuffer* out_cert_pem)
 {
@@ -626,7 +633,7 @@ int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
     int rc = wolfcert_scep_renewal_req_ex(srv, caps, ra_cert, ra_cert_len,
                                           ra_cert, ra_cert_len,
                                           current_cert, current_cert_len,
-                                          current_key, new_key,
+                                          current_key,
                                           csr_der, csr_der_len, &r);
 
     if (rc != WOLFCERT_OK) {

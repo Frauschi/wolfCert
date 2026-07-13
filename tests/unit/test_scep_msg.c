@@ -152,6 +152,7 @@ static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
     WolfCertBuffer    env = { 0 };
     char*    status = NULL;
     char*    mt     = NULL;
+    char*    rx_fi  = NULL;
     uint8_t* rx_tid = NULL;
     size_t   rx_tid_len = 0;
     uint8_t* rx_sn  = NULL;
@@ -159,6 +160,7 @@ static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
     uint8_t* rx_rn  = NULL;
     size_t   rx_rn_len = 0;
     int      prc;
+    int      env_ok, status_ok, mt_ok, fi_ok;
 
     memset(sn, 0xA5, sizeof(sn));
     memset(rn, 0x5A, sizeof(rn));
@@ -186,19 +188,28 @@ static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
     /* The message must still verify and parse, returning an empty envelope. */
     prc = wolfcert_scep_parse_pki_message(pki.data, pki.len, &env,
             &rx_tid, &rx_tid_len, &rx_sn, &rx_sn_len, &rx_rn, &rx_rn_len,
-            &mt, &status, NULL, NULL, NULL);
-    REQUIRE(prc == WOLFCERT_OK);
-    REQUIRE(env.len == 0 && env.data == NULL);
-    REQUIRE(status != NULL && strcmp(status, "2") == 0);
-    REQUIRE(mt != NULL && strcmp(mt, "3") == 0);
+            &mt, &status, NULL, NULL, &rx_fi, NULL);
+    /* Capture every assertion, then free the parsed outputs before the REQUIREs
+     * so a failing check cannot leak them (same pattern as test_pki_get_url). */
+    env_ok    = (env.len == 0 && env.data == NULL);
+    status_ok = (status != NULL && strcmp(status, "2") == 0);
+    mt_ok     = (mt != NULL && strcmp(mt, "3") == 0);
+    fi_ok     = (rx_fi != NULL && strcmp(rx_fi, "2") == 0);
 
     wolfcert_buffer_free(&env);
     wolfcert_buffer_free(&pki);
     WOLFCERT_XFREE(status, NULL);
     WOLFCERT_XFREE(mt, NULL);
+    WOLFCERT_XFREE(rx_fi, NULL);
     WOLFCERT_XFREE(rx_tid, NULL);
     WOLFCERT_XFREE(rx_sn, NULL);
     WOLFCERT_XFREE(rx_rn, NULL);
+
+    REQUIRE(prc == WOLFCERT_OK);
+    REQUIRE(env_ok);
+    REQUIRE(status_ok);
+    REQUIRE(mt_ok);
+    REQUIRE(fi_ok);
     return 0;
 }
 
@@ -426,7 +437,7 @@ static int test_next_ca_response_is_signed(void)
     /* A signed SignedData verifies here; an unsigned degenerate bundle does
      * not, because the parser rejects degenerate SignedData. */
     rc = wolfcert_scep_parse_pki_message(resp.data, resp.len, &content,
-            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(content.data != NULL && content.len > 0);
 
@@ -602,7 +613,7 @@ static int test_signer_is_verified_cert(void)
 
     REQUIRE(wolfcert_scep_parse_pki_message(msg, msg_len, &env,
             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-            &signer, &signer_len, NULL) == WOLFCERT_OK);
+            &signer, &signer_len, NULL, NULL) == WOLFCERT_OK);
 
     /* The parser must surface the cert that signed, not cert[0]. */
     REQUIRE(signer != NULL);
