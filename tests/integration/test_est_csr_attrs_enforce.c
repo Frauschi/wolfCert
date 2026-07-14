@@ -55,6 +55,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <sys/time.h>   /* struct timeval for SO_RCVTIMEO */
 #include <unistd.h>
 
 #define REQUIRE(cond) \

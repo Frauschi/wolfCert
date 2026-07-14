@@ -22,7 +22,8 @@
  * can only allocate from a wolfSSL static-memory pool, so a test loads one and
  * registers it as wolfCert's default heap; every wolfcert_* call then draws
  * from it. On any other build test_static_mem_init() is a no-op. Call it once
- * from a test's main() right after wolfcert_init().
+ * from a test's main() before wolfcert_init(), so wolfSSL_Init() (invoked by
+ * wolfcert_init) and every later NULL-heap allocation draw from the pool.
  */
 
 #ifndef WOLFCERT_TEST_STATIC_MEM_H

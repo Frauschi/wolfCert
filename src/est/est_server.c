@@ -762,9 +762,10 @@ static int csr__has_attr_oid(const uint8_t* csr, size_t csr_len,
  * s->cfg_csr_attrs must appear as an attribute type OID in the CSR.
  * `err_oid_len` is a value-result parameter: on entry it holds the capacity
  * of the caller-provided `err_oid_buf`. It is reset to 0 up front and set
- * non-zero only on the missing-OID path (which copies the missing OID into
- * `err_oid_buf`), so the caller can treat `*err_oid_len > 0` as "an OID was
- * captured" without coupling to the exact return code. The OID is copied out
+ * non-zero only when a missing required OID is captured in full into
+ * `err_oid_buf` (an OID too large for the buffer leaves it at 0), so the caller
+ * can treat `*err_oid_len > 0` as "a renderable OID was captured" without
+ * coupling to the exact return code. The OID is copied out
  * before the parsed policy is freed: the WolfCertCsrAttrs owns its OID
  * storage, so returning a pointer into it would dangle once the policy is
  * released. */
@@ -800,11 +801,14 @@ static int csr_attrs_enforce(const WolfCertServer* s,
                                     policy.items[i].oid_len);
         if (has != 1) {
             size_t n = policy.items[i].oid_len;
-            if (n > err_oid_cap)
-                n = err_oid_cap;
-            if (n > 0)
+            /* Only surface the OID diagnostic when the full OID fits the
+             * caller's buffer. A truncated DER OID would render as an invalid
+             * dotted string, so leave *err_oid_len at 0 in that case and let the
+             * caller fall back to a generic 400. */
+            if (n > 0 && n <= err_oid_cap) {
                 memcpy(err_oid_buf, policy.items[i].oid, n);
-            *err_oid_len = n;
+                *err_oid_len = n;
+            }
             missing = 1;
             break;
         }
