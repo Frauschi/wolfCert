@@ -21,6 +21,7 @@
 #define _DARWIN_C_SOURCE   /* expose memmem/strcasestr/INADDR_LOOPBACK on macOS */
 
 #include <wolfcert/wolfcert.h>
+#include "../test_static_mem.h"
 
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn.h>
@@ -132,11 +133,16 @@ static int build_with_extras(void)
 
 int main(void)
 {
+    REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+#ifdef WOLFCERT_HAVE_ECC
     if (build_and_reparse(WOLFCERT_KEY_ECC, 256))
         return 1;
+#endif
+#ifdef WOLFCERT_HAVE_RSA
     if (build_and_reparse(WOLFCERT_KEY_RSA, 2048))
         return 1;
+#endif
 #ifdef WOLFCERT_HAVE_ED25519
     if (build_and_reparse(WOLFCERT_KEY_ED25519, 0))
         return 1;
@@ -145,8 +151,10 @@ int main(void)
     if (build_and_reparse(WOLFCERT_KEY_ED448, 0))
         return 1;
 #endif
+#ifdef WOLFCERT_HAVE_ECC
     if (build_with_extras())
         return 1;
+#endif
     wolfcert_cleanup();
     printf("OK\n");
     return 0;

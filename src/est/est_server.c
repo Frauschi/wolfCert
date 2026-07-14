@@ -760,12 +760,24 @@ static int csr__has_attr_oid(const uint8_t* csr, size_t csr_len,
 
 /* Enforce est_require_csr_attributes: every bare-OID policy item in
  * s->cfg_csr_attrs must appear as an attribute type OID in the CSR.
- * `err_oid_out` / `err_oid_len` are set to the missing OID (pointer
- * into the policy blob) when the check fails. */
+ * `err_oid_len` is a value-result parameter: on entry it holds the capacity
+ * of the caller-provided `err_oid_buf`. It is reset to 0 up front and set
+ * non-zero only when a missing required OID is captured in full into
+ * `err_oid_buf` (an OID too large for the buffer leaves it at 0), so the caller
+ * can treat `*err_oid_len > 0` as "a renderable OID was captured" without
+ * coupling to the exact return code. The OID is copied out
+ * before the parsed policy is freed: the WolfCertCsrAttrs owns its OID
+ * storage, so returning a pointer into it would dangle once the policy is
+ * released. */
 static int csr_attrs_enforce(const WolfCertServer* s,
                              const uint8_t* csr_der, size_t csr_len,
-                             const uint8_t** err_oid_out, size_t* err_oid_len)
+                             uint8_t* err_oid_buf, size_t* err_oid_len)
 {
+    /* Read the caller's buffer capacity, then default the out-length to 0 so
+     * every non-missing return path reports "no OID captured". */
+    size_t err_oid_cap = *err_oid_len;
+    *err_oid_len = 0;
+
     if (!s->cfg.est_require_csr_attributes ||
             s->cfg_csr_attrs == NULL || s->cfg_csr_attrs_len == 0)
         return WOLFCERT_OK;
@@ -788,8 +800,15 @@ static int csr_attrs_enforce(const WolfCertServer* s,
                                     policy.items[i].oid,
                                     policy.items[i].oid_len);
         if (has != 1) {
-            *err_oid_out = policy.items[i].oid;
-            *err_oid_len = policy.items[i].oid_len;
+            size_t n = policy.items[i].oid_len;
+            /* Only surface the OID diagnostic when the full OID fits the
+             * caller's buffer. A truncated DER OID would render as an invalid
+             * dotted string, so leave *err_oid_len at 0 in that case and let the
+             * caller fall back to a generic 400. */
+            if (n > 0 && n <= err_oid_cap) {
+                memcpy(err_oid_buf, policy.items[i].oid, n);
+                *err_oid_len = n;
+            }
             missing = 1;
             break;
         }
@@ -798,37 +817,6 @@ static int csr_attrs_enforce(const WolfCertServer* s,
     wolfcert_csr_attrs_free(&policy);
 
     return missing ? WOLFCERT_ERR_PROTOCOL : WOLFCERT_OK;
-}
-
-WOLFCERT_TEST_VIS size_t wolfcert_oid_to_dotted(const uint8_t* oid, size_t oid_len,
-                                                char* out, size_t out_cap)
-{
-    size_t off = 0;
-
-    /* Always leave a valid C string, even for an empty OID or zero capacity. */
-    if (out_cap > 0)
-        out[0] = '\0';
-
-    if (oid_len >= 1) {
-        /* First byte holds the first two arcs as 40*node1 + node2. node1 is
-         * capped at 2, so for a first byte >= 80 node2 is the remainder above
-         * 80 (node2 can exceed 40 only when node1 == 2). */
-        unsigned first  = oid[0] < 80 ? oid[0] / 40 : 2;
-        unsigned second = oid[0] < 80 ? oid[0] % 40 : oid[0] - 80u;
-        off += (size_t)snprintf(out + off, out_cap - off, "%u.%u",
-                                first, second);
-    }
-
-    unsigned long n = 0;
-    for (size_t i = 1; i < oid_len && off + 16 < out_cap; ++i) {
-        n = (n << 7) | (oid[i] & 0x7F);
-        if ((oid[i] & 0x80) == 0) {
-            off += (size_t)snprintf(out + off, out_cap - off, ".%lu", n);
-            n = 0;
-        }
-    }
-
-    return off;
 }
 
 /* Emit a 400 Bad Request whose body lists the missing OID in dotted
@@ -905,12 +893,18 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req)
      * wolfcert_ca_issue so an offending client can't walk away with a
      * cert even if the underlying issuance would have accepted it. */
     if (s->cfg.est_require_csr_attributes) {
-        const uint8_t* missing_oid = NULL;
-        size_t missing_len = 0;
+        /* Room for the largest OID we would report; DER attribute-type OIDs
+         * are far shorter than this in practice. */
+        uint8_t missing_oid[64];
+        size_t missing_len = sizeof(missing_oid);   /* in: cap, out: OID len */
         int erc = csr_attrs_enforce(s, csr.data, csr.len,
-                                    &missing_oid, &missing_len);
+                                    missing_oid, &missing_len);
         if (erc != WOLFCERT_OK) {
-            if (missing_oid != NULL)
+            /* csr_attrs_enforce sets missing_len > 0 only when it captured a
+             * missing required OID into missing_oid. Gate on that explicitly
+             * (not on the return code alone) so no future error path can
+             * render an unpopulated buffer into the response body. */
+            if (erc == WOLFCERT_ERR_PROTOCOL && missing_len > 0)
                 send_missing_oid(s, fd, missing_oid, missing_len);
             else
                 send_status(s, fd, 400, "Bad Request");

@@ -36,6 +36,8 @@
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/random.h>
 
+#include "tls_test_util.h"
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
@@ -112,69 +114,12 @@ static void* srv_thread(void* arg)
     return NULL;
 }
 
-static int gen_server_identity(struct srv_ctx* sc)
-{
-    RsaKey key;
-    WC_RNG rng;
-    if (wc_InitRng(&rng) != 0)
-        return -1;
-    if (wc_InitRsaKey(&key, NULL) != 0) {
-        wc_FreeRng(&rng);
-        return -1;
-    }
-    if (wc_MakeRsaKey(&key, 2048, WC_RSA_EXPONENT, &rng) != 0)
-        goto fail;
-
-    Cert cert;
-    wc_InitCert(&cert);
-    strcpy(cert.subject.commonName, "127.0.0.1");
-    cert.selfSigned = 1;
-    cert.sigType = CTC_SHA256wRSA;
-    cert.daysValid = 1;
-    /* SAN entry for 127.0.0.1 (IP) */
-    static const uint8_t san_seq[] = { 0x30, 0x06, 0x87, 0x04, 127, 0, 0, 1 };
-    memcpy(cert.altNames, san_seq, sizeof(san_seq));
-    cert.altNamesSz = (int)sizeof(san_seq);
-
-    uint8_t cert_der[8192];
-    int cs = wc_MakeSelfCert(&cert, cert_der, sizeof(cert_der), &key, &rng);
-    if (cs <= 0)
-        goto fail;
-
-    uint8_t cert_pem_buf[16384];
-    int cp = wc_DerToPem(cert_der, cs, cert_pem_buf, sizeof(cert_pem_buf), CERT_TYPE);
-    if (cp <= 0)
-        goto fail;
-
-    uint8_t key_der[8192];
-    int ks = wc_RsaKeyToDer(&key, key_der, sizeof(key_der));
-    if (ks <= 0)
-        goto fail;
-    uint8_t key_pem_buf[16384];
-    int kp = wc_DerToPem(key_der, ks, key_pem_buf, sizeof(key_pem_buf), PRIVATEKEY_TYPE);
-    if (kp <= 0)
-        goto fail;
-
-    sc->cert_pem = malloc((size_t)cp);
-    memcpy(sc->cert_pem, cert_pem_buf, (size_t)cp);
-    sc->cert_pem_len = (size_t)cp;
-    sc->key_pem  = malloc((size_t)kp);
-    memcpy(sc->key_pem, key_pem_buf, (size_t)kp);
-    sc->key_pem_len = (size_t)kp;
-    wc_FreeRsaKey(&key);
-    wc_FreeRng(&rng);
-    return 0;
-fail:
-    wc_FreeRsaKey(&key);
-    wc_FreeRng(&rng);
-    return -1;
-}
-
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     struct srv_ctx sc = { 0 };
-    REQUIRE(gen_server_identity(&sc) == 0);
+    REQUIRE(gen_server_identity(&sc.cert_pem, &sc.cert_pem_len,
+                                &sc.key_pem, &sc.key_pem_len) == 0);
 
     pthread_t tid;
     REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);

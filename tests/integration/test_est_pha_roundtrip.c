@@ -46,6 +46,8 @@
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/random.h>
+
+#include "tls_test_util.h"
 #include <wolfssl/wolfcrypt/rsa.h>
 
 #include <pthread.h>
@@ -61,66 +63,6 @@
         }                                                                   \
     } while (0)
 
-static int mint_rsa_id(const char* cn, int is_ca,
-                       uint8_t** cert_pem, size_t* cert_pem_len,
-                       uint8_t** key_pem,  size_t* key_pem_len)
-{
-    RsaKey key;
-    WC_RNG rng;
-    if (wc_InitRng(&rng) != 0)
-        return -1;
-    if (wc_InitRsaKey(&key, NULL) != 0) {
-        wc_FreeRng(&rng);
-        return -1;
-    }
-    if (wc_MakeRsaKey(&key, 2048, WC_RSA_EXPONENT, &rng) != 0)
-        goto fail;
-
-    Cert cert;
-    wc_InitCert(&cert);
-    strcpy(cert.subject.commonName, cn);
-    cert.selfSigned = 1;
-    cert.sigType = CTC_SHA256wRSA;
-    cert.daysValid = 1;
-    cert.isCA = is_ca ? 1 : 0;
-    if (!is_ca) {
-        static const uint8_t san_seq[] = { 0x30, 0x06, 0x87, 0x04, 127, 0, 0, 1 };
-        memcpy(cert.altNames, san_seq, sizeof(san_seq));
-        cert.altNamesSz = (int)sizeof(san_seq);
-    }
-
-    uint8_t cder[8192];
-    int cs = wc_MakeSelfCert(&cert, cder, sizeof(cder), &key, &rng);
-    if (cs <= 0)
-        goto fail;
-    uint8_t cpem[16384];
-    int cp = wc_DerToPem(cder, cs, cpem, sizeof(cpem), CERT_TYPE);
-    if (cp <= 0)
-        goto fail;
-
-    uint8_t kder[8192];
-    int ks = wc_RsaKeyToDer(&key, kder, sizeof(kder));
-    if (ks <= 0)
-        goto fail;
-    uint8_t kpem[16384];
-    int kp = wc_DerToPem(kder, ks, kpem, sizeof(kpem), PRIVATEKEY_TYPE);
-    if (kp <= 0)
-        goto fail;
-
-    *cert_pem = malloc((size_t)cp);
-    memcpy(*cert_pem, cpem, (size_t)cp);
-    *cert_pem_len = (size_t)cp;
-    *key_pem = malloc((size_t)kp);
-    memcpy(*key_pem, kpem, (size_t)kp);
-    *key_pem_len = (size_t)kp;
-    wc_FreeRsaKey(&key);
-    wc_FreeRng(&rng);
-    return 0;
-fail:
-    wc_FreeRsaKey(&key);
-    wc_FreeRng(&rng);
-    return -1;
-}
 
 static void* server_thread(void* arg) { wolfcert_server_run((WolfCertServer*)arg); return NULL; }
 
@@ -132,7 +74,7 @@ int main(void)
     size_t tls_cert_len = 0;
     uint8_t* tls_key  = NULL;
     size_t tls_key_len  = 0;
-    REQUIRE(mint_rsa_id("127.0.0.1", 0,
+    REQUIRE(mint_self_id("127.0.0.1", 0,
                         &tls_cert, &tls_cert_len, &tls_key, &tls_key_len) == 0);
 
     /* Self-signed client CA that also serves as the client's presented
@@ -142,7 +84,7 @@ int main(void)
     size_t cli_cert_len = 0;
     uint8_t* cli_key  = NULL;
     size_t cli_key_len  = 0;
-    REQUIRE(mint_rsa_id("factory-bootstrap", 1,
+    REQUIRE(mint_self_id("factory-bootstrap", 1,
                         &cli_cert, &cli_cert_len, &cli_key, &cli_key_len) == 0);
 
     WolfCertServerCfgSrv cfg = {
@@ -190,7 +132,7 @@ int main(void)
 
         /* /simpleenroll on the same connection - this is the call that
          * triggers the server's wolfSSL_request_certificate(). */
-        WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+        WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                                 .dev_id = WOLFCERT_DEVID_SOFTWARE };
         WolfCertKey* dk = NULL;
         REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
@@ -233,7 +175,7 @@ int main(void)
         REQUIRE(ca_pem.len > 0);
         wolfcert_buffer_free(&ca_pem);
 
-        WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+        WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                                 .dev_id = WOLFCERT_DEVID_SOFTWARE };
         WolfCertKey* dk = NULL;
         REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);

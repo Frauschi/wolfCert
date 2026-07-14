@@ -117,7 +117,7 @@ static int has_alt(const DNS_entry* list, int type, const char* val, int len)
  * email SAN from the issued cert entirely. */
 static int enroll_check_san(const WolfCertServerCfg* client_cfg)
 {
-    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* dk = NULL;
     REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
@@ -218,8 +218,10 @@ int main(void)
     wolfcert_buffer_free(&ca_der);
     wolfcert_client_free(client);
 
-    /* One round-trip per key type: ECC always, Ed25519/Ed448 when enabled. */
-    if (enroll_one(&client_cfg, WOLFCERT_KEY_ECC, 256, &ca_pem))
+    /* One round-trip per key type: a supported default always, Ed25519/Ed448
+     * when enabled. */
+    if (enroll_one(&client_cfg, TEST_ENROLL_KEY_TYPE, TEST_ENROLL_KEY_PARAM,
+                   &ca_pem))
         return 1;
 #ifdef WOLFCERT_HAVE_ED25519
     if (enroll_one(&client_cfg, WOLFCERT_KEY_ED25519, 0, &ca_pem))
@@ -239,7 +241,7 @@ int main(void)
      * signature value (DER structure stays intact so it still parses), and
      * confirm the server refuses to issue. Credentials are still valid here,
      * so a rejection can only come from the PoP check. */
-    WolfCertKeyCfg pop_kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+    WolfCertKeyCfg pop_kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                                 .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* pop_dk = NULL;
     REQUIRE(wolfcert_key_generate(&pop_kcfg, &pop_dk) == WOLFCERT_OK);
@@ -258,7 +260,7 @@ int main(void)
     wolfcert_key_free(pop_dk);
 
     /* Auth failure path - needs a CSR to send. */
-    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* dk = NULL;
     REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
@@ -301,7 +303,7 @@ int main(void)
                                .verify_server = 1,
                                .username = "alice", .password = "hunter" };
 
-    WolfCertKeyCfg akcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+    WolfCertKeyCfg akcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                              .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* adk = NULL;
     REQUIRE(wolfcert_key_generate(&akcfg, &adk) == WOLFCERT_OK);

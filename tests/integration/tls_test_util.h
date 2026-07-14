@@ -18,67 +18,172 @@
  */
 
 /*
- * Shared integration-test helper: mint a self-signed RSA server identity
- * (cert + key, PEM) with an iPAddress SAN for 127.0.0.1, used to stand up the
- * in-tree test server behind TLS. EST mandates TLS (RFC 7030), so the EST
- * integration tests run over HTTPS and pin this freshly-minted cert as their
- * bootstrap trust anchor.
+ * Shared integration-test helper: mint self-signed identities (cert + key,
+ * PEM) with an iPAddress SAN for 127.0.0.1, used to stand up the in-tree test
+ * server behind TLS. EST mandates TLS (RFC 7030), so the EST integration tests
+ * run over HTTPS and pin a freshly-minted cert as their bootstrap trust
+ * anchor. The signing algorithm follows whatever the wolfSSL build provides
+ * (RSA when present, else ECC P-256), so the helpers work under reduced
+ * key-algorithm configurations.
  */
 
 #ifndef WOLFCERT_TLS_TEST_UTIL_H
 #define WOLFCERT_TLS_TEST_UTIL_H
+
+#include <wolfcert/wolfcert.h>
+
+#include <sys/types.h>   /* pid_t, referenced by wolfssl/wolfcrypt/random.h */
 
 #include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/random.h>
 #include <wolfssl/wolfcrypt/rsa.h>
+#include <wolfssl/wolfcrypt/ecc.h>
 
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
-/* Generate a self-signed RSA cert + key as PEM. Returns 0 on success; the
+/* A key algorithm + parameter the current build supports, for client
+ * enrollments where the algorithm is incidental to what the test verifies. */
+#if defined(WOLFCERT_HAVE_ECC)
+    #define TEST_ENROLL_KEY_TYPE  WOLFCERT_KEY_ECC
+    #define TEST_ENROLL_KEY_PARAM 256
+#elif defined(WOLFCERT_HAVE_RSA)
+    #define TEST_ENROLL_KEY_TYPE  WOLFCERT_KEY_RSA
+    #define TEST_ENROLL_KEY_PARAM 2048
+#elif defined(WOLFCERT_HAVE_ED25519)
+    #define TEST_ENROLL_KEY_TYPE  WOLFCERT_KEY_ED25519
+    #define TEST_ENROLL_KEY_PARAM 0
+#elif defined(WOLFCERT_HAVE_ED448)
+    #define TEST_ENROLL_KEY_TYPE  WOLFCERT_KEY_ED448
+    #define TEST_ENROLL_KEY_PARAM 0
+#else
+    #error "tls_test_util: no supported enrollment key algorithm"
+#endif
+
+/* The tests self-sign their identities with whatever signature-capable key
+ * algorithm the wolfSSL build provides: RSA when present, else ECC P-256.
+ * (A wolfCert build always has at least one of the two.) */
+#if !defined(NO_RSA)
+    typedef RsaKey            test_signkey;
+    #define TEST_CERT_SIGTYPE CTC_SHA256wRSA
+    #define TEST_KEY_PEM_TYPE PRIVATEKEY_TYPE
+#elif defined(HAVE_ECC)
+    typedef ecc_key           test_signkey;
+    #define TEST_CERT_SIGTYPE CTC_SHA256wECDSA
+    #define TEST_KEY_PEM_TYPE ECC_PRIVATEKEY_TYPE
+#else
+    #error "tls_test_util: tests need RSA or ECC for a signing identity"
+#endif
+
+/* Init + generate a signing key. Returns 0 on success (free with
+ * test_signkey_free); non-zero on failure (nothing to free). */
+static inline int test_signkey_make(test_signkey* key, WC_RNG* rng)
+{
+#if !defined(NO_RSA)
+    if (wc_InitRsaKey(key, NULL) != 0)
+        return -1;
+    if (wc_MakeRsaKey(key, 2048, WC_RSA_EXPONENT, rng) != 0) {
+        wc_FreeRsaKey(key);
+        return -1;
+    }
+#else
+    if (wc_ecc_init(key) != 0)
+        return -1;
+    if (wc_ecc_make_key(rng, 32, key) != 0) {
+        wc_ecc_free(key);
+        return -1;
+    }
+#endif
+    return 0;
+}
+
+static inline void test_signkey_free(test_signkey* key)
+{
+#if !defined(NO_RSA)
+    wc_FreeRsaKey(key);
+#else
+    wc_ecc_free(key);
+#endif
+}
+
+/* Self-sign the (already populated) Cert into `der`. Returns the signed DER
+ * length, or <= 0 on error. */
+static inline int test_sign_selfcert(Cert* cert, uint8_t* der, int der_sz,
+                                     test_signkey* key, WC_RNG* rng)
+{
+#if !defined(NO_RSA)
+    return wc_MakeSelfCert(cert, der, (word32)der_sz, key, rng);
+#else
+    /* No ECC form of wc_MakeSelfCert; make the body self-issued and sign it. */
+    cert->issuer = cert->subject;
+    if (wc_MakeCert(cert, der, (word32)der_sz, NULL, key, rng) <= 0)
+        return -1;
+    return wc_SignCert(cert->bodySz, cert->sigType, der, (word32)der_sz,
+                       NULL, key, rng);
+#endif
+}
+
+/* Serialize the private key to DER. Returns DER length, or <= 0 on error. */
+static inline int test_signkey_to_der(test_signkey* key, uint8_t* der,
+                                      int der_sz)
+{
+#if !defined(NO_RSA)
+    return wc_RsaKeyToDer(key, der, (word32)der_sz);
+#else
+    return wc_EccKeyToDer(key, der, (word32)der_sz);
+#endif
+}
+
+/* Mint a self-signed cert + key (PEM) for common name `cn`. With is_ca == 0
+ * the cert carries an iPAddress SAN for 127.0.0.1 (a usable TLS leaf); with
+ * is_ca != 0 it is marked CA and carries no SAN. Returns 0 on success; the
  * caller frees *cert_pem / *key_pem with free(). */
-static int gen_server_identity(uint8_t** cert_pem, size_t* cert_pem_len,
+static inline int mint_self_id(const char* cn, int is_ca,
+                               uint8_t** cert_pem, size_t* cert_pem_len,
                                uint8_t** key_pem,  size_t* key_pem_len)
 {
-    RsaKey key;
+    static const uint8_t san_seq[] = { 0x30, 0x06, 0x87, 0x04, 127, 0, 0, 1 };
+    test_signkey key;
     WC_RNG rng;
+    Cert cert;
+    uint8_t cder[8192];
+    uint8_t cpem[16384];
+    uint8_t kder[8192];
+    uint8_t kpem[16384];
+    int cs, cp, ks, kp;
+
     if (wc_InitRng(&rng) != 0)
         return -1;
-    if (wc_InitRsaKey(&key, NULL) != 0) {
+    if (test_signkey_make(&key, &rng) != 0) {
         wc_FreeRng(&rng);
         return -1;
     }
-    if (wc_MakeRsaKey(&key, 2048, WC_RSA_EXPONENT, &rng) != 0)
-        goto fail;
 
-    Cert cert;
     wc_InitCert(&cert);
-    strcpy(cert.subject.commonName, "127.0.0.1");
+    strcpy(cert.subject.commonName, cn);
     cert.selfSigned = 1;
-    cert.sigType = CTC_SHA256wRSA;
+    cert.sigType = TEST_CERT_SIGTYPE;
     cert.daysValid = 1;
-    static const uint8_t san_seq[] = { 0x30, 0x06, 0x87, 0x04, 127, 0, 0, 1 };
-    memcpy(cert.altNames, san_seq, sizeof(san_seq));
-    cert.altNamesSz = (int)sizeof(san_seq);
+    cert.isCA = is_ca ? 1 : 0;
+    if (!is_ca) {
+        memcpy(cert.altNames, san_seq, sizeof(san_seq));
+        cert.altNamesSz = (int)sizeof(san_seq);
+    }
 
-    uint8_t cder[8192];
-    int cs = wc_MakeSelfCert(&cert, cder, sizeof(cder), &key, &rng);
+    cs = test_sign_selfcert(&cert, cder, (int)sizeof(cder), &key, &rng);
     if (cs <= 0)
         goto fail;
-    uint8_t cpem[16384];
-    int cp = wc_DerToPem(cder, cs, cpem, sizeof(cpem), CERT_TYPE);
+    cp = wc_DerToPem(cder, (word32)cs, cpem, sizeof(cpem), CERT_TYPE);
     if (cp <= 0)
         goto fail;
 
-    uint8_t kder[8192];
-    int ks = wc_RsaKeyToDer(&key, kder, sizeof(kder));
+    ks = test_signkey_to_der(&key, kder, (int)sizeof(kder));
     if (ks <= 0)
         goto fail;
-    uint8_t kpem[16384];
-    int kp = wc_DerToPem(kder, ks, kpem, sizeof(kpem), PRIVATEKEY_TYPE);
+    kp = wc_DerToPem(kder, (word32)ks, kpem, sizeof(kpem), TEST_KEY_PEM_TYPE);
     if (kp <= 0)
         goto fail;
 
@@ -88,13 +193,21 @@ static int gen_server_identity(uint8_t** cert_pem, size_t* cert_pem_len,
     *key_pem  = (uint8_t*)malloc((size_t)kp);
     memcpy(*key_pem,  kpem, (size_t)kp);
     *key_pem_len  = (size_t)kp;
-    wc_FreeRsaKey(&key);
+    test_signkey_free(&key);
     wc_FreeRng(&rng);
     return 0;
 fail:
-    wc_FreeRsaKey(&key);
+    test_signkey_free(&key);
     wc_FreeRng(&rng);
     return -1;
+}
+
+/* Self-signed TLS server identity (cert + key, PEM) for 127.0.0.1. */
+static inline int gen_server_identity(uint8_t** cert_pem, size_t* cert_pem_len,
+                                      uint8_t** key_pem,  size_t* key_pem_len)
+{
+    return mint_self_id("127.0.0.1", 0, cert_pem, cert_pem_len,
+                        key_pem, key_pem_len);
 }
 
 #endif /* WOLFCERT_TLS_TEST_UTIL_H */

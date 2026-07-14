@@ -18,12 +18,17 @@
  */
 
 #include <wolfcert/wolfcert.h>
+#include "../test_static_mem.h"
 
 #include <stdio.h>
 #include <string.h>
 
 int main(void)
 {
+    if (test_static_mem_init() != 0) {
+        fprintf(stderr, "static mem init failed\n");
+        return 1;
+    }
     if (wolfcert_init(NULL) != WOLFCERT_OK) {
         fprintf(stderr, "wolfcert_init failed\n");
         return 1;

@@ -34,6 +34,7 @@
 #define _GNU_SOURCE
 
 #include <wolfcert/wolfcert.h>
+#include "../test_static_mem.h"
 #include "internal.h"
 
 #include <wolfssl/options.h>
@@ -719,6 +720,7 @@ static int test_signer_subject_fallback(void)
 
 int main(void)
 {
+    REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     if (test_non_success_has_no_envelope())
         return 1;

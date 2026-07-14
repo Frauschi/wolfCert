@@ -97,7 +97,7 @@ static int pump_enroll_nb(WolfCertEstSession* s, const uint8_t* csr,
 static int make_csr(const char* subject, WolfCertKey** out_key,
                     WolfCertBuffer* out_csr)
 {
-    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     if (wolfcert_key_generate(&kcfg, out_key) != WOLFCERT_OK)
         return 1;

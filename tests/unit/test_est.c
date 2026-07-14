@@ -28,6 +28,7 @@
 #define _GNU_SOURCE
 
 #include <wolfcert/wolfcert.h>
+#include "../test_static_mem.h"
 #include "internal.h"
 
 #include <wolfssl/options.h>
@@ -58,34 +59,34 @@
 
 static int make_test_ca(uint8_t* out, size_t cap, size_t* out_len)
 {
-    RsaKey key;
+    test_signkey key;
     WC_RNG rng;
+    Cert cert;
+    int sz;
+
     if (wc_InitRng(&rng) != 0)
         return -1;
-    if (wc_InitRsaKey(&key, NULL) != 0) {
+    if (test_signkey_make(&key, &rng) != 0) {
         wc_FreeRng(&rng);
         return -1;
     }
-    if (wc_MakeRsaKey(&key, 2048, WC_RSA_EXPONENT, &rng) != 0)
-        goto fail;
 
-    Cert cert;
     wc_InitCert(&cert);
     strcpy(cert.subject.commonName, "wolfCert Test CA");
     strcpy(cert.subject.org,        "wolfCert");
     strcpy(cert.subject.country,    "US");
     cert.isCA       = 1;
-    cert.sigType    = CTC_SHA256wRSA;
+    cert.sigType    = TEST_CERT_SIGTYPE;
     cert.selfSigned = 1;
-    int sz = wc_MakeSelfCert(&cert, out, (word32)cap, &key, &rng);
+    sz = test_sign_selfcert(&cert, out, (int)cap, &key, &rng);
     if (sz <= 0)
         goto fail;
     *out_len = (size_t)sz;
-    wc_FreeRsaKey(&key);
+    test_signkey_free(&key);
     wc_FreeRng(&rng);
     return 0;
 fail:
-    wc_FreeRsaKey(&key);
+    test_signkey_free(&key);
     wc_FreeRng(&rng);
     return -1;
 }
@@ -234,7 +235,7 @@ static int test_est_require_server_auth(void)
     };
     WolfCertBuffer out = { 0 };
     WolfCertEstSession* sess = NULL;
-    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* rk = NULL;
 
@@ -288,6 +289,7 @@ int main(void)
      * the resulting SIGPIPE. */
     signal(SIGPIPE, SIG_IGN);
 
+    REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
     if (test_oid_to_dotted())
@@ -343,7 +345,7 @@ int main(void)
     REQUIRE(memmem(ca_pem.data, ca_pem.len, "BEGIN CERTIFICATE", 17) != NULL);
     wolfcert_buffer_free(&ca_pem);
 
-    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* dk = NULL;
     REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);

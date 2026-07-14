@@ -115,6 +115,7 @@ static int build_policy(WolfCertBuffer* out)
  * hint influences the caller's CSR signature, not the CA's issued-cert
  * signature, so it's not observable on the issued PEM. That path is
  * covered by the unit tests instead. */
+#ifdef WOLFCERT_HAVE_ECC
 static int inspect_cert(const uint8_t* pem, size_t pem_len,
                         int* out_curve_id)
 {
@@ -188,8 +189,10 @@ static int auto_apply_pins_everything(WolfCertServer* s)
     wolfcert_client_free(cli);
     return 0;
 }
+#endif /* WOLFCERT_HAVE_ECC */
 
 /* Sub-test 2: caller explicitly set RSA-2048 -> server hints ignored. */
+#ifdef WOLFCERT_HAVE_RSA
 static int explicit_caller_wins(WolfCertServer* s)
 {
     char url[128];
@@ -228,6 +231,7 @@ static int explicit_caller_wins(WolfCertServer* s)
     wolfcert_client_free(cli);
     return 0;
 }
+#endif /* WOLFCERT_HAVE_RSA */
 
 /* Sub-test 3: wolfcert_client_fetch_meta surfaces the hash hint onto
  * an empty WolfCertCertMeta without any key_cfg in play. */
@@ -281,9 +285,15 @@ int main(void)
     pthread_t tid;
     REQUIRE(pthread_create(&tid, NULL, server_thread, srv) == 0);
 
-    int rc = auto_apply_pins_everything(srv);
+    int rc = 0;
+#ifdef WOLFCERT_HAVE_ECC
+    if (rc == 0)
+        rc = auto_apply_pins_everything(srv);
+#endif
+#ifdef WOLFCERT_HAVE_RSA
     if (rc == 0)
         rc = explicit_caller_wins(srv);
+#endif
     if (rc == 0)
         rc = fetch_meta_overlays_hash(srv);
 
