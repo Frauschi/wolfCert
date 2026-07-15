@@ -71,8 +71,15 @@ resolve_flags() {
         full)
             _base_flags ;;
         full-tsan)
+            # -Wno-error=tsan: wolfSSL's default GCC build turns on -Werror, and
+            # GCC's -Wtsan fires on wc_port.h's C11 atomic_thread_fence() under
+            # -fsanitize=thread ("not supported with -fsanitize=thread"), which
+            # otherwise aborts the wolfSSL build before any test runs. Demote it
+            # back to a warning. It precedes wolfSSL's trailing -Werror on the
+            # command line, and an explicit -Wno-error= survives a later bare
+            # -Werror, so the exemption holds.
             _base_flags
-            printf '%s\n' 'CFLAGS=-fsanitize=thread -g -O1' \
+            printf '%s\n' 'CFLAGS=-fsanitize=thread -g -O1 -Wno-error=tsan' \
                           'LDFLAGS=-fsanitize=thread' ;;
         est-only-nonrsa)
             # EST-capable, RSA absent (NO_RSA). ECC + Ed + ML-DSA still present.
