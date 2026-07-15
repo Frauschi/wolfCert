@@ -231,17 +231,6 @@ out:
     return rc;
 }
 
-/* Constant-time buffer comparison: returns 0 iff the two buffers are equal.
- * Fingerprints are not secret, but a timing-independent compare keeps the
- * trust check uniform and avoids leaking match position. */
-static int ct_diff(const uint8_t* a, const uint8_t* b, size_t n)
-{
-    uint8_t d = 0;
-    for (size_t i = 0; i < n; ++i)
-        d |= (uint8_t)(a[i] ^ b[i]);
-    return d;
-}
-
 int wolfcert_scep_verify_ca_fingerprint(const uint8_t* ca_der, size_t ca_der_len,
                                         const uint8_t* expected, size_t expected_len,
                                         WolfCertScepFpAlg alg)
@@ -298,7 +287,7 @@ int wolfcert_scep_verify_ca_fingerprint(const uint8_t* ca_der, size_t ca_der_len
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
             "expected fingerprint length does not match the digest size");
 
-    if (ct_diff(expected, digest, digest_len) != 0)
+    if (wc_ConstantCompare(expected, digest, (int)digest_len) != 0)
         return WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "scep",
             "CA certificate fingerprint mismatch");
 

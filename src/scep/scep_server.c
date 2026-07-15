@@ -33,6 +33,7 @@
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/pkcs7.h>
 #include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/memory.h>
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -438,13 +439,9 @@ static int check_challenge(const uint8_t* csr_der, size_t csr_len,
 
     size_t elen = strlen(expected);
     int ok = (dc.cPwd != NULL) && ((size_t)dc.cPwdLen == elen);
-    if (ok) {
-        unsigned acc = 0;
-        for (size_t i = 0; i < elen; ++i) {
-            acc |= (unsigned)(dc.cPwd[i] ^ expected[i]);
-        }
-        ok = (acc == 0);
-    }
+    if (ok)
+        ok = (wc_ConstantCompare((const byte*)dc.cPwd,
+                                 (const byte*)expected, (int)elen) == 0);
 
     wc_FreeDecodedCert(&dc);
     return ok ? WOLFCERT_OK : WOLFCERT_ERR_AUTH;
