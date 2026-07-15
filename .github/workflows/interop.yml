@@ -23,19 +23,23 @@ env:
 jobs:
   # OpenSSL is always present -> a cheap lower-bound cross-check.
   openssl:
-    name: openssl cms/pkcs7 cross-check
-    runs-on: ubuntu-latest
+    name: openssl pkcs7/x509 cross-check
+    # Pinned to 26.04 (OpenSSL >= 3.5) so the cross-check covers ML-DSA keys;
+    # ubuntu-latest still ships OpenSSL 3.0, which cannot parse ML-DSA. The
+    # script probes for support, so an older image degrades to classical/EdDSA
+    # rather than failing.
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-wolfcert-cli
         with:
           wolfssl-ref: ${{ env.WOLFSSL_REF }}
-      - name: Run openssl_cms.sh
+      - name: Run openssl_pkcs7_xcheck.sh
         run: |
           set +e
-          bash tests/interop/openssl_cms.sh; rc=$?
-          [ "$rc" -eq 77 ] && { echo "::notice::openssl_cms skipped (dep missing)"; exit 0; }
+          bash tests/interop/openssl_pkcs7_xcheck.sh; rc=$?
+          [ "$rc" -eq 77 ] && { echo "::notice::openssl_pkcs7_xcheck skipped (dep missing)"; exit 0; }
           exit "$rc"
 
   micromdm-scep:
