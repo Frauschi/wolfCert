@@ -44,6 +44,7 @@
 #include <wolfssl/wolfcrypt/ecc.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/wc_port.h>
 #include <wolfssl/ssl.h>
 
 /* ---- tunable stack-buffer sizes ----------------------------------------- *
@@ -140,7 +141,13 @@ struct WolfCertServer {
     size_t                  cfg_csr_attrs_len;
     WolfCertCa              ca;
     int                     listen_fd;
-    volatile int            stopping;
+    /* Shutdown flag. Set by wolfcert_server_stop() -- which may run on a
+     * different thread than the accept loop (test harness) or from a signal
+     * handler (wolfcert-server CLI) -- and polled by wolfcert_server_run().
+     * wolfSSL_Atomic_Int gives the cross-thread access a happens-before edge
+     * (and async-signal-safe store); it degrades to volatile int on targets
+     * that wolfSSL builds WOLFSSL_NO_ATOMICS. */
+    wolfSSL_Atomic_Int      stopping;
     const WolfCertServerOps* ops;
     void*                   priv;        /* protocol-specific state */
     /* TLS terminator. `tls_ctx` is created in wolfcert_server_start() when

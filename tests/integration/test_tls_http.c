@@ -35,6 +35,7 @@
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/wc_port.h>
 
 #include "tls_test_util.h"
 
@@ -57,7 +58,10 @@
     } while (0)
 
 struct srv_ctx {
-    int port;
+    /* Published by srv_thread once the ephemeral listener is bound, then
+     * polled by the main thread. Atomic so the cross-thread handoff has a
+     * happens-before edge (this is what ThreadSanitizer requires). */
+    wolfSSL_Atomic_Int port;
     uint8_t* cert_pem;
     size_t cert_pem_len;
     uint8_t* key_pem;
@@ -86,7 +90,7 @@ static void* srv_thread(void* arg)
     listen(ls, 1);
     socklen_t slen = sizeof(sa);
     getsockname(ls, (struct sockaddr*)&sa, &slen);
-    sc->port = ntohs(sa.sin_port);
+    WOLFSSL_ATOMIC_STORE(sc->port, ntohs(sa.sin_port));
 
     int cs = accept(ls, NULL, NULL);
     close(ls);
@@ -123,14 +127,14 @@ int main(void)
 
     pthread_t tid;
     REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);
-    for (int i = 0; i < 200 && sc.port == 0; ++i) {
+    for (int i = 0; i < 200 && WOLFSSL_ATOMIC_LOAD(sc.port) == 0; ++i) {
         const struct timespec ts = { 0, 5 * 1000 * 1000 };
         nanosleep(&ts, NULL);
     }
-    REQUIRE(sc.port != 0);
+    REQUIRE(WOLFSSL_ATOMIC_LOAD(sc.port) != 0);
 
     char url[128];
-    snprintf(url, sizeof(url), "https://127.0.0.1:%d/", sc.port);
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/", WOLFSSL_ATOMIC_LOAD(sc.port));
 
     WolfCertHttpRequest req = {
         .method            = "GET",
