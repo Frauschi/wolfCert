@@ -34,12 +34,20 @@
 #include <arpa/inet.h>
 #include <errno.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
 
 #include <wolfssl/ssl.h>
+
+/* accept() poll cadence: how often wolfcert_server_run() wakes to re-check the
+ * stopping flag while idle. Bounds shutdown latency; not performance-critical.
+ */
+#ifndef WOLFCERT_SERVER_POLL_MS
+#define WOLFCERT_SERVER_POLL_MS 200
+#endif
 
 ssize_t wolfcert_io_recv(WolfCertServer* srv, int fd, void* buf, size_t len)
 {
@@ -174,6 +182,11 @@ int wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out)
     if (s == NULL)
         return WOLFCERT_ERR_MEMORY;
 
+    /* Zero-init covers every field, including the wolfSSL_Atomic_Int `stopping`
+     * flag: it is a lock-free integer atomic, so an all-zero representation is
+     * a valid initialized value of 0. Nothing else touches `s` until the caller
+     * publishes it to the serving thread (pthread_create is the happens-before
+     * edge), so no atomic_init()/barrier is needed here. */
     memset(s, 0, sizeof(*s));
     s->cfg       = *cfg;
     s->listen_fd = -1;
@@ -260,18 +273,54 @@ fail:
 
 int wolfcert_server_run(WolfCertServer* srv)
 {
+    struct pollfd pfd;
     int ret;
+    int pr;
+    int cs;
 
     if (srv == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    while (!srv->stopping) {
-        int cs = accept(srv->listen_fd, NULL, NULL);
-        if (cs < 0) {
-            if (srv->stopping)
-                break;
+    /* Poll the listener with a short timeout rather than blocking in accept(),
+     * so the loop re-checks the stopping flag on its own. This keeps shutdown
+     * portable -- neither shutdown() nor close() from another thread reliably
+     * wakes a blocked accept() on BSD/macOS -- and race-free: listen_fd is
+     * touched only by start() (before the serving thread exists) and free()
+     * (after it has been joined), never concurrently with this loop. */
+    while (!WOLFSSL_ATOMIC_LOAD(srv->stopping)) {
+        pfd.fd     = srv->listen_fd;
+        pfd.events = POLLIN;
 
+        pr = poll(&pfd, 1, WOLFCERT_SERVER_POLL_MS);
+        if (pr < 0) {
             if (errno == EINTR)
+                continue;
+
+            return WOLFCERT_ERR_IO;
+        }
+        if (pr == 0)
+            continue;   /* timed out -- re-check stopping */
+
+        /* poll() reports the listener ready for either a pending connection
+         * (POLLIN) or an error/hangup condition (POLLERR/POLLHUP/POLLNVAL).
+         * Accept only on POLLIN: an error condition on the listener is fatal,
+         * and accepting on it could block or spin the loop. */
+        if ((pfd.revents & POLLIN) == 0)
+            return WOLFCERT_ERR_IO;
+
+        /* stopping may have been set between poll() returning and here; honour
+         * it now rather than serving one more connection. */
+        if (WOLFSSL_ATOMIC_LOAD(srv->stopping))
+            break;
+
+        cs = accept(srv->listen_fd, NULL, NULL);
+        if (cs < 0) {
+            /* A single misbehaving peer must not take the listener down. A
+             * reset between poll() reporting POLLIN and accept() running
+             * surfaces as ECONNABORTED (ECONNRESET on some systems); EINTR is
+             * a delivered signal. Retry those -- only a genuine listener
+             * failure is fatal. */
+            if (errno == EINTR || errno == ECONNABORTED || errno == ECONNRESET)
                 continue;
 
             return WOLFCERT_ERR_IO;
@@ -299,7 +348,7 @@ int wolfcert_server_run(WolfCertServer* srv)
                         if (srv->ops->serve_fd(srv, cs) != WOLFCERT_OK)
                             break;
                     }
-                    while (srv->keep_alive && !srv->stopping);
+                    while (srv->keep_alive && !WOLFSSL_ATOMIC_LOAD(srv->stopping));
 
                     srv->tls_current = NULL;
                     wolfSSL_shutdown(ssl);
@@ -318,7 +367,7 @@ int wolfcert_server_run(WolfCertServer* srv)
                 if (srv->ops->serve_fd(srv, cs) != WOLFCERT_OK)
                     break;
             }
-            while (srv->keep_alive && !srv->stopping);
+            while (srv->keep_alive && !WOLFSSL_ATOMIC_LOAD(srv->stopping));
         }
 
         close(cs);
@@ -340,13 +389,12 @@ int wolfcert_server_stop(WolfCertServer* srv)
     if (srv == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    srv->stopping = 1;
-
-    if (srv->listen_fd >= 0) {
-        shutdown(srv->listen_fd, SHUT_RDWR);
-        close(srv->listen_fd);
-        srv->listen_fd = -1;
-    }
+    /* Signal the accept loop to exit. It polls the listener on a short timeout
+     * (WOLFCERT_SERVER_POLL_MS) and re-checks this flag, so no fd surgery is
+     * needed here -- wolfcert_server_free() closes listen_fd after the serving
+     * thread is joined. Setting the flag from another thread (test harness) or
+     * a signal handler (wolfcert-server CLI) is safe: the store is atomic. */
+    WOLFSSL_ATOMIC_STORE(srv->stopping, 1);
 
     return WOLFCERT_OK;
 }
