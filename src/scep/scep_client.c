@@ -32,6 +32,13 @@
 #include <wolfssl/wolfcrypt/random.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/memory.h>
+#ifndef NO_SHA
+#include <wolfssl/wolfcrypt/sha.h>
+#endif
+#include <wolfssl/wolfcrypt/sha256.h>
+#ifdef WOLFSSL_SHA512
+#include <wolfssl/wolfcrypt/sha512.h>
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -224,6 +231,69 @@ out:
     return rc;
 }
 
+int wolfcert_scep_verify_ca_fingerprint(const uint8_t* ca_der, size_t ca_der_len,
+                                        const uint8_t* expected, size_t expected_len,
+                                        WolfCertScepFpAlg alg)
+{
+    /* SHA-512 (64 bytes) is the widest digest we produce. */
+    uint8_t digest[64];
+    size_t  digest_len = 0;
+    int     rc = 0;
+
+    if (ca_der == NULL || ca_der_len == 0 || expected == NULL || expected_len == 0)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    /* AUTO: identify the algorithm from the supplied fingerprint length. This
+     * is a legacy convenience; a 20-byte value maps to collision-weak SHA-1, so
+     * callers that know the digest should pass it explicitly (see scep.h). */
+    if (alg == WOLFCERT_SCEP_FP_AUTO) {
+        switch (expected_len) {
+            case 20: alg = WOLFCERT_SCEP_FP_SHA1;   break; /* SHA-1 (legacy) */
+            case 32: alg = WOLFCERT_SCEP_FP_SHA256; break; /* SHA-256 */
+            case 64: alg = WOLFCERT_SCEP_FP_SHA512; break; /* SHA-512 */
+            default:
+                return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+                    "fingerprint length does not match SHA-1/SHA-256/SHA-512");
+        }
+    }
+
+    switch (alg) {
+        case WOLFCERT_SCEP_FP_SHA256:
+            digest_len = WC_SHA256_DIGEST_SIZE;
+            rc = wc_Sha256Hash(ca_der, (word32)ca_der_len, digest);
+            break;
+#ifndef NO_SHA
+        case WOLFCERT_SCEP_FP_SHA1:
+            digest_len = WC_SHA_DIGEST_SIZE;
+            rc = wc_ShaHash(ca_der, (word32)ca_der_len, digest);
+            break;
+#endif
+#ifdef WOLFSSL_SHA512
+        case WOLFCERT_SCEP_FP_SHA512:
+            digest_len = WC_SHA512_DIGEST_SIZE;
+            rc = wc_Sha512Hash(ca_der, (word32)ca_der_len, digest);
+            break;
+#endif
+        default:
+            return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+                "requested fingerprint digest is not compiled into wolfSSL");
+    }
+
+    if (rc != 0)
+        return WOLFCERT_ERR_WC(rc, "scep", "fingerprint hash");
+
+    /* An explicit algorithm with a mismatched length is a caller error. */
+    if (expected_len != digest_len)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "expected fingerprint length does not match the digest size");
+
+    if (wc_ConstantCompare(expected, digest, (int)digest_len) != 0)
+        return WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "scep",
+            "CA certificate fingerprint mismatch");
+
+    return WOLFCERT_OK;
+}
+
 /* ---- PKCSReq / RenewalReq ---------------------------------------------- */
 
 static int pick_hash_oid(const WolfCertScepCaps* caps)
@@ -238,22 +308,117 @@ static int pick_hash_oid(const WolfCertScepCaps* caps)
     return SHA256h;
 }
 
+/* Percent-encode `in` into a freshly allocated NUL-terminated string, escaping
+ * every byte outside the RFC 3986 unreserved set so the base64 pkiMessage is
+ * safe inside a URL query value. Returns NULL on allocation failure. */
+static char* url_encode(const uint8_t* in, size_t in_len, void* heap)
+{
+    static const char HEX[] = "0123456789ABCDEF";
+    /* Worst case each byte expands to "%XX" (3 chars), plus the NUL. */
+    char* out = (char*)WOLFCERT_XMALLOC(in_len * 3 + 1, heap);
+    if (out == NULL)
+        return NULL;
+
+    size_t o = 0;
+    for (size_t i = 0; i < in_len; ++i) {
+        unsigned char c = in[i];
+        if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+            (c >= '0' && c <= '9') ||
+            c == '-' || c == '_' || c == '.' || c == '~') {
+            out[o++] = (char)c;
+        }
+        else {
+            out[o++] = '%';
+            out[o++] = HEX[c >> 4];
+            out[o++] = HEX[c & 0x0F];
+        }
+    }
+    out[o] = '\0';
+
+    return out;
+}
+
+/* Build the HTTP GET URL for a PKIOperation fallback (RFC 8894 section 4.1):
+ *   base?operation=PKIOperation&message=<url-encoded base64 pkiMessage>
+ * Returns WOLFCERT_OK with *out_url owned by the caller, WOLFCERT_ERR_MEMORY,
+ * or WOLFCERT_ERR_UNSUPPORTED when the encoded URL would exceed
+ * WOLFCERT_SCEP_MAX_GET_URL (message too large for GET). */
+WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_get_url(const char* base,
+                             const uint8_t* pki_msg,
+                             size_t pki_len, void* heap, char** out_url)
+{
+    WolfCertBuffer b64 = { 0 };
+    int rc = wolfcert_base64_encode(pki_msg, pki_len, &b64, heap);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    char* enc = url_encode(b64.data, b64.len, heap);
+    wolfcert_buffer_free(&b64);
+    if (enc == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    char* head = append_query(base, "PKIOperation", heap);
+    if (head == NULL) {
+        WOLFCERT_XFREE(enc, heap);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    size_t need = strlen(head) + strlen("&message=") + strlen(enc) + 1;
+    if (need > WOLFCERT_SCEP_MAX_GET_URL) {
+        WOLFCERT_XFREE(enc, heap);
+        WOLFCERT_XFREE(head, heap);
+        return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+            "pkiMessage too large for an HTTP GET; the CA must advertise "
+            "POSTPKIOperation");
+    }
+
+    char* url = (char*)WOLFCERT_XMALLOC(need, heap);
+    if (url == NULL) {
+        WOLFCERT_XFREE(enc, heap);
+        WOLFCERT_XFREE(head, heap);
+        return WOLFCERT_ERR_MEMORY;
+    }
+    snprintf(url, need, "%s&message=%s", head, enc);
+
+    WOLFCERT_XFREE(enc, heap);
+    WOLFCERT_XFREE(head, heap);
+    *out_url = url;
+
+    return WOLFCERT_OK;
+}
+
 static int run_pki_op(const WolfCertServerCfg* srv,
+                      const WolfCertScepCaps* caps,
                       const uint8_t* pki_msg, size_t pki_len,
                       uint8_t** out_resp, size_t* out_resp_len)
 {
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
-    char* url = append_query(srv->server_url, "PKIOperation", heap);
-    if (url == NULL)
-        return WOLFCERT_ERR_MEMORY;
 
-    WolfCertHttpRequest req = {
-        .method       = "POST",
-        .url          = url,
-        .content_type = "application/x-pki-message",
-        .body         = pki_msg,
-        .body_len     = pki_len,
-    };
+    /* RFC 8894 section 4.1: POST the pkiMessage when the CA advertises
+     * POSTPKIOperation (assumed when caps are unknown), otherwise fall back to
+     * carrying it base64-encoded in an HTTP GET query. */
+    int use_post = (caps == NULL || caps->post_pki_operation);
+
+    char* url = NULL;
+    WolfCertHttpRequest req = { 0 };
+    if (use_post) {
+        url = append_query(srv->server_url, "PKIOperation", heap);
+        if (url == NULL)
+            return WOLFCERT_ERR_MEMORY;
+        req.method       = "POST";
+        req.url          = url;
+        req.content_type = "application/x-pki-message";
+        req.body         = pki_msg;
+        req.body_len     = pki_len;
+    }
+    else {
+        int grc = wolfcert_scep_build_pki_get_url(srv->server_url, pki_msg,
+                                                  pki_len, heap, &url);
+        if (grc != WOLFCERT_OK)
+            return grc;
+        req.method = "GET";
+        req.url    = url;
+    }
 
     fill_common(srv, &req);
     WolfCertHttpResponse resp = { 0 };
@@ -358,7 +523,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
 
     uint8_t* resp = NULL;
     size_t resp_len = 0;
-    rc = run_pki_op(srv, pki.data, pki.len, &resp, &resp_len);
+    rc = run_pki_op(srv, caps, pki.data, pki.len, &resp, &resp_len);
 
     wolfcert_buffer_free(&pki);
     if (rc != WOLFCERT_OK)
@@ -367,6 +532,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
     WolfCertBuffer resp_env = { 0 };
     WolfCertBuffer inner = { 0 };
     char*   status = NULL;
+    char*   fail_info = NULL;
     char* resp_mt = NULL;
     uint8_t* rx_tid = NULL;
     size_t rx_tid_len = 0;
@@ -378,7 +544,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
     size_t rx_signer_len = 0;
     rc = wolfcert_scep_parse_pki_message(resp, resp_len, &resp_env,
             &rx_tid, &rx_tid_len, &rx_sn, &rx_sn_len, &rx_rn, &rx_rn_len,
-            &resp_mt, &status, &rx_signer, &rx_signer_len, heap);
+            &resp_mt, &status, &rx_signer, &rx_signer_len, &fail_info, heap);
 
     WOLFCERT_XFREE(resp,   heap);
     WOLFCERT_XFREE(rx_sn,  heap);
@@ -435,6 +601,14 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
         }
         else if (status == NULL || strcmp(status, "0") != 0) {
             out->status = WOLFCERT_SCEP_STATUS_FAILURE;
+            /* RFC 8894 section 3.2.1.4: a FAILURE CertRep carries a failInfo
+             * PrintableString of "0".."4". Surface it to the caller; leave the
+             * default -1 when the server omitted the attribute. */
+            if (fail_info != NULL &&
+                fail_info[0] >= '0' && fail_info[0] <= '4' &&
+                fail_info[1] == '\0') {
+                out->fail_info = fail_info[0] - '0';
+            }
         }
         else {
             /* status "0" is SUCCESS: de-envelop the CertRep and convert the
@@ -453,6 +627,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
 
     WOLFCERT_XFREE(rx_tid, heap);
     WOLFCERT_XFREE(status, heap);
+    WOLFCERT_XFREE(fail_info, heap);
     wolfcert_buffer_free(&inner);
     wolfcert_buffer_free(&resp_env);
     return rc;
@@ -572,11 +747,9 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
                                  const uint8_t* ca_bundle, size_t ca_bundle_len,
                                  const uint8_t* current_cert, size_t current_cert_len,
                                  const WolfCertKey* current_key,
-                                 const WolfCertKey* new_key,
                                  const uint8_t* csr_der, size_t csr_der_len,
                                  WolfCertScepResult* out)
 {
-    (void)new_key;
     if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
             current_cert == NULL || current_key == NULL || csr_der == NULL ||
             out == NULL)
@@ -613,7 +786,6 @@ int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
                               const uint8_t* ra_cert, size_t ra_cert_len,
                               const uint8_t* current_cert, size_t current_cert_len,
                               const WolfCertKey* current_key,
-                              const WolfCertKey* new_key,
                               const uint8_t* csr_der, size_t csr_der_len,
                               WolfCertBuffer* out_cert_pem)
 {
@@ -626,7 +798,7 @@ int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
     int rc = wolfcert_scep_renewal_req_ex(srv, caps, ra_cert, ra_cert_len,
                                           ra_cert, ra_cert_len,
                                           current_cert, current_cert_len,
-                                          current_key, new_key,
+                                          current_key,
                                           csr_der, csr_der_len, &r);
 
     if (rc != WOLFCERT_OK) {

@@ -558,7 +558,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(const uint8_t* resp_
 
     rc = wolfcert_scep_parse_pki_message(resp_der, resp_len, &content,
             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-            &signer, &signer_len, heap);
+            &signer, &signer_len, NULL, heap);
 
     /* Bind the rollover message to the trusted current CA: its SignedData
      * signer must share that CA's public key. */
@@ -581,7 +581,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     size_t* out_tid_len, uint8_t** out_sender_nonce, size_t* out_snonce_len,
     uint8_t** out_recipient_nonce,size_t* out_rnonce_len, char** out_message_type,
     char** out_pki_status, uint8_t** out_signer_cert, size_t* out_signer_cert_len,
-    void* heap)
+    char** out_fail_info, void* heap)
 {
     PKCS7* p7 = wc_PKCS7_New(heap, WOLFCERT_DEVID_SOFTWARE);
     if (p7 == NULL)
@@ -656,6 +656,9 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     if (out_pki_status)
         *out_pki_status = NULL;
 
+    if (out_fail_info)
+        *out_fail_info = NULL;
+
     for (PKCS7DecodedAttrib* a = p7->decodedAttrib; a != NULL; a = a->next) {
         /* PKCS7DecodedAttrib.value can arrive in either of two shapes
          * depending on the wolfSSL version / producer:
@@ -723,6 +726,15 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
                 memcpy(s, v + off, vlen);
                 s[vlen] = '\0';
                 *out_pki_status = s;
+            }
+        }
+        else if (a->oidSz == sizeof(OID_FAIL_INFO) &&
+                 memcmp(a->oid, OID_FAIL_INFO, a->oidSz) == 0 && out_fail_info) {
+            char* s = (char*)WOLFCERT_XMALLOC(vlen + 1, heap);
+            if (s) {
+                memcpy(s, v + off, vlen);
+                s[vlen] = '\0';
+                *out_fail_info = s;
             }
         }
         else if (a->oidSz == sizeof(OID_TRANS_ID) &&

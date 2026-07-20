@@ -42,7 +42,20 @@
 #include <unistd.h>
 
 #define WOLFCERT_HTTP_MAX_HOST_LEN 256
-#define WOLFCERT_HTTP_MAX_PATH_LEN 2048
+/* Large enough to carry an RFC 8894 GET PKIOperation whose base64 pkiMessage
+ * rides in the query string (bounded by WOLFCERT_SCEP_MAX_GET_URL). The parsed
+ * path is heap-allocated and the request head buffer is sized to it, so this is
+ * only a sanity ceiling. */
+#ifndef WOLFCERT_HTTP_MAX_PATH_LEN
+#define WOLFCERT_HTTP_MAX_PATH_LEN 8192
+#endif
+/* The SCEP GET fallback builds a URL up to WOLFCERT_SCEP_MAX_GET_URL and then
+ * parses its own request through wolfcert_http_url_parse, which rejects a
+ * path+query longer than this. Guard the relationship so an inconsistent -D
+ * override fails fast instead of the client rejecting a URL it just built. */
+#if WOLFCERT_SCEP_MAX_GET_URL > WOLFCERT_HTTP_MAX_PATH_LEN
+#error "WOLFCERT_SCEP_MAX_GET_URL exceeds WOLFCERT_HTTP_MAX_PATH_LEN; raise WOLFCERT_HTTP_MAX_PATH_LEN so the client accepts the largest GET URL it will build."
+#endif
 #define WOLFCERT_HTTP_DEFAULT_MAX_BODY  (64 * 1024)
 #define WOLFCERT_HTTP_READ_CHUNK   2048
 

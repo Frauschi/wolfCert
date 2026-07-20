@@ -47,16 +47,29 @@
 #include <wolfssl/wolfcrypt/wc_port.h>
 #include <wolfssl/ssl.h>
 
-/* ---- tunable stack-buffer sizes ----------------------------------------- *
- * These bound the HTTP request-handling stack footprint of the test server
- * and client. Override them (compiler -D or user_settings) to shrink stack
- * usage on constrained targets; see docs/EMBEDDED.md. Shrinking lowers the
- * largest request header block / path / Basic-auth credential accepted. */
+/* ---- tunable HTTP request-buffer sizes ---------------------------------- *
+ * These bound the HTTP request-handling buffers of the test server and client.
+ * The EST server and the client keep them on the stack; the SCEP server
+ * heap-allocates its (larger) read buffer, so shrinking these lowers its heap
+ * churn rather than its stack. Override them (compiler -D or user_settings) on
+ * constrained targets; see docs/EMBEDDED.md. Shrinking lowers the largest
+ * request header block / path / Basic-auth credential accepted. */
 #ifndef WOLFCERT_HTTP_REQ_BUF_SZ
 #define WOLFCERT_HTTP_REQ_BUF_SZ 2048   /* server request header read buffer */
 #endif
 #ifndef WOLFCERT_HTTP_PATH_SZ
-#define WOLFCERT_HTTP_PATH_SZ    512    /* server request path / query field */
+#define WOLFCERT_HTTP_PATH_SZ    512    /* EST server request path field      */
+#endif
+/* The query size is separate from the path: an RFC 8894 GET PKIOperation
+ * carries the whole pkiMessage in the `message=` query parameter. What lands in
+ * this buffer is the percent-encoded base64 (up to ~3x the raw bytes for a
+ * fully-escaped payload), not the raw base64 - so the effective on-wire bound
+ * is the client's WOLFCERT_SCEP_MAX_GET_URL cap, which shares this 8 KiB
+ * default. The SCEP server adds this to REQ_BUF_SZ for its heap read buffer
+ * (query points into it); trim it on a POST-only deployment to reclaim that
+ * buffer. */
+#ifndef WOLFCERT_HTTP_QUERY_SZ
+#define WOLFCERT_HTTP_QUERY_SZ   8192   /* percent-encoded SCEP GET pkiMessage  */
 #endif
 #ifndef WOLFCERT_HTTP_AUTH_BUF_SZ
 #define WOLFCERT_HTTP_AUTH_BUF_SZ 512   /* client Basic-auth header line      */
@@ -85,6 +98,26 @@
  * user_settings) to trim it on constrained targets, see docs/EMBEDDED.md. */
 #ifndef WOLFCERT_SCEP_MAX_MSG_SZ
 #define WOLFCERT_SCEP_MAX_MSG_SZ  (64 * 1024)
+#endif
+
+/* Upper bound on the length of a base64/percent-encoded PKIOperation GET URL.
+ * RFC 8894 section 4.1 lets a client fall back to HTTP GET when the CA does not
+ * advertise POSTPKIOperation, carrying the pkiMessage in the `message` query
+ * parameter. GET has no standard length limit but servers commonly cap request
+ * lines around 8 KiB, so refuse to build a longer URL and surface a clear
+ * error instead (a large message needs a POSTPKIOperation-capable CA). Override
+ * with a compiler -D or user_settings if a deployment allows longer GETs. */
+#ifndef WOLFCERT_SCEP_MAX_GET_URL
+#define WOLFCERT_SCEP_MAX_GET_URL (8 * 1024)
+#endif
+/* A GET URL the client builds (bounded by WOLFCERT_SCEP_MAX_GET_URL) must also
+ * fit the SCEP server's query buffer, or the server would truncate it. These
+ * share the same 8 KiB default; guard the relationship so a lone -D override of
+ * one fails fast at compile time rather than at runtime. The matching check
+ * against the client's own URL parser (WOLFCERT_HTTP_MAX_PATH_LEN) lives in
+ * http.c, where that limit is defined. */
+#if WOLFCERT_SCEP_MAX_GET_URL > WOLFCERT_HTTP_QUERY_SZ
+#error "WOLFCERT_SCEP_MAX_GET_URL exceeds WOLFCERT_HTTP_QUERY_SZ; raise WOLFCERT_HTTP_QUERY_SZ so the SCEP server can receive the largest GET the client will build."
 #endif
 
 /* ---- key ---------------------------------------------------------------- */
@@ -312,6 +345,13 @@ int wolfcert_scep_issuer_and_subject(const uint8_t* issuer_cert_der, size_t issu
 WOLFCERT_TEST_VIS int wolfcert_scep_envelop(const uint8_t* ra_cert_der,
     size_t ra_cert_len, const uint8_t* payload, size_t payload_len, int enc_oid,
     WolfCertBuffer* out_der, void* heap);
+
+/* Build the RFC 8894 section 4.1 GET PKIOperation URL:
+ *   base?operation=PKIOperation&message=<url-encoded base64 pki_msg>
+ * Returns WOLFCERT_ERR_UNSUPPORTED when the encoded URL would exceed
+ * WOLFCERT_SCEP_MAX_GET_URL. Exposed for white-box testing. */
+WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_get_url(const char* base,
+    const uint8_t* pki_msg, size_t pki_len, void* heap, char** out_url);
 int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_cert_len,
                             const uint8_t* recipient_key_der,  size_t recipient_key_len,
                             const uint8_t* env_der, size_t env_len,
@@ -329,7 +369,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     size_t* out_tid_len, uint8_t** out_sender_nonce,   size_t* out_snonce_len,
     uint8_t** out_recipient_nonce,size_t* out_rnonce_len, char** out_message_type,
     char** out_pki_status, uint8_t** out_signer_cert, size_t* out_signer_cert_len,
-    void* heap);
+    char** out_fail_info, void* heap);
 
 /* Build the GetNextCACert response (RFC 8894 section 4.6.1): wrap the next CA
  * certificate in a degenerate certs-only SignedData and sign that with the

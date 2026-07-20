@@ -33,6 +33,7 @@
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/pkcs7.h>
 #include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/memory.h>
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -45,14 +46,19 @@
 #include <unistd.h>
 
 typedef struct {
-    char     method[8];
-    char     path[WOLFCERT_HTTP_PATH_SZ];
-    char     query[WOLFCERT_HTTP_PATH_SZ];
-    size_t   content_length;
-    uint8_t* body;
-    size_t   body_len;
-    int      connection_close;
-    void*    heap;
+    /* rawbuf owns the request-line + header bytes read off the wire. It is
+     * heap-allocated (REQ_BUF_SZ + QUERY_SZ) so an RFC 8894 GET PKIOperation,
+     * whose base64 pkiMessage rides in the query string, never lands on the
+     * stack. path and query point into it (NUL-terminated in place). */
+    char*       rawbuf;
+    const char* path;
+    const char* query;
+    uint8_t*    body;
+    void*       heap;
+    size_t      content_length;
+    size_t      body_len;
+    char        method[8];
+    int         connection_close;
 } ScepRequest;
 
 /* Pending-queue entry: one per PKCSReq / RenewalReq held under
@@ -101,7 +107,9 @@ WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
 
 static void free_req(ScepRequest* r)
 {
+    /* path/query point into rawbuf, so freeing rawbuf reclaims them too. */
     WOLFCERT_XFREE(r->body, r->heap);
+    WOLFCERT_XFREE(r->rawbuf, r->heap);
     memset(r, 0, sizeof(*r));
 }
 
@@ -124,12 +132,23 @@ static int read_line(const char** p, const char* end, char** ls, size_t* ll)
 
 static int read_request(WolfCertServer* s, int fd, ScepRequest* out, void* heap)
 {
+    /* Large enough to hold the request line + headers, including a GET
+     * PKIOperation whose base64 pkiMessage lives in the query string. Heap-
+     * allocated (owned by free_req) to keep it off the request-handling stack;
+     * path and query end up pointing into it. */
+    size_t buf_sz = WOLFCERT_HTTP_REQ_BUF_SZ + WOLFCERT_HTTP_QUERY_SZ;
+    char* buf;
+    size_t n = 0;
+
     memset(out, 0, sizeof(*out));
     out->heap = heap;
-    char buf[WOLFCERT_HTTP_REQ_BUF_SZ];
-    size_t n = 0;
-    while (n < sizeof(buf) - 1) {
-        ssize_t r = wolfcert_io_recv(s, fd, buf + n, sizeof(buf) - 1 - n);
+    out->rawbuf = (char*)WOLFCERT_XMALLOC(buf_sz, heap);
+    if (out->rawbuf == NULL)
+        return WOLFCERT_ERR_MEMORY;
+    buf = out->rawbuf;
+
+    while (n < buf_sz - 1) {
+        ssize_t r = wolfcert_io_recv(s, fd, buf + n, buf_sz - 1 - n);
         if (r <= 0)
             return WOLFCERT_ERR_IO;
 
@@ -161,22 +180,19 @@ static int read_request(WolfCertServer* s, int fd, ScepRequest* out, void* heap)
     if (sp2 == NULL)
         return WOLFCERT_ERR_PROTOCOL;
 
-    size_t pqlen = (size_t)(sp2 - sp1 - 1);
-    char full[2 * WOLFCERT_HTTP_PATH_SZ];
-    if (pqlen >= sizeof(full))
-        return WOLFCERT_ERR_PROTOCOL;
-
-    memcpy(full, sp1 + 1, pqlen);
-    full[pqlen] = '\0';
-
-    char* qs = strchr(full, '?');
+    /* Split the request-target in place: NUL the trailing space, then the '?'
+     * (if any). path and query point into buf (== out->rawbuf), which lives
+     * until free_req, so no copy and no large stack buffers are needed. */
+    *sp2 = '\0';
+    out->path = sp1 + 1;
+    char* qs = strchr(sp1 + 1, '?');
     if (qs != NULL) {
         *qs = '\0';
-        strncpy(out->query, qs + 1, sizeof(out->query) - 1);
-        out->query[sizeof(out->query) - 1] = '\0';
+        out->query = qs + 1;
     }
-    strncpy(out->path, full, sizeof(out->path) - 1);
-    out->path[sizeof(out->path) - 1] = '\0';
+    else {
+        out->query = sp2;   /* empty query string */
+    }
 
     while (read_line(&p, end, &line, &llen) == 0 && llen > 0) {
         if (llen > 14 && strncasecmp(line, "Content-Length", 14) == 0) {
@@ -423,13 +439,9 @@ static int check_challenge(const uint8_t* csr_der, size_t csr_len,
 
     size_t elen = strlen(expected);
     int ok = (dc.cPwd != NULL) && ((size_t)dc.cPwdLen == elen);
-    if (ok) {
-        unsigned acc = 0;
-        for (size_t i = 0; i < elen; ++i) {
-            acc |= (unsigned)(dc.cPwd[i] ^ expected[i]);
-        }
-        ok = (acc == 0);
-    }
+    if (ok)
+        ok = (wc_ConstantCompare((const byte*)dc.cPwd,
+                                 (const byte*)expected, (int)elen) == 0);
 
     wc_FreeDecodedCert(&dc);
     return ok ? WOLFCERT_OK : WOLFCERT_ERR_AUTH;
@@ -734,7 +746,7 @@ static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
 
     int rc = wolfcert_scep_parse_pki_message(req->body, req->body_len, &env,
             &tid, &tid_len, &snonce, &snonce_len, &rnonce, &rnonce_len,
-            &mt, &ps, &signer_cert, &signer_cert_len, s->heap);
+            &mt, &ps, &signer_cert, &signer_cert_len, NULL, s->heap);
     if (rc != WOLFCERT_OK) {
         send_text(s, fd, 400, "Bad Request", "text/plain", "");
         goto out;
@@ -781,13 +793,105 @@ out:
     return rc;
 }
 
+static int hexval(int c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+/* Return the value of query parameter `key` (the text just past "key="), or
+ * NULL if absent. `key` is matched as a whole parameter name -- at the start of
+ * the query or immediately after a '&' -- so "message" is not matched inside
+ * "mymessage". The value runs to the next '&' or the end of the string. */
+static const char* query_param(const char* query, const char* key)
+{
+    size_t key_len = strlen(key);
+    const char* p = query;
+
+    while (*p != '\0') {
+        if (strncmp(p, key, key_len) == 0 && p[key_len] == '=')
+            return p + key_len + 1;
+        p = strchr(p, '&');
+        if (p == NULL)
+            break;
+        ++p;
+    }
+
+    return NULL;
+}
+
+/* RFC 8894 section 4.1 GET PKIOperation: the pkiMessage is carried
+ * base64-encoded and percent-escaped in the `message` query parameter. Decode
+ * it into req->body (owned; freed by free_req) and dispatch exactly like a
+ * POSTed pkiMessage. Sends its own 400 on a malformed message. */
+static int handle_pki_op_get(WolfCertServer* s, int fd, ScepRequest* req)
+{
+    const char* m = query_param(req->query, "message");
+    if (m == NULL) {
+        send_text(s, fd, 400, "Bad Request", "text/plain", "");
+        return WOLFCERT_ERR_PROTOCOL;
+    }
+    size_t enc_len = strcspn(m, "&");
+
+    /* Percent-decoding never grows the input. */
+    uint8_t* b64 = (uint8_t*)WOLFCERT_XMALLOC(enc_len + 1, req->heap);
+    if (b64 == NULL) {
+        send_text(s, fd, 500, "Server Error", "text/plain", "");
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    size_t o = 0;
+    for (size_t i = 0; i < enc_len; ) {
+        if (m[i] == '%') {
+            int hi = (i + 2 < enc_len) ? hexval((unsigned char)m[i + 1]) : -1;
+            int lo = (i + 2 < enc_len) ? hexval((unsigned char)m[i + 2]) : -1;
+            if (hi < 0 || lo < 0) {
+                WOLFCERT_XFREE(b64, req->heap);
+                send_text(s, fd, 400, "Bad Request", "text/plain", "");
+                return WOLFCERT_ERR_PROTOCOL;
+            }
+            b64[o++] = (uint8_t)((hi << 4) | lo);
+            i += 3;
+        }
+        else {
+            b64[o++] = (uint8_t)m[i];
+            i += 1;
+        }
+    }
+
+    WolfCertBuffer der = { 0 };
+    int rc = wolfcert_base64_decode(b64, o, &der, req->heap);
+    WOLFCERT_XFREE(b64, req->heap);
+    if (rc != WOLFCERT_OK) {
+        send_text(s, fd, 400, "Bad Request", "text/plain", "");
+        return rc;
+    }
+
+    /* A GET carries its pkiMessage in the query, not a body; free any body a
+     * bogus Content-Length made read_request allocate before installing the
+     * decoded message, so it is not leaked (XFREE(NULL) is a no-op). */
+    WOLFCERT_XFREE(req->body, req->heap);
+    req->body     = der.data;
+    req->body_len = der.len;
+
+    return handle_pki_op(s, fd, req);
+}
+
 static int handle_request(WolfCertServer* s, int fd)
 {
     ScepRequest req = { 0 };
     int rc = read_request(s, fd, &req, s->heap);
     if (rc != WOLFCERT_OK) {
         s->keep_alive = 0;
-        send_text(s, fd, 400, "Bad Request", "text/plain", "");
+        /* A heap allocation failure inside read_request is a server-side
+         * fault, not a malformed request: map it to 500 so callers can tell
+         * the two apart. Everything else (protocol/IO) stays a 400. */
+        if (rc == WOLFCERT_ERR_MEMORY)
+            send_text(s, fd, 500, "Server Error", "text/plain", "");
+        else
+            send_text(s, fd, 400, "Bad Request", "text/plain", "");
         free_req(&req);
         return rc;
     }
@@ -795,13 +899,12 @@ static int handle_request(WolfCertServer* s, int fd)
     if (req.connection_close)
         s->keep_alive = 0;
 
-    const char* op = strstr(req.query, "operation=");
+    const char* op = query_param(req.query, "operation");
     if (op == NULL) {
         send_text(s, fd,400, "Bad Request", "text/plain", "");
         free_req(&req);
         return WOLFCERT_ERR_PROTOCOL;
     }
-    op += 10;
 
     if (strncmp(op, "GetCACaps", 9) == 0 && strcmp(req.method, "GET") == 0) {
         handle_get_ca_caps(s, fd);
@@ -814,6 +917,9 @@ static int handle_request(WolfCertServer* s, int fd)
     }
     else if (strncmp(op, "PKIOperation", 12) == 0 && strcmp(req.method, "POST") == 0) {
         rc = handle_pki_op(s, fd, &req);
+    }
+    else if (strncmp(op, "PKIOperation", 12) == 0 && strcmp(req.method, "GET") == 0) {
+        rc = handle_pki_op_get(s, fd, &req);
     }
     else {
         send_text(s, fd,404, "Not Found", "text/plain", "");

@@ -106,6 +106,20 @@
 #ifdef NO_SHA256
 #error "wolfSSL was built with NO_SHA256; wolfCert requires SHA-256. Rebuild wolfSSL with --enable-sha256."
 #endif
+/* wc_ConstantCompare backs every constant-time comparison of secret material
+ * (SCEP CA fingerprint / challenge password, EST Basic-auth credential). A
+ * wolfSSL built WOLFSSL_NO_CONST_CMP drops the symbol, so catch it here with a
+ * clear message instead of a later missing-symbol link error. */
+#ifdef WOLFSSL_NO_CONST_CMP
+#error "wolfSSL was built with WOLFSSL_NO_CONST_CMP; wolfCert requires wc_ConstantCompare. Rebuild wolfSSL without WOLFSSL_NO_CONST_CMP."
+#endif
+/* wc_ForceZero scrubs private-key DER/PEM and other secret buffers on every
+ * exit path (keygen, store, CA issuance, SCEP/EST clients). A wolfSSL built
+ * WOLFSSL_NO_FORCE_ZERO drops the symbol, so catch it here too rather than as a
+ * later missing-symbol link error. */
+#ifdef WOLFSSL_NO_FORCE_ZERO
+#error "wolfSSL was built with WOLFSSL_NO_FORCE_ZERO; wolfCert requires wc_ForceZero to scrub key material. Rebuild wolfSSL without WOLFSSL_NO_FORCE_ZERO."
+#endif
 
 /* The HTTPS transport needs at least TLS 1.2 or TLS 1.3. */
 #if defined(WOLFSSL_NO_TLS12) && !defined(WOLFSSL_TLS13)

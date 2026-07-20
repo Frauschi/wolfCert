@@ -35,6 +35,7 @@
 #include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
 #include <wolfssl/wolfcrypt/sha256.h>
+#include <wolfssl/wolfcrypt/memory.h>
 
 #include <arpa/inet.h>
 #include <ctype.h>
@@ -520,12 +521,9 @@ static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
      * does not leak the length of the matching prefix. */
     const char* tok = auth_header + EST_BASIC_AUTH_SCHEME_LEN;
     int ok = (strlen(tok) == enc.len);
-    if (ok) {
-        unsigned acc = 0;
-        for (size_t i = 0; i < enc.len; ++i)
-            acc |= (unsigned)((unsigned char)tok[i] ^ enc.data[i]);
-        ok = (acc == 0);
-    }
+    if (ok)
+        ok = (wc_ConstantCompare((const byte*)tok, enc.data,
+                                 (int)enc.len) == 0);
     wolfcert_buffer_free(&enc);
 
     return ok;

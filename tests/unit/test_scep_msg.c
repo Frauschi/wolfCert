@@ -43,6 +43,13 @@
 #include <wolfssl/wolfcrypt/pkcs7.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/random.h>
+#ifndef NO_SHA
+#include <wolfssl/wolfcrypt/sha.h>
+#endif
+#include <wolfssl/wolfcrypt/sha256.h>
+#ifdef WOLFSSL_SHA512
+#include <wolfssl/wolfcrypt/sha512.h>
+#endif
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -152,6 +159,7 @@ static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
     WolfCertBuffer    env = { 0 };
     char*    status = NULL;
     char*    mt     = NULL;
+    char*    rx_fi  = NULL;
     uint8_t* rx_tid = NULL;
     size_t   rx_tid_len = 0;
     uint8_t* rx_sn  = NULL;
@@ -159,6 +167,7 @@ static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
     uint8_t* rx_rn  = NULL;
     size_t   rx_rn_len = 0;
     int      prc;
+    int      env_ok, status_ok, mt_ok, fi_ok;
 
     memset(sn, 0xA5, sizeof(sn));
     memset(rn, 0x5A, sizeof(rn));
@@ -186,19 +195,28 @@ static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
     /* The message must still verify and parse, returning an empty envelope. */
     prc = wolfcert_scep_parse_pki_message(pki.data, pki.len, &env,
             &rx_tid, &rx_tid_len, &rx_sn, &rx_sn_len, &rx_rn, &rx_rn_len,
-            &mt, &status, NULL, NULL, NULL);
-    REQUIRE(prc == WOLFCERT_OK);
-    REQUIRE(env.len == 0 && env.data == NULL);
-    REQUIRE(status != NULL && strcmp(status, "2") == 0);
-    REQUIRE(mt != NULL && strcmp(mt, "3") == 0);
+            &mt, &status, NULL, NULL, &rx_fi, NULL);
+    /* Capture every assertion, then free the parsed outputs before the REQUIREs
+     * so a failing check cannot leak them (same pattern as test_pki_get_url). */
+    env_ok    = (env.len == 0 && env.data == NULL);
+    status_ok = (status != NULL && strcmp(status, "2") == 0);
+    mt_ok     = (mt != NULL && strcmp(mt, "3") == 0);
+    fi_ok     = (rx_fi != NULL && strcmp(rx_fi, "2") == 0);
 
     wolfcert_buffer_free(&env);
     wolfcert_buffer_free(&pki);
     WOLFCERT_XFREE(status, NULL);
     WOLFCERT_XFREE(mt, NULL);
+    WOLFCERT_XFREE(rx_fi, NULL);
     WOLFCERT_XFREE(rx_tid, NULL);
     WOLFCERT_XFREE(rx_sn, NULL);
     WOLFCERT_XFREE(rx_rn, NULL);
+
+    REQUIRE(prc == WOLFCERT_OK);
+    REQUIRE(env_ok);
+    REQUIRE(status_ok);
+    REQUIRE(mt_ok);
+    REQUIRE(fi_ok);
     return 0;
 }
 
@@ -426,7 +444,7 @@ static int test_next_ca_response_is_signed(void)
     /* A signed SignedData verifies here; an unsigned degenerate bundle does
      * not, because the parser rejects degenerate SignedData. */
     rc = wolfcert_scep_parse_pki_message(resp.data, resp.len, &content,
-            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
+            NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(content.data != NULL && content.len > 0);
 
@@ -602,7 +620,7 @@ static int test_signer_is_verified_cert(void)
 
     REQUIRE(wolfcert_scep_parse_pki_message(msg, msg_len, &env,
             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
-            &signer, &signer_len, NULL) == WOLFCERT_OK);
+            &signer, &signer_len, NULL, NULL) == WOLFCERT_OK);
 
     /* The parser must surface the cert that signed, not cert[0]. */
     REQUIRE(signer != NULL);
@@ -718,10 +736,214 @@ static int test_signer_subject_fallback(void)
     return 0;
 }
 
+/* All fingerprint assertions run against a caller-owned CA DER so the buffer is
+ * freed exactly once by test_ca_fingerprint no matter which REQUIRE fires - the
+ * same ownership split as check_no_envelope / test_non_success_has_no_envelope. */
+static int check_ca_fingerprint(const uint8_t* ca_der, size_t ca_len)
+{
+    uint8_t sha256[WC_SHA256_DIGEST_SIZE];
+    uint8_t tampered[WC_SHA256_DIGEST_SIZE];
+#ifndef NO_SHA
+    uint8_t sha1[WC_SHA_DIGEST_SIZE];
+#else
+    uint8_t sha1_absent[20];    /* SHA-1 digest length; algorithm not compiled in */
+#endif
+#ifdef WOLFSSL_SHA512
+    uint8_t sha512[WC_SHA512_DIGEST_SIZE];
+#else
+    uint8_t sha512_absent[64];  /* SHA-512 digest length; algorithm not compiled in */
+#endif
+
+    REQUIRE(wc_Sha256Hash(ca_der, (word32)ca_len, sha256) == 0);
+
+    /* Explicit SHA-256 and AUTO (by length) both accept the real digest. */
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha256,
+                sizeof(sha256), WOLFCERT_SCEP_FP_SHA256) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha256,
+                sizeof(sha256), WOLFCERT_SCEP_FP_AUTO) == WOLFCERT_OK);
+
+    /* A single flipped bit must be rejected as a mismatch. */
+    memcpy(tampered, sha256, sizeof(tampered));
+    tampered[0] ^= 0x01;
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, tampered,
+                sizeof(tampered), WOLFCERT_SCEP_FP_SHA256) == WOLFCERT_ERR_AUTH);
+
+    /* Explicit algorithm with a length that doesn't match the digest -> BAD_ARG. */
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha256, 20,
+                WOLFCERT_SCEP_FP_SHA256) == WOLFCERT_ERR_BAD_ARG);
+    /* AUTO with an unrecognized length -> BAD_ARG. */
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha256, 33,
+                WOLFCERT_SCEP_FP_AUTO) == WOLFCERT_ERR_BAD_ARG);
+    /* NULL / zero inputs -> BAD_ARG. */
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(NULL, 0, sha256, sizeof(sha256),
+                WOLFCERT_SCEP_FP_SHA256) == WOLFCERT_ERR_BAD_ARG);
+
+#ifndef NO_SHA
+    REQUIRE(wc_ShaHash(ca_der, (word32)ca_len, sha1) == 0);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1,
+                sizeof(sha1), WOLFCERT_SCEP_FP_SHA1) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1,
+                sizeof(sha1), WOLFCERT_SCEP_FP_AUTO) == WOLFCERT_OK);
+    /* A single flipped bit must be rejected on the SHA-1 path too. */
+    sha1[0] ^= 0x01;
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1,
+                sizeof(sha1), WOLFCERT_SCEP_FP_SHA1) == WOLFCERT_ERR_AUTH);
+#else
+    /* SHA-1 absent: an explicit SHA-1 request, and AUTO with a 20-byte
+     * (SHA-1-length) fingerprint, both fall to the outer switch default and
+     * must report the algorithm unsupported rather than mis-dispatching. The
+     * buffer contents are irrelevant - the algorithm check precedes the
+     * fingerprint compare. */
+    memset(sha1_absent, 0, sizeof(sha1_absent));
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1_absent,
+                sizeof(sha1_absent), WOLFCERT_SCEP_FP_SHA1)
+            == WOLFCERT_ERR_UNSUPPORTED);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1_absent,
+                sizeof(sha1_absent), WOLFCERT_SCEP_FP_AUTO)
+            == WOLFCERT_ERR_UNSUPPORTED);
+#endif
+
+#ifdef WOLFSSL_SHA512
+    REQUIRE(wc_Sha512Hash(ca_der, (word32)ca_len, sha512) == 0);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha512,
+                sizeof(sha512), WOLFCERT_SCEP_FP_SHA512) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha512,
+                sizeof(sha512), WOLFCERT_SCEP_FP_AUTO) == WOLFCERT_OK);
+    /* A single flipped bit must be rejected on the SHA-512 path too. */
+    sha512[0] ^= 0x01;
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha512,
+                sizeof(sha512), WOLFCERT_SCEP_FP_SHA512) == WOLFCERT_ERR_AUTH);
+#else
+    /* SHA-512 absent: same as the SHA-1 case for the 64-byte path. */
+    memset(sha512_absent, 0, sizeof(sha512_absent));
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha512_absent,
+                sizeof(sha512_absent), WOLFCERT_SCEP_FP_SHA512)
+            == WOLFCERT_ERR_UNSUPPORTED);
+    REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha512_absent,
+                sizeof(sha512_absent), WOLFCERT_SCEP_FP_AUTO)
+            == WOLFCERT_ERR_UNSUPPORTED);
+#endif
+
+    return 0;
+}
+
+/* wolfcert_scep_verify_ca_fingerprint: correct digest verifies, a tampered one
+ * is rejected, AUTO dispatches on length, and length/argument misuse is caught. */
+static int test_ca_fingerprint(void)
+{
+    uint8_t* ca_der  = NULL;
+    uint8_t* key_der = NULL;
+    size_t   ca_len  = 0, key_len = 0;
+    int      rc;
+
+    REQUIRE(make_ca(&ca_der, &ca_len, &key_der, &key_len) == 0);
+
+    rc = check_ca_fingerprint(ca_der, ca_len);
+
+    free(ca_der);
+    free(key_der);
+    return rc;
+}
+
+/* Map one hex digit to its nibble value, or -1 if it is not a hex digit. */
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9')
+        return c - '0';
+    if (c >= 'A' && c <= 'F')
+        return c - 'A' + 10;
+    if (c >= 'a' && c <= 'f')
+        return c - 'a' + 10;
+    return -1;
+}
+
+/* Percent-decode `in` into `out` (which must hold at least strlen(in) bytes),
+ * reversing url_encode()'s "%XX" escaping. Returns the decoded byte count, or
+ * -1 on a malformed escape. */
+static int percent_decode(const char* in, uint8_t* out)
+{
+    int    hi, lo;
+    size_t i = 0, o = 0;
+
+    while (in[i] != '\0') {
+        if (in[i] == '%') {
+            if (in[i + 1] == '\0' || in[i + 2] == '\0')
+                return -1;
+            hi = hex_nibble(in[i + 1]);
+            lo = hex_nibble(in[i + 2]);
+            if (hi < 0 || lo < 0)
+                return -1;
+            out[o++] = (uint8_t)((hi << 4) | lo);
+            i += 3;
+        }
+        else {
+            out[o++] = (uint8_t)in[i];
+            i += 1;
+        }
+    }
+    return (int)o;
+}
+
+/* wolfcert_scep_build_pki_get_url: builds a well-formed GET URL for small
+ * messages and refuses one that would exceed WOLFCERT_SCEP_MAX_GET_URL. */
+static int test_pki_get_url(void)
+{
+    const char* base = "http://ca.example/scep";
+    const char* pfx  = "http://ca.example/scep?operation=PKIOperation&message=";
+    int         prefix_ok, msg_ok = 0, rc;
+
+    uint8_t small[64];
+    for (size_t i = 0; i < sizeof(small); i++)
+        small[i] = (uint8_t)(i * 7 + 3);   /* spans bytes that must be escaped */
+
+    char* url = NULL;
+    REQUIRE(wolfcert_scep_build_pki_get_url(base, small, sizeof(small), NULL, &url)
+            == WOLFCERT_OK);
+    REQUIRE(url != NULL);
+    /* Capture the assertions, then free url before the REQUIREs so a failing
+     * check cannot leak the heap-allocated URL. */
+    prefix_ok = (strncmp(url, pfx, strlen(pfx)) == 0);
+    /* Round-trip the message= value rather than only checking it is non-empty:
+     * percent-decode, then base64-decode, and confirm it reproduces the
+     * original bytes. A url_encode that dropped the mandatory base64 escaping
+     * (+, /, =) would corrupt this and be caught here. */
+    if (prefix_ok) {
+        uint8_t        decoded_b64[sizeof(small) * 2];  /* holds the ~88-char b64 */
+        WolfCertBuffer raw = { 0 };
+        int            declen = percent_decode(url + strlen(pfx), decoded_b64);
+        if (declen > 0 && wolfcert_base64_decode(decoded_b64, (size_t)declen,
+                                                 &raw, NULL) == WOLFCERT_OK) {
+            msg_ok = (raw.len == sizeof(small) &&
+                      memcmp(raw.data, small, sizeof(small)) == 0);
+        }
+        wolfcert_buffer_free(&raw);
+    }
+    WOLFCERT_XFREE(url, NULL);   /* url came from the wolfCert heap, not malloc */
+    REQUIRE(prefix_ok);
+    REQUIRE(msg_ok);
+
+    /* A pkiMessage too large for a GET must be refused so the caller POSTs. */
+    size_t big_len = WOLFCERT_SCEP_MAX_GET_URL;   /* base64 alone exceeds the cap */
+    uint8_t* big = (uint8_t*)malloc(big_len);
+    REQUIRE(big != NULL);
+    memset(big, 0xA5, big_len);
+    char* url2 = NULL;
+    rc = wolfcert_scep_build_pki_get_url(base, big, big_len, NULL, &url2);
+    free(big);
+    WOLFCERT_XFREE(url2, NULL);   /* NULL on the expected UNSUPPORTED path */
+    REQUIRE(rc == WOLFCERT_ERR_UNSUPPORTED);
+
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+    if (test_ca_fingerprint())
+        return 1;
+    if (test_pki_get_url())
+        return 1;
     if (test_non_success_has_no_envelope())
         return 1;
     if (test_signer_subject_fallback())

@@ -65,7 +65,7 @@ wolfSSL configure:
     --enable-certext --enable-keygen --enable-ecc --enable-cryptocb \
     --enable-base64encode --enable-ed25519 --enable-ed448 \
     --enable-mldsa --enable-postauth --enable-opensslextra \
-    --enable-ip-alt-name \
+    --enable-ip-alt-name --enable-des3 \
     CPPFLAGS="-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL"
 ```
 
