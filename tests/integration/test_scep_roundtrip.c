@@ -423,7 +423,7 @@ int main(void)
                                   .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s3 = NULL;
     REQUIRE(wolfcert_server_start(&cfg3, &s3) == WOLFCERT_OK);
-    wolfcert_scep_server_set_faults(s3, 1 /* omit recipientNonce */, 0);
+    wolfcert_scep_server_set_faults(s3, 1 /* omit recipientNonce */, 0, 0);
     pthread_t tid3;
     REQUIRE(pthread_create(&tid3, NULL, server_thread, s3) == 0);
 
@@ -468,7 +468,7 @@ int main(void)
                                   .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s4 = NULL;
     REQUIRE(wolfcert_server_start(&cfg4, &s4) == WOLFCERT_OK);
-    wolfcert_scep_server_set_faults(s4, 0, 1 /* sign with wrong key */);
+    wolfcert_scep_server_set_faults(s4, 0, 1 /* sign with wrong key */, 0);
     pthread_t tid4;
     REQUIRE(pthread_create(&tid4, NULL, server_thread, s4) == 0);
 
@@ -502,6 +502,52 @@ int main(void)
     wolfcert_buffer_free(&csr4);
     wolfcert_buffer_free(&out4);
     wolfcert_key_free(dk4);
+
+    /* ---- senderNonce RNG failure must abort, not leak stack -------------
+     * If the RNG draw for the CertRep senderNonce fails, the server must not
+     * build a CertRep over an uninitialized buffer. It frees its scratch,
+     * answers HTTP 500, and returns an error, which the client sees as a
+     * transport failure. Drive a server whose nonce draw is forced to fail
+     * and confirm the enrollment does not succeed. This also exercises the
+     * error-path cleanup under the sanitizer builds. */
+    WolfCertServerCfgSrv cfg5 = { .protocol = WOLFCERT_PROTO_SCEP,
+                                  .bind_host = "127.0.0.1", .bind_port = 0 };
+    WolfCertServer* s5 = NULL;
+    REQUIRE(wolfcert_server_start(&cfg5, &s5) == WOLFCERT_OK);
+    wolfcert_scep_server_set_faults(s5, 0, 0, 1 /* RNG draw fails */);
+    pthread_t tid5;
+    REQUIRE(pthread_create(&tid5, NULL, server_thread, s5) == 0);
+
+    char url5[128];
+    snprintf(url5, sizeof(url5), "http://127.0.0.1:%u/scep", wolfcert_server_port(s5));
+    WolfCertServerCfg cli5 = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url5 };
+
+    WolfCertScepCaps caps5 = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_caps(&cli5, &caps5) == WOLFCERT_OK);
+    WolfCertBuffer ca5_pem = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli5, &ca5_pem) == WOLFCERT_OK);
+    DerBuffer* ca5_der = NULL;
+    REQUIRE(wc_PemToDer(ca5_pem.data, (long)ca5_pem.len, CERT_TYPE,
+                        &ca5_der, NULL, NULL, NULL) == 0);
+
+    WolfCertKey* dk5 = NULL;
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk5) == WOLFCERT_OK);
+    WolfCertCertMeta meta5 = { .subject_dn = "CN=scep-rng-fail" };
+    WolfCertBuffer csr5 = { 0 };
+    REQUIRE(wolfcert_csr_build(dk5, &meta5, &csr5) == WOLFCERT_OK);
+    WolfCertBuffer out5 = { 0 };
+    REQUIRE(wolfcert_scep_pkcs_req(&cli5, &caps5, ca5_der->buffer, ca5_der->length,
+                                   dk5, csr5.data, csr5.len, &out5)
+            == WOLFCERT_ERR_HTTP);
+
+    wolfcert_server_stop(s5);
+    pthread_join(tid5, NULL);
+    wolfcert_server_free(s5);
+    wc_FreeDer(&ca5_der);
+    wolfcert_buffer_free(&ca5_pem);
+    wolfcert_buffer_free(&csr5);
+    wolfcert_buffer_free(&out5);
+    wolfcert_key_free(dk5);
 
     wc_FreeDer(&ca_der);
     wc_FreeDer(&issued_der);

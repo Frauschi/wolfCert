@@ -89,6 +89,7 @@ typedef struct {
      * production build. wrong_ca is a throwaway signer generated on first use. */
     int          fault_omit_recipient_nonce;
     int          fault_sign_with_wrong_key;
+    int          fault_rng_fail;
     WolfCertCa   wrong_ca;
     int          wrong_ca_ready;
 #endif
@@ -96,12 +97,13 @@ typedef struct {
 
 #if defined(WOLFCERT_BUILD_TESTING)
 WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
-    int omit_recipient_nonce, int sign_with_wrong_key)
+    int omit_recipient_nonce, int sign_with_wrong_key, int rng_fail)
 {
     ScepPriv* p = (ScepPriv*)s->priv;
 
     p->fault_omit_recipient_nonce = omit_recipient_nonce;
     p->fault_sign_with_wrong_key  = sign_with_wrong_key;
+    p->fault_rng_fail             = rng_fail;
 }
 #endif
 
@@ -515,10 +517,25 @@ static int send_cert_rep(WolfCertServer* s, int fd,
      * so the signed pkiMessage is built with an absent pkcsPKIEnvelope. */
 
     WC_RNG rng;
-    wc_InitRng_ex(&rng, s->heap, WOLFCERT_DEVID_SOFTWARE);
+    if (wc_InitRng_ex(&rng, s->heap, WOLFCERT_DEVID_SOFTWARE) != 0) {
+        wolfcert_buffer_free(&resp_env);
+        send_text(s, fd, 500, "Server Error", "text/plain", "");
+        return WOLFCERT_ERR_CRYPTO;
+    }
 
     uint8_t my_nonce[16];
-    wc_RNG_GenerateBlock(&rng, my_nonce, sizeof(my_nonce));
+    int nonce_rc = wc_RNG_GenerateBlock(&rng, my_nonce, sizeof(my_nonce));
+#if defined(WOLFCERT_BUILD_TESTING)
+    if (((ScepPriv*)s->priv)->fault_rng_fail)
+        nonce_rc = -1;
+#endif
+    if (nonce_rc != 0) {
+        wc_FreeRng(&rng);
+        wolfcert_buffer_free(&resp_env);
+        send_text(s, fd, 500, "Server Error", "text/plain", "");
+        return WOLFCERT_ERR_CRYPTO;
+    }
+
     wc_FreeRng(&rng);
 
     /* RFC 8894 section 3.1: CertRep MUST carry messageType, pkiStatus,

@@ -487,11 +487,20 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
         return rc;
 
     WC_RNG rng;
-    wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE);
+    if (wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE) != 0) {
+        wolfcert_buffer_free(&env);
+        return WOLFCERT_ERR(WOLFCERT_ERR_CRYPTO, "scep",
+                            "RNG init failed for transactionID/nonce");
+    }
 
     uint8_t txid_gen[16], nonce[16];
-    wc_RNG_GenerateBlock(&rng, txid_gen, sizeof(txid_gen));
-    wc_RNG_GenerateBlock(&rng, nonce,    sizeof(nonce));
+    if (wc_RNG_GenerateBlock(&rng, txid_gen, sizeof(txid_gen)) != 0 ||
+        wc_RNG_GenerateBlock(&rng, nonce,    sizeof(nonce)) != 0) {
+        wc_FreeRng(&rng);
+        wolfcert_buffer_free(&env);
+        return WOLFCERT_ERR(WOLFCERT_ERR_CRYPTO, "scep",
+                            "RNG failed generating transactionID/nonce");
+    }
 
     wc_FreeRng(&rng);
 
