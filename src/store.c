@@ -440,6 +440,7 @@ int wolfcert_store_read_key(WolfCertStoreOps* store, const char* key_name,
         return rc;
 
     rc = wolfcert_key_from_pem(pem.data, pem.len, store->heap, out_key);
+    wc_ForceZero(pem.data, (word32)pem.len);
     wolfcert_buffer_free(&pem);
 
     return rc;
