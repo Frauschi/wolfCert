@@ -81,13 +81,40 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
 
 /* ---- GetCACaps ---------------------------------------------------------- */
 
+/* RFC 8894 section 3.5.2: GetCACaps is a newline-delimited list of exact
+ * capability tokens. Match a whole line, not a substring, so an unknown
+ * token that merely contains a known one is not mistaken for it. */
 static int has_cap(const char* body, size_t len, const char* needle)
 {
-    size_t nl = strlen(needle);
-    for (size_t i = 0; i + nl <= len; ++i) {
-        if (strncasecmp(body + i, needle, nl) == 0) {
+    size_t nl;
+    size_t i = 0;
+
+    /* Guard both pointers before dereferencing either: strlen(needle)
+     * below and body[] indexing in the scan. `len` needs no separate
+     * bound - every body[] access is gated by `i < len`, and the
+     * strncasecmp only fires when the matched token length equals nl,
+     * so it never reads past body + len. */
+    if (body == NULL || needle == NULL)
+        return 0;
+
+    nl = strlen(needle);
+
+    while (i < len) {
+        size_t start = i;
+        size_t tlen;
+
+        while (i < len && body[i] != '\n')
+            ++i;
+
+        tlen = i - start;
+        if (tlen > 0 && body[start + tlen - 1] == '\r')
+            --tlen;
+
+        if (tlen == nl && strncasecmp(body + start, needle, nl) == 0)
             return 1;
-        }
+
+        if (i < len)
+            ++i;
     }
 
     return 0;

@@ -35,14 +35,15 @@
 
 #include "internal.h"                       /* whitebox SCEP pkiMessage helpers */
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <time.h>
 #include <unistd.h>
 
 #define REQUIRE(cond) \
@@ -185,9 +186,103 @@ static int check_get_fallback(const WolfCertServerCfg* cli,
     return rc;
 }
 
+/* Minimal single-shot HTTP responder that answers any request with a
+ * caller-supplied GetCACaps body, so a test can drive capability parsing
+ * with a body the real server would never emit. */
+struct caps_ctx { int port; const char* body; };
+
+static void* caps_srv_thread(void* arg)
+{
+    struct caps_ctx* cc = (struct caps_ctx*)arg;
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls < 0)
+        return NULL;
+    int yes = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
+                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        close(ls);
+        return NULL;
+    }
+    if (listen(ls, 1) < 0) {
+        close(ls);
+        return NULL;
+    }
+    socklen_t slen = sizeof(sa);
+    getsockname(ls, (struct sockaddr*)&sa, &slen);
+    cc->port = ntohs(sa.sin_port);
+
+    int cs = accept(ls, NULL, NULL);
+    close(ls);
+    if (cs < 0)
+        return NULL;
+
+    char buf[1024];
+    size_t n = 0;
+    while (n < sizeof(buf) - 1) {
+        ssize_t r = recv(cs, buf + n, sizeof(buf) - 1 - n, 0);
+        if (r <= 0)
+            break;
+        n += (size_t)r;
+        buf[n] = '\0';
+        if (strstr(buf, "\r\n\r\n") != NULL)
+            break;
+    }
+
+    char resp[512];
+    int rn = snprintf(resp, sizeof(resp),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n%s",
+        strlen(cc->body), cc->body);
+    if (rn > 0)
+        send(cs, resp, (size_t)rn, 0);
+    shutdown(cs, SHUT_WR);
+    close(cs);
+    return NULL;
+}
+
+/* RFC 8894 section 3.5.2: GetCACaps is a newline-delimited list of exact
+ * tokens. A future token that merely contains a known one as a substring
+ * (Renewal-Extra, AESGCM) must not be read as advertising that capability. */
+static int test_caps_token_matching(void)
+{
+    const char* caps_body =
+        "POSTPKIOperation\r\n"
+        "Renewal-Extra\r\n"
+        "AESGCM\r\n";
+    struct caps_ctx cc = { .port = 0, .body = caps_body };
+    pthread_t tid;
+    REQUIRE(pthread_create(&tid, NULL, caps_srv_thread, &cc) == 0);
+    for (int i = 0; i < 200 && cc.port == 0; ++i) {
+        const struct timespec ts = { 0, 5 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    REQUIRE(cc.port != 0);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", cc.port);
+    WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
+    WolfCertScepCaps caps = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_caps(&cli, &caps) == WOLFCERT_OK);
+    pthread_join(tid, NULL);
+
+    /* Exact token still matches; substring-only lines do not. */
+    REQUIRE(caps.post_pki_operation == 1);
+    REQUIRE(caps.renewal == 0);
+    REQUIRE(caps.aes == 0);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+
+    if (test_caps_token_matching())
+        return 1;
+
     WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,
                                  .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s = NULL;
