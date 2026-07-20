@@ -637,14 +637,20 @@ static int handle_enroll(WolfCertServer* s, int fd, const char* mt,
     if (signer_cert != NULL &&
             signer_matches_csr(signer_cert, signer_cert_len,
                                csr->data, csr->len, s->heap) != WOLFCERT_OK) {
-        send_text(s, fd, 400, "Signer/CSR Key Mismatch", "text/plain", "");
-        return WOLFCERT_ERR_AUTH;
+        /* Report the failure as a CertRep, then close the connection. */
+        s->keep_alive = 0;
+        return send_cert_rep(s, fd, NULL, 0, env_target, env_target_len,
+                             tid, tid_len, snonce, snonce_len,
+                             "2", "2" /* badRequest */);
     }
 
     if (check_challenge(csr->data, csr->len, s->cfg_challenge,
                         s->heap) != WOLFCERT_OK) {
-        send_text(s, fd, 403, "Invalid Challenge", "text/plain", "");
-        return WOLFCERT_ERR_AUTH;
+        /* Report the failure as a CertRep, then close the connection. */
+        s->keep_alive = 0;
+        return send_cert_rep(s, fd, NULL, 0, env_target, env_target_len,
+                             tid, tid_len, snonce, snonce_len,
+                             "2", "2" /* badRequest */);
     }
 
     if (s->cfg.scep_require_approval) {

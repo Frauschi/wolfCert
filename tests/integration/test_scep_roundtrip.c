@@ -309,17 +309,19 @@ int main(void)
     WolfCertKey* dk2 = NULL;
     REQUIRE(wolfcert_key_generate(&kcfg, &dk2) == WOLFCERT_OK);
 
-    /* 1) no challenge in CSR -> server 403 -> HTTP layer returns ERR_HTTP */
+    /* 1) no challenge in CSR -> server answers with a signed CertRep FAILURE
+     * (RFC 8894 pkiStatus=2), which the client surfaces as ERR_PROTOCOL.
+     * A plain HTTP 4xx here would instead read back as ERR_HTTP. */
     WolfCertCertMeta meta_none = { .subject_dn = "CN=chal-none" };
     WolfCertBuffer csr_none = { 0 };
     REQUIRE(wolfcert_csr_build(dk2, &meta_none, &csr_none) == WOLFCERT_OK);
     WolfCertBuffer out_none = { 0 };
     REQUIRE(wolfcert_scep_pkcs_req(&cli2, &caps2, ca2_der->buffer, ca2_der->length,
                                     dk2, csr_none.data, csr_none.len, &out_none)
-            != WOLFCERT_OK);
+            == WOLFCERT_ERR_PROTOCOL);
     wolfcert_buffer_free(&csr_none);
 
-    /* 2) wrong challenge -> same rejection */
+    /* 2) wrong challenge -> same CertRep FAILURE path */
     WolfCertCertMeta meta_bad = { .subject_dn = "CN=chal-bad",
                                   .challenge_password = "battery-staple" };
     WolfCertBuffer csr_bad = { 0 };
@@ -327,7 +329,7 @@ int main(void)
     WolfCertBuffer out_bad = { 0 };
     REQUIRE(wolfcert_scep_pkcs_req(&cli2, &caps2, ca2_der->buffer, ca2_der->length,
                                     dk2, csr_bad.data, csr_bad.len, &out_bad)
-            != WOLFCERT_OK);
+            == WOLFCERT_ERR_PROTOCOL);
     wolfcert_buffer_free(&csr_bad);
 
     /* 3) correct challenge -> issuance succeeds */
