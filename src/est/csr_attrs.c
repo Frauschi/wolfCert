@@ -73,7 +73,7 @@ static int der_take_tl(const uint8_t* p, size_t avail,
         hdr = 2 + n;
     }
 
-    if (hdr + len > avail)
+    if (len > avail - hdr)
         return WOLFCERT_ERR_PARSE;
 
     *out_len = len;

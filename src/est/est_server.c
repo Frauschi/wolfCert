@@ -724,7 +724,7 @@ static int csr__take_tl(const uint8_t* p, size_t avail,
         h = 2 + n;
     }
 
-    if (h + l > avail)
+    if (l > avail - h)
         return -1;
 
     *len = l;
