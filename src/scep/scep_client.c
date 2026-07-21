@@ -414,6 +414,30 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_get_url(const char* base,
     return WOLFCERT_OK;
 }
 
+/* Decide the PKIOperation transport (RFC 8894 section 4.1) and build the
+ * request URL: POST when the CA advertises POSTPKIOperation (assumed when caps
+ * are unknown), otherwise a base64 GET carrying the message in the query. Sets
+ * *out_url (owned by caller) and *out_use_post. Shared by the one-shot and
+ * session clients. */
+static int scep_build_transport(const char* server_url, const WolfCertScepCaps* caps,
+                                const uint8_t* pki_msg, size_t pki_len, void* heap,
+                                char** out_url, int* out_use_post)
+{
+    int use_post = (caps == NULL || caps->post_pki_operation);
+    *out_use_post = use_post;
+
+    if (use_post) {
+        char* url = append_query(server_url, "PKIOperation", heap);
+        if (url == NULL)
+            return WOLFCERT_ERR_MEMORY;
+        *out_url = url;
+        return WOLFCERT_OK;
+    }
+
+    return wolfcert_scep_build_pki_get_url(server_url, pki_msg, pki_len, heap,
+                                           out_url);
+}
+
 static int run_pki_op(const WolfCertServerCfg* srv,
                       const WolfCertScepCaps* caps,
                       const uint8_t* pki_msg, size_t pki_len,
@@ -421,35 +445,23 @@ static int run_pki_op(const WolfCertServerCfg* srv,
 {
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
 
-    /* RFC 8894 section 4.1: POST the pkiMessage when the CA advertises
-     * POSTPKIOperation (assumed when caps are unknown), otherwise fall back to
-     * carrying it base64-encoded in an HTTP GET query. */
-    int use_post = (caps == NULL || caps->post_pki_operation);
-
     char* url = NULL;
-    WolfCertHttpRequest req = { 0 };
+    int   use_post = 0;
+    int rc = scep_build_transport(srv->server_url, caps, pki_msg, pki_len, heap,
+                                  &url, &use_post);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    WolfCertHttpRequest req = { .method = use_post ? "POST" : "GET", .url = url };
     if (use_post) {
-        url = append_query(srv->server_url, "PKIOperation", heap);
-        if (url == NULL)
-            return WOLFCERT_ERR_MEMORY;
-        req.method       = "POST";
-        req.url          = url;
         req.content_type = "application/x-pki-message";
         req.body         = pki_msg;
         req.body_len     = pki_len;
     }
-    else {
-        int grc = wolfcert_scep_build_pki_get_url(srv->server_url, pki_msg,
-                                                  pki_len, heap, &url);
-        if (grc != WOLFCERT_OK)
-            return grc;
-        req.method = "GET";
-        req.url    = url;
-    }
 
     fill_common(srv, &req);
     WolfCertHttpResponse resp = { 0 };
-    int rc = wolfcert_http_request(&req, &resp);
+    rc = wolfcert_http_request(&req, &resp);
 
     WOLFCERT_XFREE(url, heap);
     if (rc != WOLFCERT_OK)
@@ -468,26 +480,28 @@ static int run_pki_op(const WolfCertServerCfg* srv,
     return WOLFCERT_OK;
 }
 
-/* Core round-trip used by PKCSReq / RenewalReq / GetCertInitial. Builds a
- * pkiMessage wrapping `envelope_content`, POSTs it, parses the CertRep,
- * and fills `out`. Caller retains ownership of `txid_override`; when NULL
- * a fresh 16-byte hex transactionID is generated. */
-static int do_scep_round_trip(const WolfCertServerCfg* srv,
-                              const WolfCertScepCaps*   caps,
-                              const uint8_t* ra_cert, size_t ra_cert_len,
-                              const uint8_t* ca_bundle, size_t ca_bundle_len,
-                              const uint8_t* signer_cert, size_t signer_cert_len,
-                              const uint8_t* signer_key,  size_t signer_key_len,
-                              const char* msg_type,
-                              const uint8_t* envelope_content, size_t envelope_content_len,
-                              const uint8_t* txid_override, size_t txid_override_len,
-                              WolfCertScepResult* out)
+/* Shared SCEP round-trip sizes. */
+#define SCEP_NONCE_SZ 16
+
+/* Build the enveloped + signed pkiMessage for one SCEP round trip. Produces the
+ * DER message in *out_pki, the effective transactionID in *out_txid (a fresh
+ * 32-hex value when txid_override is NULL, else a copy of the override; owned
+ * by the caller, free with WOLFCERT_XFREE) and the senderNonce in out_nonce -
+ * both retained by the caller to validate the CertRep after the transport
+ * completes. */
+static int scep_prepare(void* heap, const WolfCertScepCaps* caps,
+                        const uint8_t* ra_cert, size_t ra_cert_len,
+                        const uint8_t* signer_cert, size_t signer_cert_len,
+                        const uint8_t* signer_key, size_t signer_key_len,
+                        const char* msg_type,
+                        const uint8_t* envelope_content, size_t envelope_content_len,
+                        const uint8_t* txid_override, size_t txid_override_len,
+                        WolfCertBuffer* out_pki,
+                        uint8_t** out_txid, size_t* out_txid_len,
+                        uint8_t* out_nonce)
 {
-    void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
     int hash_oid = pick_hash_oid(caps);
     int enc_oid;
-    out->heap = heap;
-    out->fail_info = -1;
 
     /* RFC 8894: the GetCACaps "AES" keyword advertises AES-128-CBC as the
      * content cipher. Honour it when offered; otherwise fall back to the
@@ -514,57 +528,94 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
         return rc;
 
     WC_RNG rng;
-    if (wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE) != 0) {
+    uint8_t txid_gen[16];
+    int rng_rc = wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE);
+    if (rng_rc != 0) {
         wolfcert_buffer_free(&env);
-        return WOLFCERT_ERR(WOLFCERT_ERR_CRYPTO, "scep",
-                            "RNG init failed for transactionID/nonce");
+        return WOLFCERT_ERR_WC(rng_rc, "scep",
+                               "RNG init failed for transactionID/nonce");
     }
 
-    uint8_t txid_gen[16], nonce[16];
-    if (wc_RNG_GenerateBlock(&rng, txid_gen, sizeof(txid_gen)) != 0 ||
-        wc_RNG_GenerateBlock(&rng, nonce,    sizeof(nonce)) != 0) {
-        wc_FreeRng(&rng);
-        wolfcert_buffer_free(&env);
-        return WOLFCERT_ERR(WOLFCERT_ERR_CRYPTO, "scep",
-                            "RNG failed generating transactionID/nonce");
-    }
-
+    /* The transactionID and the anti-replay senderNonce must both come from the
+     * RNG. Ignoring a failure here would build the pkiMessage over
+     * uninitialized stack memory and silently weaken replay protection, so
+     * surface any generation error instead. */
+    rng_rc = wc_RNG_GenerateBlock(&rng, txid_gen, sizeof(txid_gen));
+    if (rng_rc == 0)
+        rng_rc = wc_RNG_GenerateBlock(&rng, out_nonce, SCEP_NONCE_SZ);
     wc_FreeRng(&rng);
-
-    static const char HEX[] = "0123456789abcdef";
-    char txid_generated[33];
-    for (size_t i = 0; i < sizeof(txid_gen); ++i) {
-        txid_generated[i*2]   = HEX[txid_gen[i] >> 4];
-        txid_generated[i*2+1] = HEX[txid_gen[i] & 0x0F];
+    if (rng_rc != 0) {
+        /* Neither value is a secret - both travel in the clear as pkiMessage
+         * signed attributes - but a half-filled buffer of RNG output has no
+         * reason to outlive the failure, and clearing out_nonce keeps the
+         * caller from mistaking leftovers for a usable senderNonce. */
+        wc_ForceZero(txid_gen, (word32)sizeof(txid_gen));
+        wc_ForceZero(out_nonce, SCEP_NONCE_SZ);
+        wolfcert_buffer_free(&env);
+        return WOLFCERT_ERR_WC(rng_rc, "scep",
+                               "RNG failed generating transactionID/nonce");
     }
-    txid_generated[32] = '\0';
 
-    const uint8_t* txid     = txid_override ? txid_override : (const uint8_t*)txid_generated;
-    size_t         txid_len = txid_override ? txid_override_len : 32;
+    /* Hold the transactionID on the heap rather than in a fixed buffer: an
+     * override is whatever the server chose for the earlier request, and
+     * RFC 8894 puts no length bound on it. */
+    size_t txid_len = (txid_override != NULL) ? txid_override_len
+                                              : sizeof(txid_gen) * 2;
+    uint8_t* txid = (uint8_t*)WOLFCERT_XMALLOC(txid_len, heap);
+    if (txid == NULL) {
+        wc_ForceZero(txid_gen, (word32)sizeof(txid_gen));
+        wolfcert_buffer_free(&env);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    if (txid_override != NULL) {
+        memcpy(txid, txid_override, txid_override_len);
+    }
+    else {
+        static const char HEX[] = "0123456789abcdef";
+        for (size_t i = 0; i < sizeof(txid_gen); ++i) {
+            txid[i*2]   = (uint8_t)HEX[txid_gen[i] >> 4];
+            txid[i*2+1] = (uint8_t)HEX[txid_gen[i] & 0x0F];
+        }
+    }
+    wc_ForceZero(txid_gen, (word32)sizeof(txid_gen));   /* dead once expanded */
 
     WolfCertScepAttrs attrs = {
         .transaction_id     = txid, .transaction_id_len = txid_len,
-        .sender_nonce       = nonce, .sender_nonce_len = sizeof(nonce),
+        .sender_nonce       = out_nonce, .sender_nonce_len = SCEP_NONCE_SZ,
         .message_type       = msg_type,
     };
-    WolfCertBuffer pki = { 0 };
     rc = wolfcert_scep_build_pki_message(env.data, env.len,
                                           signer_cert, signer_cert_len,
                                           signer_key, signer_key_len,
-                                          hash_oid, &attrs, &pki, heap);
+                                          hash_oid, &attrs, out_pki, heap);
 
     wolfcert_buffer_free(&env);
-    if (rc != WOLFCERT_OK)
+    if (rc != WOLFCERT_OK) {
+        WOLFCERT_XFREE(txid, heap);
         return rc;
+    }
 
-    uint8_t* resp = NULL;
-    size_t resp_len = 0;
-    rc = run_pki_op(srv, caps, pki.data, pki.len, &resp, &resp_len);
+    *out_txid     = txid;
+    *out_txid_len = txid_len;
 
-    wolfcert_buffer_free(&pki);
-    if (rc != WOLFCERT_OK)
-        return rc;
+    return WOLFCERT_OK;
+}
 
+/* Validate and consume a CertRep response: require messageType 3 with the
+ * transactionID we sent, bind the signer to the CA/RA bundle, check the
+ * recipientNonce echoes our senderNonce, then fill `out` with SUCCESS (+ the
+ * issued cert in cert_pem), PENDING, or FAILURE. Reads but does not free
+ * `resp`; `txid`/`nonce` are the values scep_prepare produced. */
+static int scep_finish(void* heap,
+                       const uint8_t* resp, size_t resp_len,
+                       const uint8_t* ca_bundle, size_t ca_bundle_len,
+                       const uint8_t* signer_cert, size_t signer_cert_len,
+                       const uint8_t* signer_key, size_t signer_key_len,
+                       const uint8_t* txid, size_t txid_len,
+                       const uint8_t* nonce,
+                       WolfCertScepResult* out)
+{
     WolfCertBuffer resp_env = { 0 };
     WolfCertBuffer inner = { 0 };
     char*   status = NULL;
@@ -578,11 +629,10 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
     size_t rx_rn_len  = 0;
     uint8_t* rx_signer = NULL;
     size_t rx_signer_len = 0;
-    rc = wolfcert_scep_parse_pki_message(resp, resp_len, &resp_env,
+    int rc = wolfcert_scep_parse_pki_message(resp, resp_len, &resp_env,
             &rx_tid, &rx_tid_len, &rx_sn, &rx_sn_len, &rx_rn, &rx_rn_len,
             &resp_mt, &status, &rx_signer, &rx_signer_len, &fail_info, heap);
 
-    WOLFCERT_XFREE(resp,   heap);
     WOLFCERT_XFREE(rx_sn,  heap);
 
     /* RFC 8894: an enrollment response is a CertRep (messageType 3) whose
@@ -617,8 +667,8 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
      * means the response cannot be tied to our request (stale / replayed /
      * cross-talk / cannot verify) -> reject. */
     if (rc == WOLFCERT_OK &&
-        (rx_rn == NULL || rx_rn_len != sizeof(nonce) ||
-         memcmp(rx_rn, nonce, sizeof(nonce)) != 0)) {
+        (rx_rn == NULL || rx_rn_len != SCEP_NONCE_SZ ||
+         memcmp(rx_rn, nonce, SCEP_NONCE_SZ) != 0)) {
         rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
                           "CertRep recipientNonce missing or does not echo "
                           "senderNonce");
@@ -666,6 +716,61 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
     WOLFCERT_XFREE(fail_info, heap);
     wolfcert_buffer_free(&inner);
     wolfcert_buffer_free(&resp_env);
+    return rc;
+}
+
+/* One-shot SCEP round trip for PKCSReq / RenewalReq / GetCertInitial: build the
+ * enveloped + signed pkiMessage (scep_prepare), POST or base64-GET it
+ * (run_pki_op), then parse + verify the CertRep and fill `out` (scep_finish).
+ * Caller retains ownership of `txid_override`; when NULL a fresh 32-hex
+ * transactionID is generated. */
+static int do_scep_round_trip(const WolfCertServerCfg* srv,
+                              const WolfCertScepCaps*   caps,
+                              const uint8_t* ra_cert, size_t ra_cert_len,
+                              const uint8_t* ca_bundle, size_t ca_bundle_len,
+                              const uint8_t* signer_cert, size_t signer_cert_len,
+                              const uint8_t* signer_key,  size_t signer_key_len,
+                              const char* msg_type,
+                              const uint8_t* envelope_content, size_t envelope_content_len,
+                              const uint8_t* txid_override, size_t txid_override_len,
+                              WolfCertScepResult* out)
+{
+    void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
+    out->heap = heap;
+    out->fail_info = -1;
+
+    WolfCertBuffer pki = { 0 };
+    uint8_t* txid = NULL;
+    size_t   txid_len = 0;
+    uint8_t  nonce[SCEP_NONCE_SZ];
+    int rc = scep_prepare(heap, caps, ra_cert, ra_cert_len,
+                          signer_cert, signer_cert_len, signer_key, signer_key_len,
+                          msg_type, envelope_content, envelope_content_len,
+                          txid_override, txid_override_len,
+                          &pki, &txid, &txid_len, nonce);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    uint8_t* resp = NULL;
+    size_t resp_len = 0;
+    rc = run_pki_op(srv, caps, pki.data, pki.len, &resp, &resp_len);
+    wolfcert_buffer_free(&pki);
+
+    if (rc == WOLFCERT_OK) {
+        rc = scep_finish(heap, resp, resp_len, ca_bundle, ca_bundle_len,
+                         signer_cert, signer_cert_len, signer_key, signer_key_len,
+                         txid, txid_len, nonce, out);
+        WOLFCERT_XFREE(resp, heap);
+    }
+
+    /* The senderNonce is raw RNG output: not a secret (it is sent in the clear
+     * in the pkiMessage) but not worth leaving on the stack either. The
+     * transactionID is a plain identifier - scep_finish hands the echoed copy
+     * straight back to the caller in out->transaction_id - so it is only
+     * freed. The signer key DER belongs to the caller, which zeroizes it. */
+    wc_ForceZero(nonce, (word32)sizeof(nonce));
+    WOLFCERT_XFREE(txid, heap);
+
     return rc;
 }
 
@@ -973,4 +1078,656 @@ int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
 
     wolfcert_http_response_free(&resp);
     return rc;
+}
+
+/* ---- keep-alive / async SCEP session ----------------------------------- */
+
+/* Which PKIOperation occupies the session's single in-flight slot. Set when a
+ * round trip begins; used to reject an async resume that names a different
+ * operation than the one already in progress. */
+enum scep_session_op {
+    SCEP_SESS_OP_PKCS_REQ = 0,
+    SCEP_SESS_OP_RENEWAL,
+    SCEP_SESS_OP_GET_CERT_INITIAL
+};
+
+struct WolfCertScepSession {
+    WolfCertHttpSession* http;
+    char*   server_url;      /* full SCEP endpoint URL, owned */
+    void*   heap;
+    int     nonblocking;     /* opened via _open_async (_nb calls) vs _open (_ex) */
+
+    /* Async in-flight state: one round trip at a time. */
+    int     in_active;
+    int     in_op;                     /* enum scep_session_op, valid when in_active */
+    char*   in_url;                    /* owned request URL */
+    WolfCertBuffer       in_pki;       /* built pkiMessage, owned (POST body) */
+    WolfCertHttpRequest  in_req;
+    WolfCertHttpResponse in_resp;
+
+    /* Captured at begin, consumed by the finish phase after the pumps: */
+    uint8_t* in_ca_bundle;   size_t in_ca_bundle_len;    /* owned copy */
+    uint8_t* in_signer;      size_t in_signer_len;       /* owned copy */
+    uint8_t* in_signer_key;  size_t in_signer_key_len;   /* owned copy, zeroized */
+    uint8_t* in_txid;        size_t in_txid_len;         /* owned, from scep_prepare */
+    uint8_t  in_nonce[SCEP_NONCE_SZ];
+    WolfCertScepResult* in_out;
+};
+
+static uint8_t* dup_buf(const uint8_t* src, size_t len, void* heap)
+{
+    if (src == NULL || len == 0)
+        return NULL;
+    uint8_t* p = (uint8_t*)WOLFCERT_XMALLOC(len, heap);
+    if (p != NULL)
+        memcpy(p, src, len);
+    return p;
+}
+
+static int scep_session_open_common(const WolfCertServerCfg* srv, int nonblocking,
+                                    WolfCertScepSession** out)
+{
+    if (srv == NULL || srv->server_url == NULL || out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
+
+    /* Split the SCEP URL into scheme://host[:port] for the HTTP session vs the
+     * path we keep for building per-operation query strings. Unlike EST there
+     * is deliberately no TLS-required gate: RFC 8894 authenticates at the
+     * pkiMessage layer and commonly runs over plaintext http://. */
+    WolfCertUrl u;
+    int rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    /* SCEP does not require TLS, but if the caller did choose an https://
+     * endpoint, refuse to run it unverified: verify_server is the sole peer-
+     * verification switch, so opening with it off would perform a silent,
+     * unauthenticated TLS handshake. Plaintext http:// stays allowed. */
+    if (u.tls && !srv->verify_server) {
+        wolfcert_http_url_free(&u);
+        return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "scep",
+            "TLS SCEP endpoint requires server authentication: set verify_server "
+            "or use a plaintext http:// URL");
+    }
+
+    char* origin = NULL;
+    rc = wolfcert_http_url_origin(&u, heap, &origin);
+    wolfcert_http_url_free(&u);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    WolfCertScepSession* s = (WolfCertScepSession*)WOLFCERT_XMALLOC(sizeof(*s), heap);
+    if (s == NULL) {
+        WOLFCERT_XFREE(origin, heap);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    memset(s, 0, sizeof(*s));
+    s->heap        = heap;
+    s->nonblocking = nonblocking;
+    s->server_url  = wolfcert_strdup(srv->server_url, heap);
+    if (s->server_url == NULL) {
+        WOLFCERT_XFREE(s, heap);
+        WOLFCERT_XFREE(origin, heap);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    WolfCertHttpSessionCfg hcfg = {
+        .base_url           = origin,
+        .trust_anchors      = srv->trust_anchors,
+        .trust_anchors_len  = srv->trust_anchors_len,
+        .verify_server      = srv->verify_server,
+        .timeout_ms         = srv->timeout_ms,
+        .max_response_bytes = srv->max_response_bytes,
+        .client_cert        = srv->client_cert,
+        .client_cert_len    = srv->client_cert_len,
+        .client_key         = srv->client_key,
+        .client_key_len     = srv->client_key_len,
+        .nonblocking        = nonblocking,
+        .connect_cb         = srv->connect_cb,
+        .connect_ctx        = srv->connect_ctx,
+        .heap               = heap,
+    };
+    rc = wolfcert_http_session_open(&hcfg, &s->http);
+
+    WOLFCERT_XFREE(origin, heap);
+    if (rc != WOLFCERT_OK) {
+        WOLFCERT_XFREE(s->server_url, heap);
+        WOLFCERT_XFREE(s, heap);
+        return rc;
+    }
+
+    *out = s;
+    return WOLFCERT_OK;
+}
+
+int wolfcert_scep_session_open(const WolfCertServerCfg* srv, WolfCertScepSession** out)
+{
+    return scep_session_open_common(srv, 0, out);
+}
+
+int wolfcert_scep_session_open_async(const WolfCertServerCfg* srv, WolfCertScepSession** out)
+{
+    return scep_session_open_common(srv, 1, out);
+}
+
+int wolfcert_scep_session_fd(const WolfCertScepSession* s)
+{
+    return s != NULL ? wolfcert_http_session_fd(s->http) : -1;
+}
+
+static void scep_async_reset(WolfCertScepSession* s)
+{
+    WOLFCERT_XFREE(s->in_url, s->heap);
+    s->in_url = NULL;
+    wolfcert_buffer_free(&s->in_pki);
+    wolfcert_http_response_free(&s->in_resp);
+    memset(&s->in_req,  0, sizeof(s->in_req));
+    memset(&s->in_resp, 0, sizeof(s->in_resp));
+
+    WOLFCERT_XFREE(s->in_ca_bundle, s->heap);
+    s->in_ca_bundle = NULL;
+    s->in_ca_bundle_len = 0;
+    WOLFCERT_XFREE(s->in_signer, s->heap);
+    s->in_signer = NULL;
+    s->in_signer_len = 0;
+    if (s->in_signer_key != NULL) {
+        wc_ForceZero(s->in_signer_key, (word32)s->in_signer_key_len);
+        WOLFCERT_XFREE(s->in_signer_key, s->heap);
+        s->in_signer_key = NULL;
+    }
+    s->in_signer_key_len = 0;
+    WOLFCERT_XFREE(s->in_txid, s->heap);
+    s->in_txid = NULL;
+    s->in_txid_len = 0;
+    /* Like the one-shot path: the senderNonce is not a secret, but there is no
+     * reason to keep RNG output in the session once the round trip is over. */
+    wc_ForceZero(s->in_nonce, (word32)sizeof(s->in_nonce));
+    s->in_out    = NULL;
+    s->in_active = 0;
+}
+
+void wolfcert_scep_session_close(WolfCertScepSession* s)
+{
+    if (s == NULL)
+        return;
+
+    scep_async_reset(s);
+    if (s->http)
+        wolfcert_http_session_close(s->http);
+
+    WOLFCERT_XFREE(s->server_url, s->heap);
+    WOLFCERT_XFREE(s, s->heap);
+}
+
+/* Build the request state for one round trip into the session. Copies the
+ * finish-phase inputs (ca_bundle, signer cert/key) so they outlive the pumps,
+ * prepares the pkiMessage, and picks POST/GET transport. */
+static int scep_session_begin(WolfCertScepSession* s, const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* signer_cert, size_t signer_cert_len,
+    const uint8_t* signer_key, size_t signer_key_len,
+    const char* msg_type, int op,
+    const uint8_t* envelope_content, size_t envelope_content_len,
+    const uint8_t* txid_override, size_t txid_override_len,
+    WolfCertScepResult* out)
+{
+    void* heap = s->heap;
+    out->heap = heap;
+    out->fail_info = -1;
+
+    /* These three buffers are copied with dup_buf below, which returns NULL for
+     * a zero length as well as for an allocation failure. Reject an empty one
+     * up front so the NULL check that follows is unambiguously OOM. All internal
+     * callers pass non-empty values (the pending-PKCSReq path derives a signer
+     * cert rather than passing length 0), so this only fires on malformed input
+     * such as a non-NULL signer cert with length 0. */
+    if (ca_bundle_len == 0 || signer_cert_len == 0 || signer_key_len == 0)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "ca_bundle, signer cert and signer key must be non-empty");
+
+    s->in_ca_bundle     = dup_buf(ca_bundle, ca_bundle_len, heap);
+    s->in_ca_bundle_len = ca_bundle_len;
+    s->in_signer        = dup_buf(signer_cert, signer_cert_len, heap);
+    s->in_signer_len    = signer_cert_len;
+    s->in_signer_key    = dup_buf(signer_key, signer_key_len, heap);
+    s->in_signer_key_len = signer_key_len;
+    if (s->in_ca_bundle == NULL || s->in_signer == NULL || s->in_signer_key == NULL) {
+        scep_async_reset(s);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
+    WolfCertBuffer pki = { 0 };
+    int rc = scep_prepare(heap, caps, ra_cert, ra_cert_len,
+                          signer_cert, signer_cert_len, signer_key, signer_key_len,
+                          msg_type, envelope_content, envelope_content_len,
+                          txid_override, txid_override_len,
+                          &pki, &s->in_txid, &s->in_txid_len, s->in_nonce);
+    if (rc != WOLFCERT_OK) {
+        scep_async_reset(s);
+        return rc;
+    }
+
+    char* url = NULL;
+    int   use_post = 0;
+    rc = scep_build_transport(s->server_url, caps, pki.data, pki.len, heap,
+                              &url, &use_post);
+    if (rc != WOLFCERT_OK) {
+        wolfcert_buffer_free(&pki);
+        scep_async_reset(s);
+        return rc;
+    }
+
+    s->in_pki = pki;   /* ownership moves to the session */
+    s->in_url = url;
+    /* Note: no max_response_bytes here - the HTTP session request path uses the
+     * cap fixed at session open (WolfCertHttpSessionCfg.max_response_bytes), not
+     * a per-request one, so setting it on in_req would be silently ignored. */
+    s->in_req = (WolfCertHttpRequest){
+        .method             = use_post ? "POST" : "GET",
+        .url                = url,
+        .heap               = heap,
+    };
+    if (use_post) {
+        s->in_req.content_type = "application/x-pki-message";
+        s->in_req.body         = s->in_pki.data;
+        s->in_req.body_len     = s->in_pki.len;
+    }
+    s->in_out    = out;
+    s->in_op     = op;
+    s->in_active = 1;
+
+    return WOLFCERT_OK;
+}
+
+/* Run scep_finish on a completed transport result and clear the in-flight
+ * state. `rc` is the transport return (already past any WANT_* handling). */
+static int scep_session_finish(WolfCertScepSession* s, int rc)
+{
+    if (rc != WOLFCERT_OK) {
+        scep_async_reset(s);
+        return rc;
+    }
+
+    if (s->in_resp.status_code != 200) {
+        scep_async_reset(s);
+        return WOLFCERT_ERR_HTTP;
+    }
+
+    rc = scep_finish(s->heap, s->in_resp.body, s->in_resp.body_len,
+                     s->in_ca_bundle, s->in_ca_bundle_len,
+                     s->in_signer, s->in_signer_len,
+                     s->in_signer_key, s->in_signer_key_len,
+                     s->in_txid, s->in_txid_len, s->in_nonce, s->in_out);
+    scep_async_reset(s);
+    return rc;
+}
+
+static int scep_session_drive_sync(WolfCertScepSession* s)
+{
+    int rc = wolfcert_http_session_request(s->http, &s->in_req, &s->in_resp);
+    return scep_session_finish(s, rc);
+}
+
+static int scep_session_drive_nb(WolfCertScepSession* s)
+{
+    int rc = wolfcert_http_session_request_nb(s->http, &s->in_req, &s->in_resp);
+    if (rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE)
+        return rc;
+    return scep_session_finish(s, rc);
+}
+
+/* Validate a resumed async _nb poll: the operation must match the one captured
+ * at begin and the result pointer must be the same object. Shared by the three
+ * _nb entry points. */
+static int scep_session_resume_check(const WolfCertScepSession* s, int expected_op,
+                                     const WolfCertScepResult* out)
+{
+    if (s->in_op != expected_op)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "a different SCEP operation is already in flight on this session");
+    if (out != s->in_out)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "result pointer differs from the in-flight request; pass the "
+            "same WolfCertScepResult* to each poll call");
+    return WOLFCERT_OK;
+}
+
+/* ---- per-operation begin helpers (run only when starting a round trip) --- */
+
+static int scep_session_begin_pkcs_req(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const WolfCertKey* new_key, const uint8_t* csr_der, size_t csr_der_len,
+    WolfCertScepResult* out)
+{
+    /* Set the fail_info sentinel before the RSA-key check and the crypto below,
+     * so an early error return carries -1 like the one-shot APIs (the entry
+     * point only memset out to 0; scep_session_begin, which also sets -1, runs
+     * after this crypto). */
+    out->fail_info = -1;
+
+    if (new_key->type != WOLFCERT_KEY_RSA)
+        return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+            "SCEP (RFC 8894) requires an RSA signer for pkiMessage");
+
+    void* heap = s->heap;
+    uint8_t* signer_der = NULL;
+    size_t   signer_len = 0;
+    int rc = wolfcert_scep_self_signed_rsa((RsaKey*)new_key->impl,
+                                            csr_der, csr_der_len,
+                                            &signer_der, &signer_len, heap);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    uint8_t* key_der = NULL;
+    size_t   key_der_len = 0;
+    rc = rsa_key_to_der(new_key, heap, &key_der, &key_der_len);
+    if (rc != WOLFCERT_OK) {
+        WOLFCERT_XFREE(signer_der, heap);
+        return rc;
+    }
+
+    rc = scep_session_begin(s, caps, ra_cert, ra_cert_len, ca_bundle, ca_bundle_len,
+                            signer_der, signer_len, key_der, key_der_len,
+                            "19", SCEP_SESS_OP_PKCS_REQ,
+                            csr_der, csr_der_len, NULL, 0, out);
+
+    WOLFCERT_XFREE(signer_der, heap);
+    wc_ForceZero(key_der, (word32)key_der_len);
+    WOLFCERT_XFREE(key_der, heap);
+    return rc;
+}
+
+static int scep_session_begin_renewal(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* current_cert, size_t current_cert_len,
+    const WolfCertKey* current_key, const uint8_t* csr_der, size_t csr_der_len,
+    WolfCertScepResult* out)
+{
+    out->fail_info = -1;   /* sentinel before the crypto below (see pkcs_req) */
+
+    if (current_key->type != WOLFCERT_KEY_RSA)
+        return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+            "SCEP (RFC 8894) requires an RSA signer for pkiMessage");
+
+    void* heap = s->heap;
+    uint8_t* key_der = NULL;
+    size_t   key_der_len = 0;
+    int rc = rsa_key_to_der(current_key, heap, &key_der, &key_der_len);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    rc = scep_session_begin(s, caps, ra_cert, ra_cert_len, ca_bundle, ca_bundle_len,
+                            current_cert, current_cert_len, key_der, key_der_len,
+                            "17", SCEP_SESS_OP_RENEWAL,
+                            csr_der, csr_der_len, NULL, 0, out);
+
+    wc_ForceZero(key_der, (word32)key_der_len);
+    WOLFCERT_XFREE(key_der, heap);
+    return rc;
+}
+
+static int scep_session_begin_get_cert_initial(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* signer_cert, size_t signer_cert_len,
+    const WolfCertKey* signer_key,
+    const uint8_t* csr_der, size_t csr_der_len,
+    const uint8_t* transaction_id, size_t transaction_id_len,
+    WolfCertScepResult* out)
+{
+    out->fail_info = -1;   /* sentinel before the crypto below (see pkcs_req) */
+
+    if (signer_key->type != WOLFCERT_KEY_RSA)
+        return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+            "SCEP (RFC 8894) requires an RSA signer for pkiMessage");
+
+    void* heap = s->heap;
+    WolfCertBuffer ias = { 0 };
+    int rc = wolfcert_scep_issuer_and_subject(ra_cert, ra_cert_len,
+                                               csr_der, csr_der_len, &ias, heap);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    uint8_t* key_der = NULL;
+    size_t   key_der_len = 0;
+    rc = rsa_key_to_der(signer_key, heap, &key_der, &key_der_len);
+    if (rc != WOLFCERT_OK) {
+        wolfcert_buffer_free(&ias);
+        return rc;
+    }
+
+    /* Pending PKCSReq: regenerate the same transient self-signed cert the
+     * original request used. RenewalReq callers pass their existing cert. */
+    uint8_t* derived = NULL;
+    size_t   derived_len = 0;
+    const uint8_t* eff     = signer_cert;
+    size_t         eff_len = signer_cert_len;
+    if (signer_cert == NULL) {
+        rc = wolfcert_scep_self_signed_rsa((RsaKey*)signer_key->impl,
+                                            csr_der, csr_der_len,
+                                            &derived, &derived_len, heap);
+        if (rc != WOLFCERT_OK) {
+            wolfcert_buffer_free(&ias);
+            wc_ForceZero(key_der, (word32)key_der_len);
+            WOLFCERT_XFREE(key_der, heap);
+            return rc;
+        }
+        eff     = derived;
+        eff_len = derived_len;
+    }
+
+    rc = scep_session_begin(s, caps, ra_cert, ra_cert_len, ca_bundle, ca_bundle_len,
+                            eff, eff_len, key_der, key_der_len,
+                            "20", SCEP_SESS_OP_GET_CERT_INITIAL, ias.data, ias.len,
+                            transaction_id, transaction_id_len, out);
+
+    wolfcert_buffer_free(&ias);
+    wc_ForceZero(key_der, (word32)key_der_len);
+    WOLFCERT_XFREE(key_der, heap);
+    WOLFCERT_XFREE(derived, heap);
+    return rc;
+}
+
+/* ---- session PKCSReq ---------------------------------------------------- */
+
+int wolfcert_scep_session_pkcs_req_ex(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const WolfCertKey* new_key, const uint8_t* csr_der, size_t csr_der_len,
+    WolfCertScepResult* out)
+{
+    if (s == NULL || caps == NULL || ra_cert == NULL || ra_cert_len == 0 ||
+            ca_bundle == NULL || ca_bundle_len == 0 || new_key == NULL ||
+            csr_der == NULL || csr_der_len == 0 || out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    if (s->nonblocking)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "blocking _ex call on an async session; use the _nb variant");
+
+    memset(out, 0, sizeof(*out));
+    int rc = scep_session_begin_pkcs_req(s, caps, ra_cert, ra_cert_len,
+                                         ca_bundle, ca_bundle_len,
+                                         new_key, csr_der, csr_der_len, out);
+    if (rc != WOLFCERT_OK)
+        return rc;
+    return scep_session_drive_sync(s);
+}
+
+int wolfcert_scep_session_pkcs_req_nb(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const WolfCertKey* new_key, const uint8_t* csr_der, size_t csr_der_len,
+    WolfCertScepResult* out)
+{
+    if (s == NULL || out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    if (!s->nonblocking)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "non-blocking _nb call on a blocking session; use the _ex variant");
+
+    if (!s->in_active) {
+        if (caps == NULL || ra_cert == NULL || ra_cert_len == 0 ||
+                ca_bundle == NULL || ca_bundle_len == 0 || new_key == NULL ||
+                csr_der == NULL || csr_der_len == 0)
+            return WOLFCERT_ERR_BAD_ARG;
+        memset(out, 0, sizeof(*out));
+        int rc = scep_session_begin_pkcs_req(s, caps, ra_cert, ra_cert_len,
+                                             ca_bundle, ca_bundle_len,
+                                             new_key, csr_der, csr_der_len, out);
+        if (rc != WOLFCERT_OK)
+            return rc;
+    }
+    else {
+        int rc = scep_session_resume_check(s, SCEP_SESS_OP_PKCS_REQ, out);
+        if (rc != WOLFCERT_OK)
+            return rc;
+    }
+    return scep_session_drive_nb(s);
+}
+
+/* ---- session RenewalReq ------------------------------------------------- */
+
+int wolfcert_scep_session_renewal_req_ex(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* current_cert, size_t current_cert_len,
+    const WolfCertKey* current_key, const uint8_t* csr_der, size_t csr_der_len,
+    WolfCertScepResult* out)
+{
+    if (s == NULL || caps == NULL || ra_cert == NULL || ra_cert_len == 0 ||
+            ca_bundle == NULL || ca_bundle_len == 0 || current_cert == NULL ||
+            current_cert_len == 0 || current_key == NULL || csr_der == NULL ||
+            csr_der_len == 0 || out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    if (s->nonblocking)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "blocking _ex call on an async session; use the _nb variant");
+
+    memset(out, 0, sizeof(*out));
+    int rc = scep_session_begin_renewal(s, caps, ra_cert, ra_cert_len,
+                                        ca_bundle, ca_bundle_len,
+                                        current_cert, current_cert_len,
+                                        current_key, csr_der, csr_der_len, out);
+    if (rc != WOLFCERT_OK)
+        return rc;
+    return scep_session_drive_sync(s);
+}
+
+int wolfcert_scep_session_renewal_req_nb(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* current_cert, size_t current_cert_len,
+    const WolfCertKey* current_key, const uint8_t* csr_der, size_t csr_der_len,
+    WolfCertScepResult* out)
+{
+    if (s == NULL || out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    if (!s->nonblocking)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "non-blocking _nb call on a blocking session; use the _ex variant");
+
+    if (!s->in_active) {
+        if (caps == NULL || ra_cert == NULL || ra_cert_len == 0 || ca_bundle == NULL ||
+                ca_bundle_len == 0 || current_cert == NULL || current_cert_len == 0 ||
+                current_key == NULL || csr_der == NULL || csr_der_len == 0)
+            return WOLFCERT_ERR_BAD_ARG;
+        memset(out, 0, sizeof(*out));
+        int rc = scep_session_begin_renewal(s, caps, ra_cert, ra_cert_len,
+                                            ca_bundle, ca_bundle_len,
+                                            current_cert, current_cert_len,
+                                            current_key, csr_der, csr_der_len, out);
+        if (rc != WOLFCERT_OK)
+            return rc;
+    }
+    else {
+        int rc = scep_session_resume_check(s, SCEP_SESS_OP_RENEWAL, out);
+        if (rc != WOLFCERT_OK)
+            return rc;
+    }
+    return scep_session_drive_nb(s);
+}
+
+/* ---- session GetCertInitial (poll) ------------------------------------- */
+
+int wolfcert_scep_session_get_cert_initial_ex(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* signer_cert, size_t signer_cert_len,
+    const WolfCertKey* signer_key,
+    const uint8_t* csr_der, size_t csr_der_len,
+    const uint8_t* transaction_id, size_t transaction_id_len,
+    WolfCertScepResult* out)
+{
+    if (s == NULL || caps == NULL || ra_cert == NULL || ra_cert_len == 0 ||
+            ca_bundle == NULL || ca_bundle_len == 0 || signer_key == NULL ||
+            csr_der == NULL || csr_der_len == 0 || transaction_id == NULL ||
+            transaction_id_len == 0 || out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    if (s->nonblocking)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "blocking _ex call on an async session; use the _nb variant");
+
+    memset(out, 0, sizeof(*out));
+    int rc = scep_session_begin_get_cert_initial(s, caps, ra_cert, ra_cert_len,
+                ca_bundle, ca_bundle_len, signer_cert, signer_cert_len, signer_key,
+                csr_der, csr_der_len, transaction_id, transaction_id_len, out);
+    if (rc != WOLFCERT_OK)
+        return rc;
+    return scep_session_drive_sync(s);
+}
+
+int wolfcert_scep_session_get_cert_initial_nb(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* signer_cert, size_t signer_cert_len,
+    const WolfCertKey* signer_key,
+    const uint8_t* csr_der, size_t csr_der_len,
+    const uint8_t* transaction_id, size_t transaction_id_len,
+    WolfCertScepResult* out)
+{
+    if (s == NULL || out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    if (!s->nonblocking)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "non-blocking _nb call on a blocking session; use the _ex variant");
+
+    if (!s->in_active) {
+        if (caps == NULL || ra_cert == NULL || ra_cert_len == 0 || ca_bundle == NULL ||
+                ca_bundle_len == 0 || signer_key == NULL || csr_der == NULL ||
+                csr_der_len == 0 || transaction_id == NULL || transaction_id_len == 0)
+            return WOLFCERT_ERR_BAD_ARG;
+        memset(out, 0, sizeof(*out));
+        int rc = scep_session_begin_get_cert_initial(s, caps, ra_cert, ra_cert_len,
+                    ca_bundle, ca_bundle_len, signer_cert, signer_cert_len, signer_key,
+                    csr_der, csr_der_len, transaction_id, transaction_id_len, out);
+        if (rc != WOLFCERT_OK)
+            return rc;
+    }
+    else {
+        int rc = scep_session_resume_check(s, SCEP_SESS_OP_GET_CERT_INITIAL, out);
+        if (rc != WOLFCERT_OK)
+            return rc;
+    }
+    return scep_session_drive_nb(s);
 }

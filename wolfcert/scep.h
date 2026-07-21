@@ -189,7 +189,9 @@ WOLFCERT_API int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
  * since its public key already matches signer_key. For a pending
  * RenewalReq, pass the cert being renewed as signer_cert.
  *
- * `transaction_id` must be the value returned by the prior request.
+ * `transaction_id` must be the value returned by the prior request. It is
+ * carried verbatim and the client imposes no length of its own, so whatever
+ * the server chose is echoed back to it unchanged.
  * `ra_cert` is the envelope target; `ca_bundle` is the trusted GetCACert bundle
  * the response signer is checked against (see wolfcert_scep_pkcs_req_ex). */
 WOLFCERT_API int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
@@ -219,6 +221,106 @@ WOLFCERT_API int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
                                                 const uint8_t* current_ca_der,
                                                 size_t current_ca_len,
                                                 WolfCertBuffer* out_next_ca_pem);
+
+/* ---- keep-alive / async SCEP session -----------------------------------
+ *
+ * A single TCP (optionally TLS) connection that carries several SCEP
+ * PKIOperation round trips, mirroring the EST session API. SCEP authenticates
+ * at the pkiMessage layer, so - unlike EST - the session does NOT require TLS:
+ * a plaintext http:// endpoint is accepted.
+ *
+ * Fetch the CA capabilities and RA/CA certificate first with the one-shot
+ * wolfcert_scep_get_ca_caps / wolfcert_scep_get_ca_cert, then drive the
+ * enrolling round trips over the session. Open with wolfcert_scep_session_open
+ * for a blocking connection, or wolfcert_scep_session_open_async for a
+ * non-blocking one whose *_nb calls return WOLFCERT_ERR_WANT_READ /
+ * WOLFCERT_ERR_WANT_WRITE (poll wolfcert_scep_session_fd(), then call again
+ * with the same arguments - and in particular the same WolfCertScepResult* out
+ * pointer, which the session captures on the first call; a later poll that
+ * passes a different out is rejected with WOLFCERT_ERR_BAD_ARG). DNS + the
+ * initial TCP connect inside session_open stay synchronous even in async mode.
+ *
+ * The blocking *_ex calls run to completion in one call and must be paired with
+ * wolfcert_scep_session_open; the *_nb calls require wolfcert_scep_session_open_async.
+ * A mismatched pairing is rejected with WOLFCERT_ERR_BAD_ARG.
+ *
+ * Transport auth: a plaintext http:// session is accepted, but an https://
+ * session requires srv->verify_server (an unverified TLS handshake is refused).
+ * The session authenticates the enrollment at the pkiMessage layer (the CMS
+ * signature bound to the CA/RA bundle, plus the PKCS#9 challengePassword) and
+ * via optional mTLS; it does NOT apply HTTP Basic auth, so srv->username /
+ * srv->password are ignored by the session API (they are an EST-oriented
+ * transport credential). */
+typedef struct WolfCertScepSession WolfCertScepSession;
+
+/* NOTE (transport, differs from the EST session): a plaintext http:// URL is
+ * accepted with no error - SCEP does not require TLS. An https:// URL still
+ * requires srv->verify_server (an unverified TLS handshake is refused). The EST
+ * session, by contrast, rejects plaintext outright. A zero-initialized
+ * WolfCertServerCfg pointed at an http:// endpoint therefore opens fine here. */
+WOLFCERT_API int  wolfcert_scep_session_open(const WolfCertServerCfg* srv,
+                                             WolfCertScepSession** out);
+WOLFCERT_API int  wolfcert_scep_session_open_async(const WolfCertServerCfg* srv,
+                                                   WolfCertScepSession** out);
+WOLFCERT_API void wolfcert_scep_session_close(WolfCertScepSession* s);
+
+/* Socket fd of the backing HTTP session - hand to poll/epoll/kqueue. */
+WOLFCERT_API int  wolfcert_scep_session_fd(const WolfCertScepSession* s);
+
+/* PKCSReq over the session. See wolfcert_scep_pkcs_req_ex for the argument
+ * contract; the result shape (status / cert_pem / transaction_id / fail_info)
+ * is identical. */
+WOLFCERT_API int wolfcert_scep_session_pkcs_req_ex(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const WolfCertKey* new_key, const uint8_t* csr_der, size_t csr_der_len,
+    WolfCertScepResult* out);
+WOLFCERT_API int wolfcert_scep_session_pkcs_req_nb(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const WolfCertKey* new_key, const uint8_t* csr_der, size_t csr_der_len,
+    WolfCertScepResult* out);
+
+/* RenewalReq over the session. The renewed public key is carried in `csr_der`
+ * and `current_key` signs the pkiMessage (see wolfcert_scep_renewal_req_ex). */
+WOLFCERT_API int wolfcert_scep_session_renewal_req_ex(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* current_cert, size_t current_cert_len,
+    const WolfCertKey* current_key, const uint8_t* csr_der, size_t csr_der_len,
+    WolfCertScepResult* out);
+WOLFCERT_API int wolfcert_scep_session_renewal_req_nb(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* current_cert, size_t current_cert_len,
+    const WolfCertKey* current_key, const uint8_t* csr_der, size_t csr_der_len,
+    WolfCertScepResult* out);
+
+/* GetCertInitial (poll a PENDING enrollment) over the session. See
+ * wolfcert_scep_get_cert_initial for the argument contract; pass the
+ * transactionID the prior request returned. */
+WOLFCERT_API int wolfcert_scep_session_get_cert_initial_ex(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* signer_cert, size_t signer_cert_len,
+    const WolfCertKey* signer_key,
+    const uint8_t* csr_der, size_t csr_der_len,
+    const uint8_t* transaction_id, size_t transaction_id_len,
+    WolfCertScepResult* out);
+WOLFCERT_API int wolfcert_scep_session_get_cert_initial_nb(WolfCertScepSession* s,
+    const WolfCertScepCaps* caps,
+    const uint8_t* ra_cert, size_t ra_cert_len,
+    const uint8_t* ca_bundle, size_t ca_bundle_len,
+    const uint8_t* signer_cert, size_t signer_cert_len,
+    const WolfCertKey* signer_key,
+    const uint8_t* csr_der, size_t csr_der_len,
+    const uint8_t* transaction_id, size_t transaction_id_len,
+    WolfCertScepResult* out);
 
 #ifdef __cplusplus
 }

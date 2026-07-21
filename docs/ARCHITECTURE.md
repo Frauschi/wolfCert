@@ -203,6 +203,17 @@ the fingerprint length) and constant-time-compares it, returning
 `WOLFCERT_ERR_AUTH` on mismatch. Verify the bundle this way before using it as
 the `ca_bundle` trust set for enrollment.
 
+**Keep-alive / async sessions.** Alongside the one-shot calls, PKCSReq,
+RenewalReq and GetCertInitial have session variants
+(`wolfcert_scep_session_pkcs_req_ex`/`_nb`, etc.) that reuse one connection,
+built on the same non-blocking HTTP session as EST (see the session section
+below). Fetch caps + the CA cert with the one-shot getters first, then open a
+session with `wolfcert_scep_session_open` (blocking) or
+`wolfcert_scep_session_open_async` (event-loop). Each round trip is
+prepared (envelope + sign), sent, and its CertRep parsed as one logical step;
+in async mode only the HTTP transport is pumped through `WANT_READ`/`WANT_WRITE`
+while the crypto stays synchronous.
+
 **Signed attributes.** The CertRep carries the full RFC 8894 §3.1
 signed-attribute set (including `recipientNonce`) — up to 9 entries alongside
 the CMS auto-defaults. wolfSSL's PKCS#7 encoder grows its signed-attribute
@@ -297,7 +308,10 @@ for (;;) {
 Key points:
 
 - **Only the session API is non-blocking.** One-shot `wolfcert_http_request` /
-  `wolfcert_est_*` / `wolfcert_scep_*` calls are blocking by design.
+  `wolfcert_est_*` / `wolfcert_scep_*` calls are blocking by design. Both EST
+  (`wolfcert_est_session_*_nb`) and SCEP (`wolfcert_scep_session_*_nb`) offer
+  non-blocking session variants; the SCEP session additionally does not require
+  TLS, since SCEP authenticates at the pkiMessage layer.
 - **DNS and the initial TCP connect stay synchronous.** Only socket operations
   *after* the session is open are non-blocking; if you can't afford a blocking
   connect, resolve and connect the socket yourself.

@@ -371,6 +371,73 @@ static int test_non_success_has_no_envelope(void)
     return rc;
 }
 
+/* A transactionID longer than the generated 32-hex one must survive a
+ * build -> parse round trip byte for byte. RFC 8894 puts no length bound on the
+ * attribute, and a client that silently truncated it would send an identifier
+ * naming a different transaction than the one it is polling for. */
+static int test_long_transaction_id(void)
+{
+    uint8_t* ca_der  = NULL;
+    size_t   ca_len  = 0;
+    uint8_t* key_der = NULL;
+    size_t   key_len = 0;
+    uint8_t  tid[200];
+    uint8_t  sn[16];
+
+    WolfCertScepAttrs attrs;
+    WolfCertBuffer    pki = { 0 };
+    WolfCertBuffer    env = { 0 };
+    char*    status = NULL;
+    char*    mt     = NULL;
+    uint8_t* rx_tid = NULL;
+    size_t   rx_tid_len = 0;
+    uint8_t* rx_sn  = NULL;
+    size_t   rx_sn_len = 0;
+    int      prc, brc, tid_ok;
+
+    REQUIRE(make_ca(&ca_der, &ca_len, &key_der, &key_len) == 0);
+
+    /* Printable-string bytes so the value is a legal PrintableString, and
+     * varying so a truncated copy cannot compare equal by accident. */
+    for (size_t i = 0; i < sizeof(tid); ++i)
+        tid[i] = (uint8_t)('A' + (i % 26));
+    memset(sn, 0xA5, sizeof(sn));
+
+    memset(&attrs, 0, sizeof(attrs));
+    attrs.transaction_id     = tid;
+    attrs.transaction_id_len = sizeof(tid);
+    attrs.sender_nonce       = sn;
+    attrs.sender_nonce_len   = sizeof(sn);
+    attrs.message_type       = "19";
+
+    brc = wolfcert_scep_build_pki_message(NULL, 0, ca_der, ca_len,
+                                          key_der, key_len, SHA256h,
+                                          &attrs, &pki, NULL);
+    if (brc == WOLFCERT_OK)
+        prc = wolfcert_scep_parse_pki_message(pki.data, pki.len, &env,
+                &rx_tid, &rx_tid_len, &rx_sn, &rx_sn_len, NULL, NULL,
+                &mt, &status, NULL, NULL, NULL, NULL);
+    else
+        prc = brc;
+
+    tid_ok = (rx_tid != NULL && rx_tid_len == sizeof(tid) &&
+              memcmp(rx_tid, tid, sizeof(tid)) == 0);
+
+    wolfcert_buffer_free(&env);
+    wolfcert_buffer_free(&pki);
+    WOLFCERT_XFREE(status, NULL);
+    WOLFCERT_XFREE(mt, NULL);
+    WOLFCERT_XFREE(rx_tid, NULL);
+    WOLFCERT_XFREE(rx_sn, NULL);
+    free(ca_der);
+    free(key_der);
+
+    REQUIRE(brc == WOLFCERT_OK);
+    REQUIRE(prc == WOLFCERT_OK);
+    REQUIRE(tid_ok);
+    return 0;
+}
+
 /* Build a PKCS#10 CSR with a distinctive multi-RDN subject, DER-encoded and
  * signed with `key`. Ownership of *csr_out passes to the caller (free with
  * free()). */
@@ -1081,6 +1148,8 @@ int main(void)
     if (test_cert_rep_signer_trust())
         return 1;
     if (test_cert_rep_txid_and_type())
+        return 1;
+    if (test_long_transaction_id())
         return 1;
     if (test_next_ca_response_is_signed())
         return 1;

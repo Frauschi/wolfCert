@@ -422,19 +422,11 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
             "the server certificate (RFC 7030)");
     }
 
-    size_t origin_len = strlen(u.scheme) + 3 + strlen(u.host) + 16;
-    char* origin = (char*)WOLFCERT_XMALLOC(origin_len, heap);
-    if (origin == NULL) {
-        wolfcert_http_url_free(&u);
-        return WOLFCERT_ERR_MEMORY;
-    }
-
-    if ((u.tls && u.port == 443) || (!u.tls && u.port == 80))
-        snprintf(origin, origin_len, "%s://%s", u.scheme, u.host);
-    else
-        snprintf(origin, origin_len, "%s://%s:%d", u.scheme, u.host, u.port);
-
+    char* origin = NULL;
+    rc = wolfcert_http_url_origin(&u, heap, &origin);
     wolfcert_http_url_free(&u);
+    if (rc != WOLFCERT_OK)
+        return rc;
 
     WolfCertEstSession* s = (WolfCertEstSession*)WOLFCERT_XMALLOC(sizeof(*s), heap);
     if (s == NULL) {

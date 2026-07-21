@@ -166,11 +166,12 @@ Minimal orientation:
   (`<wolfcert/*.h>` and `"internal.h"`) -> wolfSSL (`<wolfssl/...>`) ->
   system headers.
 - **Session vs one-shot APIs.** The non-blocking session variants
-  (`wolfcert_http_session_request_nb`, `wolfcert_est_session_*_nb`) are
-  the only non-blocking entry points; one-shot
-  `wolfcert_http_request` / `wolfcert_est_*` / `wolfcert_scep_*`
+  (`wolfcert_http_session_request_nb`, `wolfcert_est_session_*_nb`,
+  `wolfcert_scep_session_*_nb`) are the only non-blocking entry points;
+  one-shot `wolfcert_http_request` / `wolfcert_est_*` / `wolfcert_scep_*`
   calls are blocking by design. DNS + initial TCP connect remain
-  synchronous even in non-blocking mode.
+  synchronous even in non-blocking mode. The SCEP session (unlike EST)
+  does not require TLS, since SCEP authenticates at the pkiMessage layer.
 - **SCEP is RSA-only** (per RFC 8894). The SCEP entry points reject
   non-RSA keys with `WOLFCERT_ERR_UNSUPPORTED`. EST is the right
   protocol for Ed25519 / Ed448 / ML-DSA.

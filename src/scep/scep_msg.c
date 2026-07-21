@@ -100,19 +100,23 @@ static int der_put_len(byte* out, size_t cap, size_t n)
  * RFC 8894 implementation rejects.
  *
  * Returns total bytes written, or -1 if `cap` is too small. */
-static int enc_printable(const char* s, byte* out, size_t cap)
+static int enc_printable_n(const byte* v, size_t vl, byte* out, size_t cap)
 {
-    size_t sl = strlen(s);
     if (cap < 1)
         return -1;
 
     out[0] = 0x13;
-    int ll = der_put_len(out + 1, cap - 1, sl);
-    if (ll < 0 || 1 + (size_t)ll + sl > cap)
+    int ll = der_put_len(out + 1, cap - 1, vl);
+    if (ll < 0 || 1 + (size_t)ll + vl > cap)
         return -1;
 
-    memcpy(out + 1 + ll, s, sl);
-    return (int)(1 + (size_t)ll + sl);
+    memcpy(out + 1 + ll, v, vl);
+    return (int)(1 + (size_t)ll + vl);
+}
+
+static int enc_printable(const char* s, byte* out, size_t cap)
+{
+    return enc_printable_n((const byte*)s, strlen(s), out, cap);
 }
 
 static int enc_octet(const byte* v, size_t vl, byte* out, size_t cap)
@@ -152,12 +156,13 @@ static int build_signed_attribs(const WolfCertScepAttrs* a,
     }
 
     if (a->transaction_id != NULL) {
-        char tbuf[128];
-        size_t tl = a->transaction_id_len < sizeof(tbuf) - 1
-                     ? a->transaction_id_len : sizeof(tbuf) - 1;
-        memcpy(tbuf, a->transaction_id, tl);
-        tbuf[tl] = '\0';
-        int vl = enc_printable(tbuf, scratch + off, scratch_cap - off);
+        /* Encode by length, not through a NUL-terminated copy: the
+         * transactionID is a peer-chosen identifier that RFC 8894 does not
+         * bound, and quietly truncating it would put a value on the wire that
+         * no longer matches the transaction it names. Too long for the scratch
+         * buffer is an error here, never a silent trim. */
+        int vl = enc_printable_n(a->transaction_id, a->transaction_id_len,
+                                 scratch + off, scratch_cap - off);
         if (vl < 0)
             return WOLFCERT_ERR_MEMORY;
 
