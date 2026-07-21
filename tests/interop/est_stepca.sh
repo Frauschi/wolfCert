@@ -44,13 +44,36 @@ step ca init \
     --deployment-type standalone \
     >init.log 2>&1
 
+# RFC 8894 SCEP is RSA-only: the CA decrypts the pkcsPKIEnvelope with its
+# private key, which step-ca's default ECDSA chain cannot do (see
+# docs/INTEROP.md note 5). Swap in an RSA root + intermediate so the SCEP
+# decrypter - and every cert GetCACert hands the client - is RSA. step-ca uses
+# the intermediate as the SCEP decrypter when none is configured explicitly.
+# The intermediate key stays encrypted under STEP_PASSWORD (step-ca loads it at
+# startup); the throwaway root key is only needed here to sign the intermediate.
+ROOT_CRT="$STEPPATH/certs/root_ca.crt"
+ROOT_KEY="$STEPPATH/secrets/root_ca_key"
+INT_CRT="$STEPPATH/certs/intermediate_ca.crt"
+INT_KEY="$STEPPATH/secrets/intermediate_ca_key"
+step certificate create "wolfCert-interop RSA Root" "$ROOT_CRT" "$ROOT_KEY" \
+    --profile root-ca --kty RSA --size 2048 --not-after 87600h \
+    --force --no-password --insecure >rsa-root.log 2>&1
+step certificate create "wolfCert-interop RSA Intermediate" "$INT_CRT" "$INT_KEY" \
+    --profile intermediate-ca --kty RSA --size 2048 --not-after 87600h \
+    --ca "$ROOT_CRT" --ca-key "$ROOT_KEY" \
+    --force --password-file <(echo -n "$STEP_PASSWORD") >rsa-int.log 2>&1
+
 # Enable SCEP provisioner (EST is on by default in recent step-ca).
 # Configure a challenge so we exercise RFC 8894 section 2.9 end-to-end.
+# --encryption-algorithm-identifier 1 selects AES-128-CBC for the CertRep
+# content encryption (step-ca defaults to legacy DES-CBC), matching what
+# wolfcert-client advertises via GetCACaps.
 SCEP_CHALLENGE="wolfcert-interop-challenge"
 step ca provisioner add "SCEP" --type SCEP \
     --force-cn \
     --challenge "$SCEP_CHALLENGE" \
-    >scep-add.log 2>&1 || echo "    (scep provisioner add skipped: $?)"
+    --encryption-algorithm-identifier 1 \
+    >scep-add.log 2>&1
 
 CA_PORT=$(grep -oE '127\.0\.0\.1:[0-9]+' "$STEPPATH/config/ca.json" | cut -d: -f2 | head -1)
 echo "[setup] step-ca will listen on :$CA_PORT"
@@ -98,8 +121,13 @@ fi
 # ---- SCEP enrollment ------------------------------------------------------
 
 echo "[2] SCEP: wolfcert-client enroll against step-ca (RSA device key)"
+# With the RSA chain in place the pkcsPKIEnvelope encrypts and step-ca issues
+# the cert, but its CertRep is signed by github.com/smallstep/scep (the
+# micromdm library), so verifying that signature hits the same wolfSSL PKCS#7
+# gap as the micromdm interop (ASN_SIG_CONFIRM_E, -229). This is a STRICT
+# assertion by design: it fails until wolfSSL PR #10928 (pkcs7_fix) reaches
+# master, then self-heals to PASS. See docs/INTEROP.md note 5.
 SCEP_URL="https://localhost:$CA_PORT/scep/SCEP"
-set +e
 "$WC_CLIENT" enroll --proto scep \
     --url  "$SCEP_URL" \
     --trust ca-root.pem \
@@ -107,18 +135,11 @@ set +e
     --key-type rsa:2048 \
     --subject "CN=stepca-interop-scep" \
     --out-key scep.key --out-cert scep.crt \
-    >wc-scep.log 2>&1
-RC=$?
-set -e
-if [ "$RC" -eq 0 ]; then
-    openssl x509 -in scep.crt -noout -subject \
-        | grep -q "CN *= *stepca-interop-scep"
-    echo "    PASS  (cert returned; challengePassword accepted by step-ca)"
-else
-    WCDETAIL=$(grep -m1 "detail" wc-scep.log 2>/dev/null || true)
-    echo "    KNOWN-FAIL  (wolfcert-client rc=$RC - see docs/INTEROP.md note 6."
-    echo "                 ${WCDETAIL:-(no detail))}"
-fi
+    >wc-scep.log 2>&1 \
+    || { echo "    FAIL (scep enroll failed):"; cat wc-scep.log; exit 1; }
+openssl x509 -in scep.crt -noout -subject \
+    | grep -q "CN *= *stepca-interop-scep"
+echo "    PASS  (cert returned; challengePassword accepted by step-ca)"
 
 kill_if "$CA_PID"
 echo "OK"
