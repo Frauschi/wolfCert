@@ -8,7 +8,8 @@
 # `estserver` and `estclient` in PATH. Install by:
 #
 #   git clone https://github.com/cisco/libest
-#   cd libest && ./configure --with-ssl-dir=$(pkg-config --variable prefix openssl)
+#   cd libest && ./configure --disable-safec \
+#       --with-ssl-dir=$(pkg-config --variable prefix openssl)
 #   make && sudo make install
 #
 # The script exercises:
@@ -117,9 +118,7 @@ kill_if "$ES_PID"; ES_PID=""
 echo "[2] libest estclient -> wolfcert-server (HTTPS via built-in TLS)"
 EST_PORT=$(free_port)
 
-# Mint a loopback server identity specifically for wolfcert-server's
-# --tls-cert/--tls-key (no external fronting terminator required; this
-# was note 4 in docs/INTEROP.md before server-side TLS landed).
+# Mint a loopback server identity for wolfcert-server's --tls-cert/--tls-key.
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -keyout wc-srv.key -out wc-srv.crt -subj "/CN=127.0.0.1" \
     -addext "subjectAltName=IP:127.0.0.1" >/dev/null 2>&1
@@ -131,27 +130,28 @@ WC_PID=$!
 trap 'kill_if "$WC_PID"' EXIT
 wait_port 127.0.0.1 "$EST_PORT"
 
-# estclient needs to trust wc-srv.crt as the server bootstrap anchor;
-# pass it explicitly. Flag spellings vary between libest releases, so
-# try a couple and skip cleanly if none match.
-set +e
+# estclient pins the server cert as its trust anchor via --trustanchor,
+# auto-generates an RSA identity key when none is supplied (-x), and writes the
+# enrolled cert to <out_dir>/cert-<thread>-<iter>.pkcs7 as base64 PKCS#7. -o is
+# an output DIRECTORY, not a file.
+mkdir -p d2out
 estclient -e -s "127.0.0.1" -p "$EST_PORT" \
           --common-name "libest-cli-1" \
-          --pem-file wc-srv.crt -o libest-cli.crt >estclient.log 2>&1
-RC=$?
-if [ "$RC" -ne 0 ]; then
-    estclient -e -s "127.0.0.1" -p "$EST_PORT" \
-              --common-name "libest-cli-1" \
-              -c wc-srv.crt -o libest-cli.crt >>estclient.log 2>&1
-    RC=$?
-fi
-set -e
-if [ "$RC" -eq 0 ] && [ -s libest-cli.crt ]; then
-    echo "    PASS"
-else
-    echo "    SKIP  (estclient invocation did not match this libest build;"
-    echo "           adjust the trust-anchor flag for your version.)"
-fi
+          --trustanchor wc-srv.crt \
+          -o d2out >estclient.log 2>&1 \
+    || { echo "    FAIL (estclient enroll failed):"; cat estclient.log; exit 1; }
+
+# Decode the base64 PKCS#7 response and confirm wolfcert-server issued the
+# requested identity.
+# `|| true`: under `set -e`+pipefail an unmatched glob makes ls exit non-zero
+# and would abort here before the friendly guard below could report it.
+cert_p7=$(ls d2out/cert-*.pkcs7 2>/dev/null | head -1 || true)
+[ -n "$cert_p7" ] || { echo "    FAIL (no cert emitted)"; cat estclient.log; exit 1; }
+openssl base64 -d -in "$cert_p7" -out d2out/cert.p7der
+openssl pkcs7 -inform DER -in d2out/cert.p7der -print_certs -out d2out/cert.pem
+openssl x509 -in d2out/cert.pem -noout -subject \
+    | grep -q "CN *= *libest-cli-1"
+echo "    PASS"
 kill_if "$WC_PID"
 
 echo "OK"
