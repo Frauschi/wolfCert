@@ -106,7 +106,17 @@ jobs:
           sudo apt-get install -y libssl-dev
           git clone --depth 1 https://github.com/cisco/libest "$RUNNER_TEMP/libest"
           cd "$RUNNER_TEMP/libest"
-          ./configure --prefix="$RUNNER_TEMP/libest-install" --with-ssl-dir=/usr
+          # libest is archived and built for OpenSSL 1.x. OpenSSL 3.0 removed
+          # FIPS_mode()/FIPS_mode_set(), which libest still calls, so the link
+          # fails. Force-include a compat header that turns both into no-ops;
+          # doing it in a header (not -D) keeps the macro parens off gcc's
+          # command line. --disable-safec: libest now requires an explicit
+          # safec choice and we don't need the bounds-checked string library.
+          printf '%s\n' '#define FIPS_mode() 0' '#define FIPS_mode_set(x) 0' \
+            > "$RUNNER_TEMP/fips_compat.h"
+          ./configure --prefix="$RUNNER_TEMP/libest-install" --with-ssl-dir=/usr \
+            --disable-safec \
+            CFLAGS="-g -O2 -include $RUNNER_TEMP/fips_compat.h"
           make -j "$(nproc)"
           make install
           echo "$RUNNER_TEMP/libest-install/bin" >> "$GITHUB_PATH"
@@ -132,6 +142,9 @@ jobs:
       - name: Install step-ca and step CLI
         continue-on-error: true
         run: |
+          # step-ca's cgo build links libpcsclite (PC/SC, for PIV/YubiKey
+          # provisioners); without its pkg-config file the build aborts.
+          sudo apt-get install -y libpcsclite-dev
           go install github.com/smallstep/certificates/cmd/step-ca@latest
           go install github.com/smallstep/cli/cmd/step@latest
       - name: Run est_stepca.sh
