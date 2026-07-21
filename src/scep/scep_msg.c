@@ -239,6 +239,18 @@ WOLFCERT_TEST_VIS int wolfcert_scep_envelop(const uint8_t* ra_cert_der,
         return WOLFCERT_ERR_WC(rc, "scep", "InitWithCert");
     }
 
+    /* RFC 8894 is RSA-only: the pkcsPKIEnvelope is encrypted to the RA/CA
+     * public key with CMS key transport, which wolfSSL only supports for an
+     * RSA recipient. A non-RSA (e.g. ECC) RA certificate would otherwise fall
+     * through to the key-agreement path and fail deep in the encoder with
+     * BAD_KEYWRAP_ALG_E; reject it up front with an actionable diagnostic. */
+    if (p7->publicKeyOID != RSAk) {
+        wc_PKCS7_Free(p7);
+        return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+            "SCEP requires an RSA RA/CA certificate (RFC 8894); the server "
+            "presented a non-RSA key");
+    }
+
     WC_RNG rng;
     if (wc_InitRng_ex(&rng, heap, WOLFCERT_DEVID_SOFTWARE) != 0) {
         wc_PKCS7_Free(p7);

@@ -42,6 +42,9 @@
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/pkcs7.h>
 #include <wolfssl/wolfcrypt/rsa.h>
+#ifdef HAVE_ECC
+#include <wolfssl/wolfcrypt/ecc.h>
+#endif
 #include <wolfssl/wolfcrypt/random.h>
 #ifndef NO_SHA
 #include <wolfssl/wolfcrypt/sha.h>
@@ -137,6 +140,131 @@ static int make_ca(uint8_t** cert_out, size_t* cert_out_len,
     wc_FreeRng(&rng);
     return ret;
 }
+
+#ifdef HAVE_ECC
+/* Generate a throwaway self-signed ECC (P-256) CA cert, DER. Ownership of the
+ * returned buffer passes to the caller (free with free()). */
+static int make_ecc_ca(uint8_t** cert_out, size_t* cert_out_len)
+{
+    ecc_key  key;
+    WC_RNG   rng;
+    Cert*    cert = NULL;
+    uint8_t* cert_der = NULL;
+    int      ret = 0;
+    int      body_n = 0;
+    int      cert_n = 0;
+
+    if (wc_InitRng(&rng) != 0)
+        return -1;
+    if (wc_ecc_init(&key) != 0) {
+        wc_FreeRng(&rng);
+        return -1;
+    }
+
+    if (ret == 0 && wc_ecc_make_key(&rng, 32, &key) != 0)   /* 32 bytes = P-256 */
+        ret = -1;
+
+    if (ret == 0) {
+        cert_der = (uint8_t*)malloc(4096);
+        if (cert_der == NULL)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        cert = wc_CertNew(NULL);
+        if (cert == NULL)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        wc_InitCert_ex(cert, NULL, INVALID_DEVID);
+        strncpy(cert->subject.commonName, "wolfCert Test ECC CA",
+                CTC_NAME_SIZE - 1);
+        cert->subject.commonName[CTC_NAME_SIZE - 1] = '\0';
+        cert->isCA       = 1;
+        cert->selfSigned = 1;
+        cert->sigType    = CTC_SHA256wECDSA;
+        cert->daysValid  = 2;
+
+        body_n = wc_MakeCert(cert, cert_der, 4096, NULL, &key, &rng);
+        if (body_n <= 0)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        cert_n = wc_SignCert(cert->bodySz, cert->sigType, cert_der, 4096,
+                             NULL, &key, &rng);
+        if (cert_n <= 0)
+            ret = -1;
+    }
+
+    if (ret == 0) {
+        *cert_out     = cert_der;
+        *cert_out_len = (size_t)cert_n;
+        cert_der = NULL;   /* ownership transferred */
+    }
+
+    if (cert != NULL)
+        wc_CertFree(cert);
+    free(cert_der);
+    wc_ecc_free(&key);
+    wc_FreeRng(&rng);
+    return ret;
+}
+
+/* wolfcert_scep_envelop must reject a non-RSA RA certificate up front with a
+ * clear WOLFCERT_ERR_UNSUPPORTED, not fail deep in the PKCS#7 encoder with
+ * BAD_KEYWRAP_ALG_E - RFC 8894 is RSA-only. An RSA RA cert still succeeds. */
+static int test_envelop_rejects_ecc_ra(void)
+{
+    static const uint8_t payload[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
+    uint8_t* ecc_ca      = NULL;
+    size_t   ecc_ca_len  = 0;
+    uint8_t* rsa_ca      = NULL;
+    size_t   rsa_ca_len  = 0;
+    uint8_t* rsa_key     = NULL;
+    size_t   rsa_key_len = 0;
+    WolfCertBuffer ecc_env = { 0 };
+    WolfCertBuffer rsa_env = { 0 };
+    int made_ecc, made_rsa;
+    int ecc_rc = 0, rsa_rc = 0;
+    int ecc_env_empty = 0, rsa_env_ok = 0;
+
+    made_ecc = make_ecc_ca(&ecc_ca, &ecc_ca_len);
+    made_rsa = make_ca(&rsa_ca, &rsa_ca_len, &rsa_key, &rsa_key_len);
+
+    /* enc_oid is irrelevant for the ECC case: the recipient is rejected up
+     * front, before it is used. The RSA cert is the contrast that must still
+     * envelop. */
+    if (made_ecc == 0) {
+        ecc_rc = wolfcert_scep_envelop(ecc_ca, ecc_ca_len, payload,
+                                       sizeof(payload), AES128CBCb, &ecc_env,
+                                       NULL);
+        ecc_env_empty = (ecc_env.data == NULL);
+    }
+    if (made_rsa == 0) {
+        rsa_rc = wolfcert_scep_envelop(rsa_ca, rsa_ca_len, payload,
+                                       sizeof(payload), AES128CBCb, &rsa_env,
+                                       NULL);
+        rsa_env_ok = (rsa_env.data != NULL && rsa_env.len > 0);
+    }
+
+    /* Free everything before asserting so a failed REQUIRE cannot leak. */
+    wolfcert_buffer_free(&ecc_env);
+    wolfcert_buffer_free(&rsa_env);
+    free(ecc_ca);
+    free(rsa_ca);
+    free(rsa_key);
+
+    REQUIRE(made_ecc == 0);
+    REQUIRE(made_rsa == 0);
+    REQUIRE(ecc_rc == WOLFCERT_ERR_UNSUPPORTED);
+    REQUIRE(ecc_env_empty);
+    REQUIRE(rsa_rc == WOLFCERT_OK);
+    REQUIRE(rsa_env_ok);
+    return 0;
+}
+#endif /* HAVE_ECC */
 
 /* Build a FAILURE CertRep signed with hash_oid and confirm it carries no
  * pkcsPKIEnvelope and still round-trips through the parser - which must
@@ -962,6 +1090,10 @@ int main(void)
         return 1;
     if (test_signer_matches_any_bundle_cert())
         return 1;
+#ifdef HAVE_ECC
+    if (test_envelop_rejects_ecc_ra())
+        return 1;
+#endif
     wolfcert_cleanup();
     printf("OK\n");
     return 0;
