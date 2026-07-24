@@ -35,14 +35,15 @@
 
 #include "internal.h"                       /* whitebox SCEP pkiMessage helpers */
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <time.h>
 #include <unistd.h>
 
 #define REQUIRE(cond) \
@@ -185,9 +186,103 @@ static int check_get_fallback(const WolfCertServerCfg* cli,
     return rc;
 }
 
+/* Minimal single-shot HTTP responder that answers any request with a
+ * caller-supplied GetCACaps body, so a test can drive capability parsing
+ * with a body the real server would never emit. */
+struct caps_ctx { int port; const char* body; };
+
+static void* caps_srv_thread(void* arg)
+{
+    struct caps_ctx* cc = (struct caps_ctx*)arg;
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls < 0)
+        return NULL;
+    int yes = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
+                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        close(ls);
+        return NULL;
+    }
+    if (listen(ls, 1) < 0) {
+        close(ls);
+        return NULL;
+    }
+    socklen_t slen = sizeof(sa);
+    getsockname(ls, (struct sockaddr*)&sa, &slen);
+    cc->port = ntohs(sa.sin_port);
+
+    int cs = accept(ls, NULL, NULL);
+    close(ls);
+    if (cs < 0)
+        return NULL;
+
+    char buf[1024];
+    size_t n = 0;
+    while (n < sizeof(buf) - 1) {
+        ssize_t r = recv(cs, buf + n, sizeof(buf) - 1 - n, 0);
+        if (r <= 0)
+            break;
+        n += (size_t)r;
+        buf[n] = '\0';
+        if (strstr(buf, "\r\n\r\n") != NULL)
+            break;
+    }
+
+    char resp[512];
+    int rn = snprintf(resp, sizeof(resp),
+        "HTTP/1.1 200 OK\r\n"
+        "Content-Type: text/plain\r\n"
+        "Content-Length: %zu\r\n"
+        "Connection: close\r\n\r\n%s",
+        strlen(cc->body), cc->body);
+    if (rn > 0)
+        send(cs, resp, (size_t)rn, 0);
+    shutdown(cs, SHUT_WR);
+    close(cs);
+    return NULL;
+}
+
+/* RFC 8894 section 3.5.2: GetCACaps is a newline-delimited list of exact
+ * tokens. A future token that merely contains a known one as a substring
+ * (Renewal-Extra, AESGCM) must not be read as advertising that capability. */
+static int test_caps_token_matching(void)
+{
+    const char* caps_body =
+        "POSTPKIOperation\r\n"
+        "Renewal-Extra\r\n"
+        "AESGCM\r\n";
+    struct caps_ctx cc = { .port = 0, .body = caps_body };
+    pthread_t tid;
+    REQUIRE(pthread_create(&tid, NULL, caps_srv_thread, &cc) == 0);
+    for (int i = 0; i < 200 && cc.port == 0; ++i) {
+        const struct timespec ts = { 0, 5 * 1000 * 1000 };
+        nanosleep(&ts, NULL);
+    }
+    REQUIRE(cc.port != 0);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", cc.port);
+    WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
+    WolfCertScepCaps caps = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_caps(&cli, &caps) == WOLFCERT_OK);
+    pthread_join(tid, NULL);
+
+    /* Exact token still matches; substring-only lines do not. */
+    REQUIRE(caps.post_pki_operation == 1);
+    REQUIRE(caps.renewal == 0);
+    REQUIRE(caps.aes == 0);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+
+    if (test_caps_token_matching())
+        return 1;
+
     WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,
                                  .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s = NULL;
@@ -309,17 +404,19 @@ int main(void)
     WolfCertKey* dk2 = NULL;
     REQUIRE(wolfcert_key_generate(&kcfg, &dk2) == WOLFCERT_OK);
 
-    /* 1) no challenge in CSR -> server 403 -> HTTP layer returns ERR_HTTP */
+    /* 1) no challenge in CSR -> server answers with a signed CertRep FAILURE
+     * (RFC 8894 pkiStatus=2), which the client surfaces as ERR_PROTOCOL.
+     * A plain HTTP 4xx here would instead read back as ERR_HTTP. */
     WolfCertCertMeta meta_none = { .subject_dn = "CN=chal-none" };
     WolfCertBuffer csr_none = { 0 };
     REQUIRE(wolfcert_csr_build(dk2, &meta_none, &csr_none) == WOLFCERT_OK);
     WolfCertBuffer out_none = { 0 };
     REQUIRE(wolfcert_scep_pkcs_req(&cli2, &caps2, ca2_der->buffer, ca2_der->length,
                                     dk2, csr_none.data, csr_none.len, &out_none)
-            != WOLFCERT_OK);
+            == WOLFCERT_ERR_PROTOCOL);
     wolfcert_buffer_free(&csr_none);
 
-    /* 2) wrong challenge -> same rejection */
+    /* 2) wrong challenge -> same CertRep FAILURE path */
     WolfCertCertMeta meta_bad = { .subject_dn = "CN=chal-bad",
                                   .challenge_password = "battery-staple" };
     WolfCertBuffer csr_bad = { 0 };
@@ -327,7 +424,7 @@ int main(void)
     WolfCertBuffer out_bad = { 0 };
     REQUIRE(wolfcert_scep_pkcs_req(&cli2, &caps2, ca2_der->buffer, ca2_der->length,
                                     dk2, csr_bad.data, csr_bad.len, &out_bad)
-            != WOLFCERT_OK);
+            == WOLFCERT_ERR_PROTOCOL);
     wolfcert_buffer_free(&csr_bad);
 
     /* 3) correct challenge -> issuance succeeds */
@@ -421,7 +518,7 @@ int main(void)
                                   .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s3 = NULL;
     REQUIRE(wolfcert_server_start(&cfg3, &s3) == WOLFCERT_OK);
-    wolfcert_scep_server_set_faults(s3, 1 /* omit recipientNonce */, 0);
+    wolfcert_scep_server_set_faults(s3, 1 /* omit recipientNonce */, 0, 0);
     pthread_t tid3;
     REQUIRE(pthread_create(&tid3, NULL, server_thread, s3) == 0);
 
@@ -466,7 +563,7 @@ int main(void)
                                   .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s4 = NULL;
     REQUIRE(wolfcert_server_start(&cfg4, &s4) == WOLFCERT_OK);
-    wolfcert_scep_server_set_faults(s4, 0, 1 /* sign with wrong key */);
+    wolfcert_scep_server_set_faults(s4, 0, 1 /* sign with wrong key */, 0);
     pthread_t tid4;
     REQUIRE(pthread_create(&tid4, NULL, server_thread, s4) == 0);
 
@@ -500,6 +597,52 @@ int main(void)
     wolfcert_buffer_free(&csr4);
     wolfcert_buffer_free(&out4);
     wolfcert_key_free(dk4);
+
+    /* ---- senderNonce RNG failure must abort, not leak stack -------------
+     * If the RNG draw for the CertRep senderNonce fails, the server must not
+     * build a CertRep over an uninitialized buffer. It frees its scratch,
+     * answers HTTP 500, and returns an error, which the client sees as a
+     * transport failure. Drive a server whose nonce draw is forced to fail
+     * and confirm the enrollment does not succeed. This also exercises the
+     * error-path cleanup under the sanitizer builds. */
+    WolfCertServerCfgSrv cfg5 = { .protocol = WOLFCERT_PROTO_SCEP,
+                                  .bind_host = "127.0.0.1", .bind_port = 0 };
+    WolfCertServer* s5 = NULL;
+    REQUIRE(wolfcert_server_start(&cfg5, &s5) == WOLFCERT_OK);
+    wolfcert_scep_server_set_faults(s5, 0, 0, 1 /* RNG draw fails */);
+    pthread_t tid5;
+    REQUIRE(pthread_create(&tid5, NULL, server_thread, s5) == 0);
+
+    char url5[128];
+    snprintf(url5, sizeof(url5), "http://127.0.0.1:%u/scep", wolfcert_server_port(s5));
+    WolfCertServerCfg cli5 = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url5 };
+
+    WolfCertScepCaps caps5 = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_caps(&cli5, &caps5) == WOLFCERT_OK);
+    WolfCertBuffer ca5_pem = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli5, &ca5_pem) == WOLFCERT_OK);
+    DerBuffer* ca5_der = NULL;
+    REQUIRE(wc_PemToDer(ca5_pem.data, (long)ca5_pem.len, CERT_TYPE,
+                        &ca5_der, NULL, NULL, NULL) == 0);
+
+    WolfCertKey* dk5 = NULL;
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk5) == WOLFCERT_OK);
+    WolfCertCertMeta meta5 = { .subject_dn = "CN=scep-rng-fail" };
+    WolfCertBuffer csr5 = { 0 };
+    REQUIRE(wolfcert_csr_build(dk5, &meta5, &csr5) == WOLFCERT_OK);
+    WolfCertBuffer out5 = { 0 };
+    REQUIRE(wolfcert_scep_pkcs_req(&cli5, &caps5, ca5_der->buffer, ca5_der->length,
+                                   dk5, csr5.data, csr5.len, &out5)
+            == WOLFCERT_ERR_HTTP);
+
+    wolfcert_server_stop(s5);
+    pthread_join(tid5, NULL);
+    wolfcert_server_free(s5);
+    wc_FreeDer(&ca5_der);
+    wolfcert_buffer_free(&ca5_pem);
+    wolfcert_buffer_free(&csr5);
+    wolfcert_buffer_free(&out5);
+    wolfcert_key_free(dk5);
 
     wc_FreeDer(&ca_der);
     wc_FreeDer(&issued_der);

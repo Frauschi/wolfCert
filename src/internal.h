@@ -213,11 +213,12 @@ WOLFCERT_API const WolfCertServerOps* wolfcert_scep_server_ops(void);
 
 #if defined(WOLFCERT_BUILD_TESTING)
 /* Test-only fault injection for a started SCEP server: make it emit a CertRep
- * without a recipientNonce, and/or sign the CertRep with a throwaway key
- * instead of the CA key. Used to drive the client-side rejection paths. Call
- * after wolfcert_server_start and before the client request. */
+ * without a recipientNonce, sign the CertRep with a throwaway key instead of
+ * the CA key, and/or force the CertRep senderNonce RNG draw to fail. Used to
+ * drive the client-side rejection and server error paths. Call after
+ * wolfcert_server_start and before the client request. */
 WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
-    int omit_recipient_nonce, int sign_with_wrong_key);
+    int omit_recipient_nonce, int sign_with_wrong_key, int rng_fail);
 #endif
 
 /* ---- error reporting --------------------------------------------------- */

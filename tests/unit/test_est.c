@@ -40,6 +40,7 @@
 #include "../integration/tls_test_util.h"
 
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
@@ -93,7 +94,9 @@ fail:
 
 /* EST is TLS-only (RFC 7030), so the mock responder terminates TLS using a
  * self-signed identity the client pins as its trust anchor. */
-struct srv_ctx { int port; uint8_t* body; size_t len; WOLFSSL_CTX* ctx; };
+struct srv_ctx { int port; uint8_t* body; size_t len; WOLFSSL_CTX* ctx;
+                 char request[8192]; size_t request_len;
+                 int post_missing_ctenc; };
 
 static void tls_write_all(WOLFSSL* ssl, const void* buf, int len)
 {
@@ -107,7 +110,7 @@ static void tls_write_all(WOLFSSL* ssl, const void* buf, int len)
     }
 }
 
-static void handle_conn(int cs, const struct srv_ctx* sc)
+static void handle_conn(int cs, struct srv_ctx* sc)
 {
     WOLFSSL* ssl = wolfSSL_new(sc->ctx);
     if (ssl == NULL) {
@@ -156,6 +159,23 @@ static void handle_conn(int cs, const struct srv_ctx* sc)
         }
     }
 
+    /* Record the raw request so a test can inspect which headers the
+     * client emitted on the wire. The last connection wins. */
+    if (n > 0) {
+        size_t cap = sizeof(sc->request) - 1;
+        size_t cpy = (size_t)n < cap ? (size_t)n : cap;
+        memcpy(sc->request, buf, cpy);
+        sc->request[cpy] = '\0';
+        sc->request_len = cpy;
+
+        /* Every base64 enrollment POST must advertise the encoding. Count
+         * any POST that does not, so a regression in either session enroll
+         * variant is caught, not only the last request captured above. */
+        if (strncmp(sc->request, "POST", 4) == 0 &&
+            strstr(sc->request, "Content-Transfer-Encoding: base64") == NULL)
+            ++sc->post_missing_ctenc;
+    }
+
     char hdr[256];
     int hn = snprintf(hdr, sizeof(hdr),
         "HTTP/1.1 200 OK\r\n"
@@ -186,7 +206,7 @@ static void* srv_thread(void* arg)
     getsockname(ls, (struct sockaddr*)&sa, &slen);
     sc->port = ntohs(sa.sin_port);
 
-    for (int i = 0; i < 3; ++i) {
+    for (int i = 0; i < 5; ++i) {
         int cs = accept(ls, NULL, NULL);
         if (cs < 0)
             break;
@@ -282,6 +302,30 @@ static int test_est_require_server_auth(void)
     return 0;
 }
 
+/* Drive a non-blocking session enroll to completion, poll()ing on the
+ * session fd between WANT_READ / WANT_WRITE returns. */
+static int pump_simple_enroll(WolfCertEstSession* s,
+                              const uint8_t* csr, size_t csr_len,
+                              WolfCertBuffer* out)
+{
+    int fd = wolfcert_est_session_fd(s);
+    for (;;) {
+        int rc = wolfcert_est_session_simple_enroll_nb(s, csr, csr_len, out);
+        if (rc == WOLFCERT_OK)
+            return 0;
+        if (rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE) {
+            struct pollfd p = {
+                .fd = fd,
+                .events = (rc == WOLFCERT_ERR_WANT_WRITE) ? POLLOUT : POLLIN,
+            };
+            if (poll(&p, 1, 5000) <= 0)
+                return -1;
+            continue;
+        }
+        return -1;
+    }
+}
+
 int main(void)
 {
     /* The mock TLS responder may wolfSSL_write() after the client has read its
@@ -363,10 +407,42 @@ int main(void)
                                          csr.data, csr.len, &reenrolled) == WOLFCERT_OK);
     wolfcert_buffer_free(&reenrolled);
 
+    /* The session-based enroll base64-encodes the CSR too, so it must
+     * emit Content-Transfer-Encoding: base64 like the one-shot path
+     * (RFC 7030 section 4.2.1). */
+    WolfCertEstSession* sess = NULL;
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_OK);
+    WolfCertBuffer sess_enrolled = { 0 };
+    REQUIRE(wolfcert_est_session_simple_enroll(sess, csr.data, csr.len,
+                                               &sess_enrolled) == WOLFCERT_OK);
+    REQUIRE(memmem(sess_enrolled.data, sess_enrolled.len,
+                   "BEGIN CERTIFICATE", 17) != NULL);
+    wolfcert_buffer_free(&sess_enrolled);
+    wolfcert_est_session_close(sess);
+
+    /* Same requirement for the non-blocking session enroll, which shares the
+     * base64 body path: drive it through a poll loop and confirm its request
+     * carries the header too. */
+    WolfCertEstSession* sess_nb = NULL;
+    REQUIRE(wolfcert_est_session_open_async(&srv, &sess_nb) == WOLFCERT_OK);
+    WolfCertBuffer sess_nb_enrolled = { 0 };
+    REQUIRE(pump_simple_enroll(sess_nb, csr.data, csr.len,
+                               &sess_nb_enrolled) == 0);
+    REQUIRE(memmem(sess_nb_enrolled.data, sess_nb_enrolled.len,
+                   "BEGIN CERTIFICATE", 17) != NULL);
+    wolfcert_buffer_free(&sess_nb_enrolled);
+    wolfcert_est_session_close(sess_nb);
+
     wolfcert_buffer_free(&csr);
     wolfcert_key_free(dk);
     wolfcert_buffer_free(&b64);
     pthread_join(tid, NULL);
+
+    /* sc.request holds the last connection, the non-blocking enroll;
+     * post_missing_ctenc catches any POST enrollment, the blocking session
+     * variant included, that dropped the header. */
+    REQUIRE(strstr(sc.request, "Content-Transfer-Encoding: base64") != NULL);
+    REQUIRE(sc.post_missing_ctenc == 0);
     wolfSSL_CTX_free(ctx);
     free(tls_cert);
     free(tls_key);

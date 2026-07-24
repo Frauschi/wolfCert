@@ -148,6 +148,113 @@ static int read_line(const char** p, const char* end, char** ls, size_t* ll)
     return 0;
 }
 
+/* Parse the chunk-size line at raw[ri..]. On success store the chunk
+ * length in *csz and the offset just past its terminating CRLF in
+ * *next. The hex-digit count is capped at 8 so a crafted long size line
+ * cannot wrap the value past a later bounds check; 8 digits cover every
+ * chunk we accept (BODY_CAP is 1 MiB). Shared by the completeness scan
+ * and the decode pass so the two cannot drift apart.
+ *
+ * returns  0  on success
+ * returns  1  when the CRLF ending the size line has not arrived yet
+ *             (need more bytes)
+ * returns -1  when the line is malformed */
+static int read_chunk_size(const uint8_t* raw, size_t raw_len, size_t ri,
+                           size_t* csz, size_t* next)
+{
+    size_t he = ri;
+    size_t hex_digits = 0;
+    size_t v = 0;
+    int parsed = 0;
+
+    while (he + 1 < raw_len && !(raw[he] == '\r' && raw[he+1] == '\n')) {
+        ++he;
+    }
+
+    if (he + 1 >= raw_len)
+        return 1; /* size line not fully received yet */
+
+    for (size_t k = ri; k < he; ++k) {
+        char c = (char)raw[k];
+        if (c == ';')
+            break; /* chunk-ext */
+
+        int d = (c >= '0' && c <= '9') ? c - '0'
+              : (c >= 'a' && c <= 'f') ? c - 'a' + 10
+              : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
+        if (d < 0 || ++hex_digits > 8)
+            return -1; /* bad hex digit or oversized length */
+
+        v = (v << 4) | (size_t)d;
+        parsed = 1;
+    }
+    if (parsed == 0)
+        return -1; /* empty chunk-size line */
+
+    *csz  = v;
+    *next = he + 2;
+
+    return 0;
+}
+
+/* Walk chunk framing over the bytes received so far and report whether
+ * the message is complete, meaning a genuine zero-length chunk has been
+ * parsed at a chunk-header boundary. Returns 1 when reading can stop
+ * (complete, or the framing is malformed and the decode pass below will
+ * reject it) and 0 when more bytes are still needed. A substring scan
+ * for "0\r\n" cannot decide this: a chunk-size line that is a multiple
+ * of 16 and chunk data both contain those bytes. */
+static int chunked_body_complete(const uint8_t* raw, size_t raw_len)
+{
+    size_t ri = 0;
+    size_t ls = 0;
+
+    while (ri < raw_len) {
+        size_t csz = 0;
+        size_t next = 0;
+        int r = read_chunk_size(raw, raw_len, ri, &csz, &next);
+        if (r > 0)
+            return 0; /* chunk-size line not fully received yet */
+        if (r < 0)
+            return 1; /* malformed line - the decode pass rejects it */
+
+        /* read_chunk_size guarantees next <= raw_len, so ri stays
+         * <= raw_len and the raw_len - ri math below cannot underflow. */
+        ri = next;
+        if (csz == 0) {
+            /* Last-chunk marker. RFC 7230: the message ends only after
+             * the CRLF terminating the trailer section (minimum
+             * "0\r\n\r\n"). Stopping at "0\r\n" would leave that CRLF
+             * unread on the socket and corrupt the next request on a
+             * keep-alive connection. Consume any trailer field lines up
+             * to the terminating blank line before declaring complete. */
+            while (ri < raw_len) {
+                ls = ri;
+                while (ri + 1 < raw_len &&
+                       !(raw[ri] == '\r' && raw[ri + 1] == '\n')) {
+                    ++ri;
+                }
+
+                if (ri + 1 >= raw_len)
+                    return 0; /* trailer line CRLF not fully received */
+                if (ri == ls)
+                    return 1; /* blank line terminates the trailers */
+
+                ri += 2; /* skip this trailer field line, scan the next */
+            }
+
+            return 0; /* trailer terminator not yet received */
+        }
+
+        if (raw_len - ri < 2 || csz > raw_len - ri - 2)
+            return 0; /* chunk payload plus trailing CRLF not yet received */
+
+        ri += csz + 2;
+    }
+
+    return 0;
+}
+
 static int parse_request(WolfCertServer* s, int fd, EstRequest* out, void* heap)
 {
     memset(out, 0, sizeof(*out));
@@ -266,20 +373,7 @@ static int parse_request(WolfCertServer* s, int fd, EstRequest* out, void* heap)
             raw_cap = body_have;
         }
 
-        int saw_end = 0;
-        while (!saw_end) {
-            /* Any "0\r\n" at a chunk-header position marks the end. */
-            for (size_t i = 0; i + 2 < raw_len; ++i) {
-                if (raw[i] == '0' && raw[i+1] == '\r' && raw[i+2] == '\n') {
-                    /* Cheap heuristic: treat the last occurrence as the
-                     * terminator. The decode pass below revalidates. */
-                    saw_end = 1;
-                }
-            }
-
-            if (saw_end)
-                break;
-
+        while (!chunked_body_complete(raw, raw_len)) {
             size_t grow = raw_len < 2048 ? 2048 : raw_len;
             if (raw_len + grow > BODY_CAP + 64 * 1024) {
                 WOLFCERT_XFREE(raw, heap);
@@ -312,51 +406,18 @@ static int parse_request(WolfCertServer* s, int fd, EstRequest* out, void* heap)
 
         size_t body_sz = 0, ri = 0;
         while (ri < raw_len) {
-            /* Locate the end of the chunk-size line. */
-            size_t he = ri;
-            while (he + 1 < raw_len && !(raw[he] == '\r' && raw[he+1] == '\n')) {
-                ++he;
-            }
-
-            if (he + 1 >= raw_len)
-                break;
-
-            unsigned long csz = 0;
-            int parsed = 0;
-            size_t hex_digits = 0;
-            for (size_t k = ri; k < he; ++k) {
-                char c = (char)raw[k];
-                if (c == ';')
-                    break; /* chunk-ext */
-
-                int d = (c >= '0' && c <= '9') ? c - '0'
-                      : (c >= 'a' && c <= 'f') ? c - 'a' + 10
-                      : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
-                if (d < 0) {
-                    parsed = -1;
-                    break;
-                }
-
-                /* Cap the hex-digit count so a crafted long chunk-size
-                 * line can't silently wrap `csz` to a small value that
-                 * then sneaks past the `ri + csz > raw_len` check. 8
-                 * digits cover every legitimate chunk we'd ever accept
-                 * (BODY_CAP is 1 MiB). */
-                if (++hex_digits > 8) {
-                    parsed = -1;
-                    break;
-                }
-
-                csz = (csz << 4) | (unsigned long)d;
-                parsed = 1;
-            }
-            if (parsed <= 0) {
+            size_t csz = 0;
+            size_t next = 0;
+            int r = read_chunk_size(raw, raw_len, ri, &csz, &next);
+            if (r > 0)
+                break; /* chunk-size line not fully received */
+            if (r < 0) {
                 WOLFCERT_XFREE(body, heap);
                 WOLFCERT_XFREE(raw, heap);
                 return WOLFCERT_ERR_PROTOCOL;
             }
 
-            ri = he + 2;
+            ri = next;
             if (csz == 0)
                 break;
 
@@ -663,7 +724,7 @@ static int csr__take_tl(const uint8_t* p, size_t avail,
         h = 2 + n;
     }
 
-    if (h + l > avail)
+    if (l > avail - h)
         return -1;
 
     *len = l;

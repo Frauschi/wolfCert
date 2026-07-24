@@ -592,12 +592,15 @@ int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
         }
 
         s->in_req = (WolfCertHttpRequest){
-            .method = "POST", .url = s->in_url,
-            .content_type = "application/pkcs10",
-            .accept       = "application/pkcs7-mime",
-            .body = s->in_body.data, .body_len = s->in_body.len,
-            .max_response_bytes = s->max_body,
-            .heap = s->heap,
+            .method                    = "POST",
+            .url                       = s->in_url,
+            .content_type              = "application/pkcs10",
+            .content_transfer_encoding = "base64",
+            .accept                    = "application/pkcs7-mime",
+            .body                      = s->in_body.data,
+            .body_len                  = s->in_body.len,
+            .max_response_bytes        = s->max_body,
+            .heap                      = s->heap,
         };
         s->in_out    = out_cert_pem;
         s->in_op     = EST_OP_SIMPLE_ENROLL;
@@ -696,12 +699,15 @@ int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
     }
 
     WolfCertHttpRequest req = {
-        .method             = "POST", .url = url,
-        .content_type       = "application/pkcs10",
-        .accept             = "application/pkcs7-mime",
-        .body               = b64.data, .body_len = b64.len,
-        .max_response_bytes = s->max_body,
-        .heap               = s->heap,
+        .method                    = "POST",
+        .url                       = url,
+        .content_type              = "application/pkcs10",
+        .content_transfer_encoding = "base64",
+        .accept                    = "application/pkcs7-mime",
+        .body                      = b64.data,
+        .body_len                  = b64.len,
+        .max_response_bytes        = s->max_body,
+        .heap                      = s->heap,
     };
     WolfCertHttpResponse resp = { 0 };
     rc = wolfcert_http_session_request(s->http, &req, &resp);

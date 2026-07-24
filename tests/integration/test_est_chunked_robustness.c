@@ -29,6 +29,10 @@
  *   2. Corrupt inter-chunk trailer (bytes where CRLF should be).
  *   3. Well-formed sanity baseline so the test fails loudly if the
  *      server stops accepting chunked altogether.
+ *   4. Well-formed body split across three TCP segments with a
+ *      chunk-size line ending in the bytes '0' '\r' '\n'.
+ *   5. Keep-alive correctness when the last-chunk trailer CRLF arrives
+ *      in its own segment, so a following request is not corrupted.
  *
  * The target is `src/est/est_server.c`'s parse_request chunked path;
  * no TLS is involved so we can script the byte-exact request here.
@@ -42,13 +46,19 @@
 #include <wolfcert/wolfcert.h>
 #include <wolfcert/server.h>
 
+#include "tls_test_util.h"      /* TEST_ENROLL_KEY_TYPE / _PARAM */
+
+#include <wolfssl/wolfcrypt/coding.h>   /* Base64_Encode_NoNl */
+
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
+#include <time.h>
 #include <unistd.h>
 
 #define REQUIRE(cond) \
@@ -106,6 +116,18 @@ static int send_and_read_status(uint16_t port,
     close(cs);
     status_line[n < cap ? n : cap - 1] = '\0';
     return (int)n;
+}
+
+/* Sleep helper that nudges the request segments below toward landing in
+ * distinct recv() calls rather than being coalesced into one buffer.
+ * Best-effort only: TCP guarantees no recv() boundaries, so this just
+ * makes the intended segmentation likely, not certain. */
+static void nap_ms(long ms)
+{
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000L;
+    nanosleep(&ts, NULL);
 }
 
 /* Shape #1: a chunk-size line longer than 8 hex digits. The parser
@@ -176,8 +198,208 @@ static int accept_wellformed_chunks(uint16_t port)
     return 0;
 }
 
+/* Shape #4: a well-formed chunked body delivered across three TCP
+ * segments, with a chunk-size line ("10" = 16 bytes) that ends in the
+ * bytes '0' '\r' '\n'. A completion check that scans for "0\r\n"
+ * anywhere in the accumulated buffer trips on that size line the moment
+ * the first partial segment lands, stops reading before the rest of the
+ * body arrives, and the request is truncated. The framer must instead
+ * track chunk framing and keep reading until a genuine zero-length
+ * chunk, so the full body reaches the CSR layer and comes back
+ * "400 Bad CSR" rather than the "400 Bad Request" a truncated request
+ * produces. */
+static int accept_multisegment_chunked_body(uint16_t port)
+{
+    const char* hdr =
+        "POST /.well-known/est/simpleenroll HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: application/pkcs10\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "\r\n";
+    const char* seg2 = "10\r\nAAAA";                /* size line + 4/16 bytes */
+    const char* seg3 = "AAAAAAAAAAAA\r\n0\r\n\r\n"; /* last 12 bytes + terminator */
+    struct sockaddr_in sa = { .sin_family = AF_INET,
+                              .sin_port = htons(port),
+                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    char status[128] = { 0 };
+    size_t n = 0;
+    int cs = socket(AF_INET, SOCK_STREAM, 0);
+
+    REQUIRE(cs >= 0);
+    REQUIRE(connect(cs, (struct sockaddr*)&sa, sizeof(sa)) == 0);
+
+    REQUIRE(send(cs, hdr, strlen(hdr), 0) == (ssize_t)strlen(hdr));
+    nap_ms(80);
+    (void)send(cs, seg2, strlen(seg2), 0);
+    nap_ms(80);
+    (void)send(cs, seg3, strlen(seg3), 0);
+
+    while (n + 1 < sizeof(status)) {
+        ssize_t r = recv(cs, status + n, sizeof(status) - 1 - n, 0);
+        if (r <= 0)
+            break;
+        n += (size_t)r;
+        status[n] = '\0';
+        if (memchr(status, '\n', n) != NULL)
+            break;
+    }
+    close(cs);
+
+    REQUIRE(strstr(status, "Bad CSR") != NULL);
+    return 0;
+}
+
+/* Build a chunked simpleenroll request whose body carries a real,
+ * base64-encoded CSR in a single chunk, but split so the last-chunk line
+ * ("0\r\n") is delivered separately from its terminating trailer CRLF.
+ * *head gets "<headers>\r\n<len>\r\n<b64-csr>\r\n0\r\n" and *tail gets the
+ * lone "\r\n". Both are heap-allocated; the caller frees them. */
+static int build_split_enroll(char** head, size_t* head_len, char** tail)
+{
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE,
+                            .param = TEST_ENROLL_KEY_PARAM,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertCertMeta meta = { .subject_dn = "CN=keepalive-test" };
+    WolfCertKey* key = NULL;
+    WolfCertBuffer csr = { 0 };
+    byte* b64 = NULL;
+    word32 b64_len = 0;
+    char* buf = NULL;
+    char* trl = NULL;
+    size_t hdr_len = 0;
+    int rc;
+
+    rc = wolfcert_key_generate(&kcfg, &key);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_csr_build(key, &meta, &csr);
+
+    if (rc == WOLFCERT_OK) {
+        b64_len = (word32)(((csr.len + 2) / 3) * 4 + 4);
+        b64 = (byte*)malloc(b64_len);
+        if (b64 == NULL ||
+            Base64_Encode_NoNl(csr.data, (word32)csr.len, b64, &b64_len) != 0)
+            rc = WOLFCERT_ERR_CRYPTO;
+    }
+
+    if (rc == WOLFCERT_OK) {
+        /* headers + chunk-size line + base64 body + CRLF + "0\r\n" */
+        buf = (char*)malloc(512 + b64_len);
+        trl = strdup("\r\n"); /* trailer terminator, sent as its own segment */
+        if (buf == NULL || trl == NULL)
+            rc = WOLFCERT_ERR_MEMORY;
+    }
+
+    if (rc == WOLFCERT_OK) {
+        hdr_len = (size_t)snprintf(buf, 256,
+            "POST /.well-known/est/simpleenroll HTTP/1.1\r\n"
+            "Host: 127.0.0.1\r\n"
+            "Content-Type: application/pkcs10\r\n"
+            "Content-Transfer-Encoding: base64\r\n"
+            "Transfer-Encoding: chunked\r\n"
+            "\r\n"
+            "%x\r\n", (unsigned)b64_len);
+        memcpy(buf + hdr_len, b64, b64_len);
+        hdr_len += b64_len;
+        memcpy(buf + hdr_len, "\r\n0\r\n", 5); /* end chunk, last-chunk line */
+        hdr_len += 5;
+
+        *head = buf;
+        *head_len = hdr_len;
+        *tail = trl;
+        buf = NULL; /* ownership handed to caller */
+        trl = NULL;
+    }
+
+    free(b64);
+    free(buf); /* NULL on success; frees the partial build on failure */
+    free(trl);
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(key);
+    return (rc == WOLFCERT_OK) ? 0 : 1;
+}
+
+/* Shape #5: keep-alive correctness when a chunked request's terminating
+ * trailer CRLF arrives in its own TCP segment. A framer that treats
+ * "0\r\n" as complete before that final CRLF stops one byte-pair short
+ * and leaves "\r\n" on the socket; the next request on the same
+ * keep-alive connection then parses the stray CRLF as an empty request
+ * line and comes back "400 Bad Request". The corruption is only
+ * observable once request #1 succeeds and keeps the connection alive, so
+ * request #1 enrolls a real CSR (the in-tree server issues against its
+ * generated CA -> "200"). Request #2 is a body-less GET so a mis-parse
+ * closes cleanly with the "400 Bad Request" visible (no reset). With the
+ * framer consuming the trailer terminator, request #2 reaches the
+ * cacerts handler and no "Bad Request" appears. */
+static int keepalive_after_split_trailer(uint16_t port)
+{
+    const char* req2 =
+        "GET /.well-known/est/cacerts HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    struct sockaddr_in sa = { .sin_family = AF_INET,
+                              .sin_port = htons(port),
+                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    char* req1_head = NULL;
+    char* req1_tail = NULL;
+    size_t req1_head_len = 0;
+    char resp[4096] = { 0 };
+    size_t n = 0;
+    int cs;
+
+    REQUIRE(build_split_enroll(&req1_head, &req1_head_len, &req1_tail) == 0);
+
+    cs = socket(AF_INET, SOCK_STREAM, 0);
+    REQUIRE(cs >= 0);
+    REQUIRE(connect(cs, (struct sockaddr*)&sa, sizeof(sa)) == 0);
+
+    /* Request #1: last-chunk line first, trailer CRLF withheld into its
+     * own segment so a premature "0\r\n" completion leaves it unread. */
+    REQUIRE(send(cs, req1_head, req1_head_len, 0) == (ssize_t)req1_head_len);
+    nap_ms(80);
+    REQUIRE(send(cs, req1_tail, strlen(req1_tail), 0)
+            == (ssize_t)strlen(req1_tail));
+
+    /* Wait for request #1's response head before sending request #2. */
+    while (n + 1 < sizeof(resp)) {
+        ssize_t r = recv(cs, resp + n, sizeof(resp) - 1 - n, 0);
+        if (r <= 0)
+            break;
+        n += (size_t)r;
+        resp[n] = '\0';
+        if (strstr(resp, "\r\n\r\n") != NULL)
+            break;
+    }
+    REQUIRE(strstr(resp, "200") != NULL); /* enrollment issued a cert */
+
+    REQUIRE(send(cs, req2, strlen(req2), 0) == (ssize_t)strlen(req2));
+
+    /* Drain until the server closes (request #2 asked for Connection:
+     * close), appending onto the same buffer. */
+    while (n + 1 < sizeof(resp)) {
+        ssize_t r = recv(cs, resp + n, sizeof(resp) - 1 - n, 0);
+        if (r <= 0)
+            break;
+        n += (size_t)r;
+        resp[n] = '\0';
+    }
+    close(cs);
+    free(req1_head);
+    free(req1_tail);
+
+    /* Request #2 must have reached the cacerts handler, not the framer:
+     * a "Bad Request" means the stray trailer CRLF corrupted it. */
+    REQUIRE(strstr(resp, "Bad Request") == NULL);
+    return 0;
+}
+
 int main(void)
 {
+    /* A truncated request makes the server respond and close while the
+     * client is still writing later segments; ignore the resulting
+     * SIGPIPE and read the response back instead. */
+    signal(SIGPIPE, SIG_IGN);
+
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
     WolfCertServerCfgSrv cfg = {
@@ -196,6 +418,10 @@ int main(void)
         rc = reject_corrupt_chunk_trailer(port);
     if (rc == 0)
         rc = accept_wellformed_chunks(port);
+    if (rc == 0)
+        rc = accept_multisegment_chunked_body(port);
+    if (rc == 0)
+        rc = keepalive_after_split_trailer(port);
 
     wolfcert_server_stop(srv);
     pthread_join(tid, NULL);
