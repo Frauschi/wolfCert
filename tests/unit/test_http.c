@@ -79,6 +79,42 @@ static int test_url_parser(void)
     return 0;
 }
 
+/* wolfcert_http_url_origin: default-port omission, non-default port, and the
+ * BAD_ARG guard - the helper is shared by the EST and SCEP session opens. */
+static int test_url_origin(void)
+{
+    WolfCertUrl u;
+    char* origin = NULL;
+
+    /* Default ports (https:443, http:80) are omitted. */
+    REQUIRE(wolfcert_http_url_parse("https://ca.example.com/scep", &u, NULL) == WOLFCERT_OK);
+    REQUIRE(wolfcert_http_url_origin(&u, NULL, &origin) == WOLFCERT_OK);
+    REQUIRE(strcmp(origin, "https://ca.example.com") == 0);
+    WOLFCERT_XFREE(origin, NULL); origin = NULL;
+    wolfcert_http_url_free(&u);
+
+    REQUIRE(wolfcert_http_url_parse("http://host.example/x", &u, NULL) == WOLFCERT_OK);
+    REQUIRE(wolfcert_http_url_origin(&u, NULL, &origin) == WOLFCERT_OK);
+    REQUIRE(strcmp(origin, "http://host.example") == 0);
+    WOLFCERT_XFREE(origin, NULL); origin = NULL;
+    wolfcert_http_url_free(&u);
+
+    /* A non-default port is included. */
+    REQUIRE(wolfcert_http_url_parse("http://host.example:8080/x", &u, NULL) == WOLFCERT_OK);
+    REQUIRE(wolfcert_http_url_origin(&u, NULL, &origin) == WOLFCERT_OK);
+    REQUIRE(strcmp(origin, "http://host.example:8080") == 0);
+    WOLFCERT_XFREE(origin, NULL); origin = NULL;
+    wolfcert_http_url_free(&u);
+
+    /* NULL url and NULL out are rejected. */
+    REQUIRE(wolfcert_http_url_origin(NULL, NULL, &origin) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_http_url_parse("https://h/x", &u, NULL) == WOLFCERT_OK);
+    REQUIRE(wolfcert_http_url_origin(&u, NULL, NULL) == WOLFCERT_ERR_BAD_ARG);
+    wolfcert_http_url_free(&u);
+
+    return 0;
+}
+
 struct srv_ctx { int port; };
 
 static void* srv_thread(void* arg)
@@ -479,6 +515,8 @@ int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     if (test_url_parser())
+        return 1;
+    if (test_url_origin())
         return 1;
     if (test_loopback_http())
         return 1;

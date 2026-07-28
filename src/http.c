@@ -73,6 +73,35 @@ WOLFCERT_TEST_VIS void wolfcert_http_url_free(WolfCertUrl* u)
     u->scheme = u->host = u->path = NULL;
 }
 
+/* Build the "scheme://host[:port]" origin for a parsed URL into a freshly
+ * allocated buffer (owned by the caller, free with WOLFCERT_XFREE). The default
+ * port (443 for TLS, 80 otherwise) is omitted. Shared by the EST and SCEP
+ * session opens so the two origin builders cannot drift. */
+WOLFCERT_TEST_VIS int wolfcert_http_url_origin(const WolfCertUrl* u, void* heap,
+                                               char** out_origin)
+{
+    size_t origin_len;
+    char*  origin;
+
+    if (u == NULL || u->scheme == NULL || u->host == NULL || out_origin == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    /* scheme + "://" (3) + host + the optional ":65535" and NUL; 16 leaves the
+     * port suffix room to spare rather than sizing it to the digit. */
+    origin_len = strlen(u->scheme) + 3 + strlen(u->host) + 16;
+    origin = (char*)WOLFCERT_XMALLOC(origin_len, heap);
+    if (origin == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    if ((u->tls && u->port == 443) || (!u->tls && u->port == 80))
+        snprintf(origin, origin_len, "%s://%s", u->scheme, u->host);
+    else
+        snprintf(origin, origin_len, "%s://%s:%d", u->scheme, u->host, u->port);
+
+    *out_origin = origin;
+    return WOLFCERT_OK;
+}
+
 static char* dup_range(const char* s, const char* e, void* heap)
 {
     size_t n = (size_t)(e - s);

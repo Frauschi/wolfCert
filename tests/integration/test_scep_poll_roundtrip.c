@@ -151,9 +151,27 @@ static int poll_path(WolfCertServer* s)
      * the client must surface it in the result. */
     REQUIRE(r3.fail_info == 4);
 
+    /* Step 4: the caller's transactionID is copied to a heap buffer sized to
+     * it, so a value far longer than the generated 32-hex one is sent on the
+     * wire (FAILURE/badCertId again) instead of being rejected up front. */
+    uint8_t long_tid[200];
+    memset(long_tid, 0x11, sizeof(long_tid));
+    WolfCertScepResult r4 = { 0 };
+    rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
+                                        ca_der->buffer, ca_der->length,
+                                        NULL, 0,
+                                        dk, csr.data, csr.len,
+                                        long_tid, sizeof(long_tid),
+                                        &r4);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(r4.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE(r4.fail_info == 4);
+
     wolfcert_scep_result_free(&r1);
     wolfcert_scep_result_free(&r2);
     wolfcert_scep_result_free(&r3);
+    wolfcert_scep_result_free(&r4);
     wc_FreeDer(&ca_der);
     wolfcert_buffer_free(&ca_pem);
     wolfcert_buffer_free(&csr);
