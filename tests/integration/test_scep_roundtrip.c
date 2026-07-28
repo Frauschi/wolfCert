@@ -43,7 +43,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
-#include <time.h>
 #include <unistd.h>
 
 #define REQUIRE(cond) \
@@ -189,32 +188,42 @@ static int check_get_fallback(const WolfCertServerCfg* cli,
 /* Minimal single-shot HTTP responder that answers any request with a
  * caller-supplied GetCACaps body, so a test can drive capability parsing
  * with a body the real server would never emit. */
-struct caps_ctx { int port; const char* body; };
+struct caps_ctx { int listen_fd; const char* body; };
 
-static void* caps_srv_thread(void* arg)
+/* Bind a loopback listener and report the ephemeral port it landed on.
+ * Callers run this before spawning the responder thread, so the port never
+ * has to travel back across the thread boundary. */
+static int listen_loopback(int* port)
 {
-    struct caps_ctx* cc = (struct caps_ctx*)arg;
     int ls = socket(AF_INET, SOCK_STREAM, 0);
     if (ls < 0)
-        return NULL;
+        return -1;
     int yes = 1;
     setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
     struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
                               .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
     if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
         close(ls);
-        return NULL;
+        return -1;
     }
     if (listen(ls, 1) < 0) {
         close(ls);
-        return NULL;
+        return -1;
     }
     socklen_t slen = sizeof(sa);
-    getsockname(ls, (struct sockaddr*)&sa, &slen);
-    cc->port = ntohs(sa.sin_port);
+    if (getsockname(ls, (struct sockaddr*)&sa, &slen) < 0) {
+        close(ls);
+        return -1;
+    }
+    *port = ntohs(sa.sin_port);
+    return ls;
+}
 
-    int cs = accept(ls, NULL, NULL);
-    close(ls);
+static void* caps_srv_thread(void* arg)
+{
+    struct caps_ctx* cc = (struct caps_ctx*)arg;
+    int cs = accept(cc->listen_fd, NULL, NULL);
+    close(cc->listen_fd);
     if (cs < 0)
         return NULL;
 
@@ -253,17 +262,15 @@ static int test_caps_token_matching(void)
         "POSTPKIOperation\r\n"
         "Renewal-Extra\r\n"
         "AESGCM\r\n";
-    struct caps_ctx cc = { .port = 0, .body = caps_body };
+    struct caps_ctx cc = { .listen_fd = -1, .body = caps_body };
     pthread_t tid;
+    int port = 0;
+    cc.listen_fd = listen_loopback(&port);
+    REQUIRE(cc.listen_fd >= 0);
     REQUIRE(pthread_create(&tid, NULL, caps_srv_thread, &cc) == 0);
-    for (int i = 0; i < 200 && cc.port == 0; ++i) {
-        const struct timespec ts = { 0, 5 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
-    }
-    REQUIRE(cc.port != 0);
 
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", cc.port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
     WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
     WolfCertScepCaps caps = { 0 };
     REQUIRE(wolfcert_scep_get_ca_caps(&cli, &caps) == WOLFCERT_OK);

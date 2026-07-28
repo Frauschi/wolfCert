@@ -33,7 +33,6 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <unistd.h>
-#include <time.h>
 
 #define REQUIRE(cond) \
     do {                                                                    \
@@ -115,32 +114,42 @@ static int test_url_origin(void)
     return 0;
 }
 
-struct srv_ctx { int port; };
+struct srv_ctx { int listen_fd; };
 
-static void* srv_thread(void* arg)
+/* Bind a loopback listener and report the ephemeral port it landed on.
+ * Callers run this before spawning the responder thread, so the port never
+ * has to travel back across the thread boundary. */
+static int listen_loopback(int* port)
 {
-    struct srv_ctx* sc = (struct srv_ctx*)arg;
     int ls = socket(AF_INET, SOCK_STREAM, 0);
     if (ls < 0)
-        return NULL;
+        return -1;
     int yes = 1;
     setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
     struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
                               .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
     if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
         close(ls);
-        return NULL;
+        return -1;
     }
     if (listen(ls, 1) < 0) {
         close(ls);
-        return NULL;
+        return -1;
     }
     socklen_t slen = sizeof(sa);
-    getsockname(ls, (struct sockaddr*)&sa, &slen);
-    sc->port = ntohs(sa.sin_port);
+    if (getsockname(ls, (struct sockaddr*)&sa, &slen) < 0) {
+        close(ls);
+        return -1;
+    }
+    *port = ntohs(sa.sin_port);
+    return ls;
+}
 
-    int cs = accept(ls, NULL, NULL);
-    close(ls);
+static void* srv_thread(void* arg)
+{
+    struct srv_ctx* sc = (struct srv_ctx*)arg;
+    int cs = accept(sc->listen_fd, NULL, NULL);
+    close(sc->listen_fd);
     if (cs < 0)
         return NULL;
 
@@ -175,15 +184,13 @@ static int test_loopback_http(void)
 {
     struct srv_ctx sc = { 0 };
     pthread_t tid;
+    int port = 0;
+    sc.listen_fd = listen_loopback(&port);
+    REQUIRE(sc.listen_fd >= 0);
     REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);
-    for (int i = 0; i < 200 && sc.port == 0; ++i) {
-        const struct timespec ts = { 0, 5 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
-    }
-    REQUIRE(sc.port != 0);
 
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/test", sc.port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/test", port);
     const char* body = "ping";
     WolfCertHttpRequest req = {
         .method = "POST", .url = url,
@@ -206,27 +213,8 @@ static int test_loopback_http(void)
 static void* srv_retry_thread(void* arg)
 {
     struct srv_ctx* sc = (struct srv_ctx*)arg;
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0)
-        return NULL;
-    int yes = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
-                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
-    if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
-        close(ls);
-        return NULL;
-    }
-    if (listen(ls, 1) < 0) {
-        close(ls);
-        return NULL;
-    }
-    socklen_t slen = sizeof(sa);
-    getsockname(ls, (struct sockaddr*)&sa, &slen);
-    sc->port = ntohs(sa.sin_port);
-
-    int cs = accept(ls, NULL, NULL);
-    close(ls);
+    int cs = accept(sc->listen_fd, NULL, NULL);
+    close(sc->listen_fd);
     if (cs < 0)
         return NULL;
 
@@ -273,27 +261,8 @@ static void* srv_retry_thread(void* arg)
 static void* srv_thread_overflow(void* arg)
 {
     struct srv_ctx* sc = (struct srv_ctx*)arg;
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0)
-        return NULL;
-    int yes = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
-                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
-    if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
-        close(ls);
-        return NULL;
-    }
-    if (listen(ls, 1) < 0) {
-        close(ls);
-        return NULL;
-    }
-    socklen_t slen = sizeof(sa);
-    getsockname(ls, (struct sockaddr*)&sa, &slen);
-    sc->port = ntohs(sa.sin_port);
-
-    int cs = accept(ls, NULL, NULL);
-    close(ls);
+    int cs = accept(sc->listen_fd, NULL, NULL);
+    close(sc->listen_fd);
     if (cs < 0)
         return NULL;
 
@@ -353,17 +322,15 @@ static int test_session_retry_after_reset(void)
 {
     struct srv_ctx sc = { 0 };
     pthread_t tid;
+    int port = 0;
+    sc.listen_fd = listen_loopback(&port);
+    REQUIRE(sc.listen_fd >= 0);
     REQUIRE(pthread_create(&tid, NULL, srv_retry_thread, &sc) == 0);
-    for (int i = 0; i < 200 && sc.port == 0; ++i) {
-        const struct timespec ts = { 0, 5 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
-    }
-    REQUIRE(sc.port != 0);
 
     char base[128];
     char url[160];
-    snprintf(base, sizeof(base), "http://127.0.0.1:%d", sc.port);
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/test", sc.port);
+    snprintf(base, sizeof(base), "http://127.0.0.1:%d", port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/test", port);
 
     WolfCertHttpSessionCfg cfg = {
         .base_url = base,
@@ -395,15 +362,13 @@ static int test_chunked_size_overflow(void)
 {
     struct srv_ctx sc = { 0 };
     pthread_t tid;
+    int port = 0;
+    sc.listen_fd = listen_loopback(&port);
+    REQUIRE(sc.listen_fd >= 0);
     REQUIRE(pthread_create(&tid, NULL, srv_thread_overflow, &sc) == 0);
-    for (int i = 0; i < 200 && sc.port == 0; ++i) {
-        const struct timespec ts = { 0, 5 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
-    }
-    REQUIRE(sc.port != 0);
 
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/test", sc.port);
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/test", port);
     const char* body = "ping";
     WolfCertHttpRequest req = {
         .method = "POST", .url = url,
@@ -424,34 +389,15 @@ static int test_chunked_size_overflow(void)
 /* Capture the request headers a client sends so the test can inspect
  * which headers were emitted on the wire. */
 struct capture_ctx {
-    int  port;
+    int  listen_fd;
     char request[4096];
 };
 
 static void* srv_thread_capture(void* arg)
 {
     struct capture_ctx* cc = (struct capture_ctx*)arg;
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0)
-        return NULL;
-    int yes = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
-                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
-    if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
-        close(ls);
-        return NULL;
-    }
-    if (listen(ls, 1) < 0) {
-        close(ls);
-        return NULL;
-    }
-    socklen_t slen = sizeof(sa);
-    getsockname(ls, (struct sockaddr*)&sa, &slen);
-    cc->port = ntohs(sa.sin_port);
-
-    int cs = accept(ls, NULL, NULL);
-    close(ls);
+    int cs = accept(cc->listen_fd, NULL, NULL);
+    close(cc->listen_fd);
     if (cs < 0)
         return NULL;
 
@@ -484,16 +430,14 @@ static int test_request_transfer_encoding(void)
 {
     struct capture_ctx cc = { 0 };
     pthread_t tid;
+    int port = 0;
+    cc.listen_fd = listen_loopback(&port);
+    REQUIRE(cc.listen_fd >= 0);
     REQUIRE(pthread_create(&tid, NULL, srv_thread_capture, &cc) == 0);
-    for (int i = 0; i < 200 && cc.port == 0; ++i) {
-        const struct timespec ts = { 0, 5 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
-    }
-    REQUIRE(cc.port != 0);
 
     char url[128];
     snprintf(url, sizeof(url),
-             "http://127.0.0.1:%d/.well-known/est/simpleenroll", cc.port);
+             "http://127.0.0.1:%d/.well-known/est/simpleenroll", port);
     const char* body = "Zm9vYmFy\r\n";
     WolfCertHttpRequest req = {
         .method = "POST", .url = url,

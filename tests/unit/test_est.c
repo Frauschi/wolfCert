@@ -47,7 +47,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
 #define REQUIRE(cond) \
@@ -94,9 +93,38 @@ fail:
 
 /* EST is TLS-only (RFC 7030), so the mock responder terminates TLS using a
  * self-signed identity the client pins as its trust anchor. */
-struct srv_ctx { int port; uint8_t* body; size_t len; WOLFSSL_CTX* ctx;
+struct srv_ctx { int listen_fd; uint8_t* body; size_t len; WOLFSSL_CTX* ctx;
                  char request[8192]; size_t request_len;
                  int post_missing_ctenc; };
+
+/* Bind a loopback listener and report the ephemeral port it landed on.
+ * Callers run this before spawning the responder thread, so the port never
+ * has to travel back across the thread boundary. */
+static int listen_loopback(int* port)
+{
+    int ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls < 0)
+        return -1;
+    int yes = 1;
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
+                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
+    if (bind(ls, (struct sockaddr*)&sa, sizeof(sa)) < 0) {
+        close(ls);
+        return -1;
+    }
+    if (listen(ls, 2) < 0) {
+        close(ls);
+        return -1;
+    }
+    socklen_t slen = sizeof(sa);
+    if (getsockname(ls, (struct sockaddr*)&sa, &slen) < 0) {
+        close(ls);
+        return -1;
+    }
+    *port = ntohs(sa.sin_port);
+    return ls;
+}
 
 static void tls_write_all(WOLFSSL* ssl, const void* buf, int len)
 {
@@ -193,26 +221,14 @@ static void handle_conn(int cs, struct srv_ctx* sc)
 static void* srv_thread(void* arg)
 {
     struct srv_ctx* sc = (struct srv_ctx*)arg;
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0)
-        return NULL;
-    int yes = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
-    struct sockaddr_in sa = { .sin_family = AF_INET, .sin_port = htons(0),
-                              .sin_addr.s_addr = htonl(INADDR_LOOPBACK) };
-    bind(ls, (struct sockaddr*)&sa, sizeof(sa));
-    listen(ls, 2);
-    socklen_t slen = sizeof(sa);
-    getsockname(ls, (struct sockaddr*)&sa, &slen);
-    sc->port = ntohs(sa.sin_port);
 
     for (int i = 0; i < 5; ++i) {
-        int cs = accept(ls, NULL, NULL);
+        int cs = accept(sc->listen_fd, NULL, NULL);
         if (cs < 0)
             break;
         handle_conn(cs, sc);
     }
-    close(ls);
+    close(sc->listen_fd);
     return NULL;
 }
 
@@ -370,15 +386,13 @@ int main(void)
 
     struct srv_ctx sc = { .body = b64.data, .len = b64.len, .ctx = ctx };
     pthread_t tid;
+    int port = 0;
+    sc.listen_fd = listen_loopback(&port);
+    REQUIRE(sc.listen_fd >= 0);
     REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);
-    for (int i = 0; i < 200 && sc.port == 0; ++i) {
-        const struct timespec ts = { 0, 5 * 1000 * 1000 };
-        nanosleep(&ts, NULL);
-    }
-    REQUIRE(sc.port != 0);
 
     char url[128];
-    snprintf(url, sizeof(url), "https://127.0.0.1:%d/.well-known/est", sc.port);
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/.well-known/est", port);
     WolfCertServerCfg srv = { .protocol = WOLFCERT_PROTO_EST, .server_url = url,
                               .trust_anchors = tls_cert,
                               .trust_anchors_len = tls_cert_len,
