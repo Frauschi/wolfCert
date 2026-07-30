@@ -1131,10 +1131,95 @@ static int test_pki_get_url(void)
     return 0;
 }
 
+/* wolfcert_scep_build_getca_url: omits message= when no CA identifier is set,
+ * appends it (URL-encoded) when one is. */
+static int test_getca_url(void)
+{
+    /* The URLs come from the wolfCert heap, so they are released with
+     * WOLFCERT_XFREE and not free(): under WOLFSSL_NO_MALLOC that heap is a
+     * static pool and libc never saw the pointer. */
+    char* u;
+
+    u = wolfcert_scep_build_getca_url("http://ca.example/scep", "GetCACert", NULL, NULL);
+    REQUIRE(u != NULL);
+    REQUIRE(strcmp(u, "http://ca.example/scep?operation=GetCACert") == 0);
+    WOLFCERT_XFREE(u, NULL);
+
+    /* An empty identifier is treated as unset. */
+    u = wolfcert_scep_build_getca_url("http://ca.example/scep", "GetCACaps", "", NULL);
+    REQUIRE(u != NULL);
+    REQUIRE(strcmp(u, "http://ca.example/scep?operation=GetCACaps") == 0);
+    WOLFCERT_XFREE(u, NULL);
+
+    u = wolfcert_scep_build_getca_url("http://ca.example/scep", "GetCACert", "MyCA", NULL);
+    REQUIRE(u != NULL);
+    REQUIRE(strcmp(u, "http://ca.example/scep?operation=GetCACert&message=MyCA") == 0);
+    WOLFCERT_XFREE(u, NULL);
+
+    /* Reserved characters in the identifier must be percent-encoded. */
+    u = wolfcert_scep_build_getca_url("http://ca.example/scep", "GetCACert", "a b/c", NULL);
+    REQUIRE(u != NULL);
+    REQUIRE(strcmp(u,
+        "http://ca.example/scep?operation=GetCACert&message=a%20b%2Fc") == 0);
+    WOLFCERT_XFREE(u, NULL);
+
+    return 0;
+}
+
+/* Only meaningful where wolfSSL can actually run an AES-CBC content cipher. */
+#if defined(HAVE_AES_CBC) && \
+        (defined(WOLFSSL_AES_128) || defined(WOLFSSL_AES_256))
+/* The content-cipher choice reaches the wire: enveloping with AES256CBCb /
+ * AES128CBCb yields a message carrying the matching AES-CBC OID. */
+static int test_envelop_cipher_oid(void)
+{
+#if defined(WOLFSSL_AES_256)
+    static const uint8_t OID_AES256[] =
+        { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x01,0x2a };
+#endif
+    static const uint8_t OID_AES128[] =
+        { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x01,0x02 };
+    const uint8_t payload[] = "content-encryption OID probe";
+
+    uint8_t* ca_der  = NULL;
+    uint8_t* key_der = NULL;
+    size_t   ca_len  = 0, key_len = 0;
+    REQUIRE(make_ca(&ca_der, &ca_len, &key_der, &key_len) == 0);
+
+#if defined(WOLFSSL_AES_256) && defined(HAVE_AES_CBC)
+    WolfCertBuffer env256 = { 0 };
+    REQUIRE(wolfcert_scep_envelop(ca_der, ca_len, payload, sizeof(payload),
+                                  AES256CBCb, &env256, NULL) == WOLFCERT_OK);
+    REQUIRE(memmem(env256.data, env256.len, OID_AES256, sizeof(OID_AES256)) != NULL);
+    REQUIRE(memmem(env256.data, env256.len, OID_AES128, sizeof(OID_AES128)) == NULL);
+    wolfcert_buffer_free(&env256);
+#endif
+
+#if defined(WOLFSSL_AES_128) && defined(HAVE_AES_CBC)
+    WolfCertBuffer env128 = { 0 };
+    REQUIRE(wolfcert_scep_envelop(ca_der, ca_len, payload, sizeof(payload),
+                                  AES128CBCb, &env128, NULL) == WOLFCERT_OK);
+    REQUIRE(memmem(env128.data, env128.len, OID_AES128, sizeof(OID_AES128)) != NULL);
+    wolfcert_buffer_free(&env128);
+#endif
+
+    free(ca_der);
+    free(key_der);
+    return 0;
+}
+#endif /* HAVE_AES_CBC && (WOLFSSL_AES_128 || WOLFSSL_AES_256) */
+
 int main(void)
 {
     REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
+    if (test_getca_url())
+        return 1;
+#if defined(HAVE_AES_CBC) && \
+        (defined(WOLFSSL_AES_128) || defined(WOLFSSL_AES_256))
+    if (test_envelop_cipher_oid())
+        return 1;
+#endif
     if (test_ca_fingerprint())
         return 1;
     if (test_pki_get_url())

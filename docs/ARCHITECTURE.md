@@ -214,6 +214,19 @@ prepared (envelope + sign), sent, and its CertRep parsed as one logical step;
 in async mode only the HTTP transport is pumped through `WANT_READ`/`WANT_WRITE`
 while the crypto stays synchronous.
 
+**Client options** (`WolfCertServerCfg`, all zero-init to the default behavior):
+- `scep_ca_id` — CA identifier sent as `message=<id>` on GetCACaps / GetCACert
+  to select a specific CA on a multi-CA responder; omitted when NULL.
+- `scep_txid_mode` — `WOLFCERT_SCEP_TXID_RANDOM` (default) or `..._PUBKEY_HASH`,
+  which derives the transactionID as the SHA-256 of the signer
+  public key (RFC 8894 §3.2.1) so retries of the same key reuse one
+  ID. Matches wolfSCEP's derivation.
+- `scep_content_cipher` — `WOLFCERT_SCEP_CIPHER_AUTO` (default: the caps-driven
+  AES-128-CBC / 3DES choice) or an explicit `AES128` / `AES256` / `DES3`.
+  There is no GetCACaps token for AES-256, so forcing it is a deliberate choice
+  for a peer that requires it (e.g. a wolfSCEP deployment); the envelope is
+  self-describing, so any AES-capable recipient decrypts it by OID.
+
 **Signed attributes.** The CertRep carries the full RFC 8894 §3.1
 signed-attribute set (including `recipientNonce`) — up to 9 entries alongside
 the CMS auto-defaults. wolfSSL's PKCS#7 encoder grows its signed-attribute

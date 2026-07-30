@@ -45,6 +45,18 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+/* Content-encryption cipher the CertRep EnvelopedData carries. Mirrors the
+ * client's AUTO choice: RFC 8894 section 3.5.2's "AES" capability names
+ * AES-128-CBC and nothing else, with the mandatory-to-implement triple DES-CBC
+ * as the fallback for a wolfSSL that cannot do AES-128. */
+#if defined(WOLFSSL_AES_128) && defined(HAVE_AES_CBC)
+    #define SCEP_SRV_ENC_OID AES128CBCb
+#elif !defined(NO_DES3)
+    #define SCEP_SRV_ENC_OID DES3b
+#else
+    #error "wolfCert's SCEP test server needs AES-128-CBC or 3DES-CBC; rebuild wolfSSL with one of them, or configure without the test server"
+#endif
+
 typedef struct {
     /* rawbuf owns the request-line + header bytes read off the wire. It is
      * heap-allocated (REQ_BUF_SZ + QUERY_SZ) so an RFC 8894 GET PKIOperation,
@@ -503,7 +515,7 @@ static int send_cert_rep(WolfCertServer* s, int fd,
         }
 
         rc = wolfcert_scep_envelop(env_target, env_target_len,
-                                    p7.data, p7.len, AES128CBCb, &resp_env,
+                                    p7.data, p7.len, SCEP_SRV_ENC_OID, &resp_env,
                                     s->heap);
 
         wolfcert_buffer_free(&p7);

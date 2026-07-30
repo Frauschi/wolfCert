@@ -355,6 +355,12 @@ WOLFCERT_TEST_VIS int wolfcert_scep_envelop(const uint8_t* ra_cert_der,
  * WOLFCERT_SCEP_MAX_GET_URL. Exposed for white-box testing. */
 WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_get_url(const char* base,
     const uint8_t* pki_msg, size_t pki_len, void* heap, char** out_url);
+
+/* Build a GetCACaps / GetCACert URL: base?operation=<op>[&message=<ca_id>].
+ * The CA identifier is appended (URL-encoded) only when ca_id is non-NULL and
+ * non-empty. Returns a heap-allocated URL owned by the caller, or NULL. */
+WOLFCERT_TEST_VIS char* wolfcert_scep_build_getca_url(const char* base,
+    const char* op, const char* ca_id, void* heap);
 int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_cert_len,
                             const uint8_t* recipient_key_der,  size_t recipient_key_len,
                             const uint8_t* env_der, size_t env_len,

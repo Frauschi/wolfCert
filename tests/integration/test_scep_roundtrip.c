@@ -185,6 +185,122 @@ static int check_get_fallback(const WolfCertServerCfg* cli,
     return rc;
 }
 
+/* WolfCertServerCfg.scep_txid_mode = PUBKEY_HASH: the transactionID must be the
+ * 64-char upper-case hex SHA-256 of the enrollee SubjectPublicKeyInfo, must
+ * match a value recomputed from the CSR, and must be deterministic (a second
+ * enrollment of the same key reuses it). Owns and frees everything it makes. */
+static int check_pubkey_txid(const WolfCertServerCfg* cli,
+                             const WolfCertScepCaps* caps,
+                             const WolfCertKeyCfg* kcfg,
+                             const uint8_t* ca_der_buf, size_t ca_der_len)
+{
+    WolfCertServerCfg cli_ph = *cli;
+    WolfCertCertMeta  meta = { .subject_dn = "CN=device-txid" };
+    WolfCertKey*      key = NULL;
+    WolfCertBuffer    csr = { 0 };
+    WolfCertScepResult r1 = { 0 }, r2 = { 0 };
+    int rc;
+
+    cli_ph.scep_txid_mode = WOLFCERT_SCEP_TXID_PUBKEY_HASH;
+
+    rc = wolfcert_key_generate(kcfg, &key);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_csr_build(key, &meta, &csr);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_scep_pkcs_req_ex(&cli_ph, caps, ca_der_buf, ca_der_len,
+                                       ca_der_buf, ca_der_len, key,
+                                       csr.data, csr.len, &r1);
+    if (rc == WOLFCERT_OK && r1.status != WOLFCERT_SCEP_STATUS_SUCCESS)
+        rc = -1;
+    if (rc == WOLFCERT_OK && r1.transaction_id_len != 64)   /* SHA-256 hex */
+        rc = -1;
+
+    /* Recompute SHA-256(SPKI) from the CSR and compare, upper-case hex. */
+    if (rc == WOLFCERT_OK) {
+        DecodedCert dc;
+        wc_InitDecodedCert(&dc, csr.data, (word32)csr.len, NULL);
+        if (wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL) != 0) {
+            rc = -1;
+        }
+        else {
+            uint8_t digest[WC_SHA256_DIGEST_SIZE];
+            if (wc_Sha256Hash(dc.publicKey, dc.pubKeySize, digest) != 0) {
+                rc = -1;
+            }
+            else {
+                static const char H[] = "0123456789ABCDEF";
+                char hex[2 * WC_SHA256_DIGEST_SIZE];
+                for (int i = 0; i < WC_SHA256_DIGEST_SIZE; i++) {
+                    hex[i*2]   = H[digest[i] >> 4];
+                    hex[i*2+1] = H[digest[i] & 0x0F];
+                }
+                if (memcmp(r1.transaction_id, hex, sizeof(hex)) != 0)
+                    rc = -1;
+            }
+        }
+        /* Freed on both branches: wc_ParseCert allocates before it can fail. */
+        wc_FreeDecodedCert(&dc);
+    }
+
+    /* Deterministic: enrolling the same key again reuses the transactionID. */
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_scep_pkcs_req_ex(&cli_ph, caps, ca_der_buf, ca_der_len,
+                                       ca_der_buf, ca_der_len, key,
+                                       csr.data, csr.len, &r2);
+    if (rc == WOLFCERT_OK &&
+        (r2.transaction_id_len != r1.transaction_id_len ||
+         memcmp(r1.transaction_id, r2.transaction_id, r1.transaction_id_len) != 0))
+        rc = -1;
+
+    wolfcert_scep_result_free(&r1);
+    wolfcert_scep_result_free(&r2);
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(key);
+    return rc;
+}
+
+/* The content-cipher checks force an AES-CBC cipher, so they only exist when
+ * wolfSSL can supply one. */
+#if defined(HAVE_AES_CBC) && \
+        (defined(WOLFSSL_AES_128) || defined(WOLFSSL_AES_256))
+#define WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE
+#endif
+
+#ifdef WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE
+/* WolfCertServerCfg.scep_content_cipher override: enrolling with an explicit
+ * cipher must still issue a cert - the server de-envelops whatever OID the
+ * request carries - proving AES-256 (and explicit AES-128) interoperate. */
+static int check_content_cipher(const WolfCertServerCfg* cli,
+                                const WolfCertScepCaps* caps,
+                                const WolfCertKeyCfg* kcfg,
+                                const uint8_t* ca_der_buf, size_t ca_der_len,
+                                WolfCertScepContentCipher cipher)
+{
+    WolfCertServerCfg c = *cli;
+    WolfCertCertMeta  meta = { .subject_dn = "CN=device-cipher" };
+    WolfCertKey*      key = NULL;
+    WolfCertBuffer    csr = { 0 }, issued = { 0 };
+    int rc;
+
+    c.scep_content_cipher = cipher;
+
+    rc = wolfcert_key_generate(kcfg, &key);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_csr_build(key, &meta, &csr);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_scep_pkcs_req(&c, caps, ca_der_buf, ca_der_len, key,
+                                    csr.data, csr.len, &issued);
+    if (rc == WOLFCERT_OK &&
+            memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) == NULL)
+        rc = -1;
+
+    wolfcert_buffer_free(&issued);
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(key);
+    return rc;
+}
+#endif /* WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE */
+
 /* Minimal single-shot HTTP responder that answers any request with a
  * caller-supplied GetCACaps body, so a test can drive capability parsing
  * with a body the real server would never emit. */
@@ -345,6 +461,24 @@ int main(void)
      * buffer so a failing assertion cannot leak them. */
     REQUIRE(check_get_fallback(&cli, &caps, &kcfg,
                                ca_der->buffer, ca_der->length) == WOLFCERT_OK);
+
+    /* ---- Public-key-hash transactionID (RFC 8894 section 3.2.1) ----------- */
+    REQUIRE(check_pubkey_txid(&cli, &caps, &kcfg,
+                              ca_der->buffer, ca_der->length) == WOLFCERT_OK);
+
+    /* ---- Content-cipher override: explicit AES-256 and AES-128 both enroll.
+     * Each half needs the cipher wolfSSL was actually built with; scep_prepare
+     * returns WOLFCERT_ERR_UNSUPPORTED for one the library cannot do. */
+#if defined(WOLFSSL_AES_256) && defined(HAVE_AES_CBC)
+    REQUIRE(check_content_cipher(&cli, &caps, &kcfg, ca_der->buffer,
+                                 ca_der->length, WOLFCERT_SCEP_CIPHER_AES256)
+            == WOLFCERT_OK);
+#endif
+#if defined(WOLFSSL_AES_128) && defined(HAVE_AES_CBC)
+    REQUIRE(check_content_cipher(&cli, &caps, &kcfg, ca_der->buffer,
+                                 ca_der->length, WOLFCERT_SCEP_CIPHER_AES128)
+            == WOLFCERT_OK);
+#endif
 
     /* Negative GET PKIOperation branches (RFC 8894 section 4.1): the server must
      * reject each malformed request with 400. These cannot be produced by the

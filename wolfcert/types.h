@@ -153,6 +153,22 @@ typedef struct {
     void*                  customize_ctx;
 } WolfCertCertMeta;
 
+/* SCEP transactionID derivation (WolfCertServerCfg.scep_txid_mode). */
+typedef enum {
+    WOLFCERT_SCEP_TXID_RANDOM      = 0, /* random 16-byte value, hex-encoded (default) */
+    WOLFCERT_SCEP_TXID_PUBKEY_HASH = 1  /* SHA-256 of the signer public key */
+} WolfCertScepTxidMode;
+
+/* SCEP request content-encryption cipher (WolfCertServerCfg.scep_content_cipher).
+ * AUTO keeps the RFC 8894 caps-driven default; the explicit values force a
+ * cipher for a known peer (e.g. a wolfSCEP deployment that requires AES-256). */
+typedef enum {
+    WOLFCERT_SCEP_CIPHER_AUTO   = 0, /* AES-128-CBC when the CA advertises AES, else 3DES */
+    WOLFCERT_SCEP_CIPHER_AES128 = 1,
+    WOLFCERT_SCEP_CIPHER_AES256 = 2,
+    WOLFCERT_SCEP_CIPHER_DES3   = 3
+} WolfCertScepContentCipher;
+
 typedef struct {
     WolfCertProtocol protocol;
     const char*      server_url;     /* e.g. https://ca.example/.well-known/est */
@@ -213,6 +229,25 @@ typedef struct {
      * while wolfCert keeps doing the HTTP and (via wolfSSL) TLS I/O. */
     WolfCertConnectFn connect_cb;
     void*            connect_ctx;
+
+    /* ---- SCEP-only options (ignored by EST) ----------------------------
+     * All three are zero-init-safe: the default value preserves wolfCert's
+     * pre-existing behavior. */
+
+    /* CA identifier sent as the `message` query parameter on GetCACaps and
+     * GetCACert (RFC 8894 section 3.5.2 / 4.2), used to select a specific CA on
+     * a multi-CA responder. NULL (the default) omits the parameter. */
+    const char*               scep_ca_id;
+
+    /* How the enrollment pkiMessage transactionID is derived. RANDOM (default)
+     * uses fresh RNG bytes; PUBKEY_HASH derives it from the signer public key
+     * (RFC 8894 section 3.2.1) so retries of the same key reuse one ID. */
+    WolfCertScepTxidMode      scep_txid_mode;
+
+    /* Content-encryption cipher for the request EnvelopedData. AUTO (default)
+     * keeps the RFC 8894 caps-driven choice (AES-128-CBC, else 3DES); an
+     * explicit value forces that cipher for a peer that requires it. */
+    WolfCertScepContentCipher scep_content_cipher;
 
     /* Heap hint for any library-internal allocations made while servicing
      * this request. NULL = library default. */
