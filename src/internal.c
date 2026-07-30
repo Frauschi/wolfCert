@@ -287,6 +287,23 @@ WOLFCERT_TEST_VIS int wolfcert_base64_decode(const uint8_t* in, size_t in_len,
     return WOLFCERT_OK;
 }
 
+WOLFCERT_TEST_VIS void wolfcert_hex_encode(const uint8_t* in, size_t in_len,
+                                           int upper, char* out)
+{
+    static const char HEX_LOWER[] = "0123456789abcdef";
+    static const char HEX_UPPER[] = "0123456789ABCDEF";
+    const char* hex = upper ? HEX_UPPER : HEX_LOWER;
+    size_t i;
+
+    if (in == NULL || out == NULL)
+        return;
+
+    for (i = 0; i < in_len; ++i) {
+        out[i*2]   = hex[in[i] >> 4];
+        out[i*2+1] = hex[in[i] & 0x0F];
+    }
+}
+
 WOLFCERT_TEST_VIS int wolfcert_buffer_is_der(const uint8_t* buf, size_t len)
 {
     size_t i = 0;

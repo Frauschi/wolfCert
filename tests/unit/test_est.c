@@ -255,6 +255,38 @@ static int test_oid_to_dotted(void)
     return 0;
 }
 
+/* wolfcert_hex_encode writes exactly 2 * in_len characters in the requested
+ * case and touches nothing beyond them (callers such as url_encode and the SCEP
+ * transactionID builders rely on both properties). */
+static int test_hex_encode(void)
+{
+    const uint8_t in[] = { 0x00, 0x0f, 0xa5, 0xff };
+    char out[16];
+
+    memset(out, 'x', sizeof(out));
+    wolfcert_hex_encode(in, sizeof(in), 0, out);
+    REQUIRE(memcmp(out, "000fa5ff", 8) == 0);
+    REQUIRE(out[8] == 'x');                  /* no NUL terminator, no overrun */
+
+    memset(out, 'x', sizeof(out));
+    wolfcert_hex_encode(in, sizeof(in), 1, out);
+    REQUIRE(memcmp(out, "000FA5FF", 8) == 0);
+    REQUIRE(out[8] == 'x');
+
+    /* Single-byte encoding, the shape url_encode uses per escaped byte. */
+    memset(out, 'x', sizeof(out));
+    wolfcert_hex_encode(in + 2, 1, 1, out);
+    REQUIRE(memcmp(out, "A5", 2) == 0);
+    REQUIRE(out[2] == 'x');
+
+    /* Zero length and NULL input must leave the buffer alone. */
+    wolfcert_hex_encode(in, 0, 1, out);
+    wolfcert_hex_encode(NULL, sizeof(in), 1, out);
+    REQUIRE(out[0] == 'A' && out[1] == '5' && out[2] == 'x');
+
+    return 0;
+}
+
 /* RFC 7030 mandates that an EST client authenticate the server. In this
  * transport verify_server is the only switch that turns on peer verification,
  * so any config that leaves it at its zero default must be refused - with or
@@ -353,6 +385,9 @@ int main(void)
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
     if (test_oid_to_dotted())
+        return 1;
+
+    if (test_hex_encode())
         return 1;
 
     if (test_est_require_server_auth())

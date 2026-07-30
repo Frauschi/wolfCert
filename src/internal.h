@@ -292,6 +292,13 @@ WOLFCERT_TEST_VIS int wolfcert_base64_encode_mime(const uint8_t* in, size_t in_l
 WOLFCERT_TEST_VIS int wolfcert_base64_decode(const uint8_t* in, size_t in_len,
                                              WolfCertBuffer* out, void* heap);
 
+/* Hex-encode `in_len` bytes into `out`, which must hold at least 2 * in_len
+ * characters. `upper` selects upper-case digits. No NUL terminator is written,
+ * so the same helper serves both string building (caller terminates) and
+ * fixed-length wire fields such as the SCEP transactionID. */
+WOLFCERT_TEST_VIS void wolfcert_hex_encode(const uint8_t* in, size_t in_len,
+                                           int upper, char* out);
+
 int  wolfcert_pem_cert_to_der(const uint8_t* pem, size_t pem_len,
                               WolfCertBuffer* out_der, void* heap);
 

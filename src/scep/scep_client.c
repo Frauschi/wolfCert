@@ -342,7 +342,6 @@ static int pick_hash_oid(const WolfCertScepCaps* caps)
  * safe inside a URL query value. Returns NULL on allocation failure. */
 static char* url_encode(const uint8_t* in, size_t in_len, void* heap)
 {
-    static const char HEX[] = "0123456789ABCDEF";
     /* Worst case each byte expands to "%XX" (3 chars), plus the NUL. */
     char* out = (char*)WOLFCERT_XMALLOC(in_len * 3 + 1, heap);
     if (out == NULL)
@@ -358,8 +357,9 @@ static char* url_encode(const uint8_t* in, size_t in_len, void* heap)
         }
         else {
             out[o++] = '%';
-            out[o++] = HEX[c >> 4];
-            out[o++] = HEX[c & 0x0F];
+            /* RFC 3986 section 2.1: upper-case hex digits are the normal form. */
+            wolfcert_hex_encode(&c, 1, 1, &out[o]);
+            o += 2;
         }
     }
     out[o] = '\0';
@@ -547,11 +547,8 @@ static int derive_txid_pubkey(const uint8_t* signer_cert, size_t signer_cert_len
     if (txid == NULL)
         return WOLFCERT_ERR_MEMORY;
 
-    static const char HEX[] = "0123456789ABCDEF";   /* upper-case, per wolfSCEP */
-    for (size_t i = 0; i < WC_SHA256_DIGEST_SIZE; ++i) {
-        txid[i*2]   = (uint8_t)HEX[digest[i] >> 4];
-        txid[i*2+1] = (uint8_t)HEX[digest[i] & 0x0F];
-    }
+    /* Upper-case hex, per wolfSCEP. */
+    wolfcert_hex_encode(digest, WC_SHA256_DIGEST_SIZE, 1, (char*)txid);
     *out_txid     = txid;
     *out_txid_len = hexlen;
     return WOLFCERT_OK;
@@ -695,7 +692,6 @@ static int scep_prepare(void* heap, const WolfCertScepCaps* caps,
         }
     }
     else {
-        static const char HEX[] = "0123456789abcdef";
         txid_len = sizeof(txid_gen) * 2;
         txid = (uint8_t*)WOLFCERT_XMALLOC(txid_len, heap);
         if (txid == NULL) {
@@ -703,10 +699,7 @@ static int scep_prepare(void* heap, const WolfCertScepCaps* caps,
             wolfcert_buffer_free(&env);
             return WOLFCERT_ERR_MEMORY;
         }
-        for (size_t i = 0; i < sizeof(txid_gen); ++i) {
-            txid[i*2]   = (uint8_t)HEX[txid_gen[i] >> 4];
-            txid[i*2+1] = (uint8_t)HEX[txid_gen[i] & 0x0F];
-        }
+        wolfcert_hex_encode(txid_gen, sizeof(txid_gen), 0, (char*)txid);
     }
     wc_ForceZero(txid_gen, (word32)sizeof(txid_gen));   /* dead once expanded */
 
