@@ -36,6 +36,20 @@ SRV_PID=$!
 trap 'kill_if "$SRV_PID"' EXIT
 wait_port 127.0.0.1 "$PORT"
 
+# --ca-id: a single-CA responder ignores the message= parameter, so this only
+# has to keep working rather than select anything. Placed ahead of the enrolls
+# because GetCACert does not verify a CertRep, so it still reports if an
+# enrollment regression takes the assertions below down.
+"$WC_CLIENT" getcacerts \
+    --proto scep \
+    --url  "http://127.0.0.1:$PORT/scep" \
+    --ca-id "wolfCert-interop" \
+    >ca-id.pem 2>ca-id.log \
+    || { echo "    FAIL (--ca-id getcacerts failed):"; cat ca-id.log; exit 1; }
+grep -q "BEGIN CERTIFICATE" ca-id.pem \
+    || { echo "    FAIL (--ca-id getcacerts returned no certificate)"; exit 1; }
+echo "    PASS  (--ca-id accepted on GetCACert)"
+
 "$WC_CLIENT" enroll \
     --proto scep \
     --url  "http://127.0.0.1:$PORT/scep" \
@@ -45,12 +59,49 @@ wait_port 127.0.0.1 "$PORT"
     --out-cert dev.crt.pem \
     >wolfcert-client.log 2>&1 \
     || { echo "    FAIL (enroll failed):"; cat wolfcert-client.log; exit 1; }
-kill_if "$SRV_PID"; SRV_PID=""
 
 openssl x509 -in dev.crt.pem -noout -subject \
     | grep -q "CN *= *interop-wolfcert-1"
 openssl verify -CAfile depot/ca.pem dev.crt.pem >/dev/null
 echo "    PASS  (cert chains to scepserver CA)"
+
+# The remaining variants reuse the same server and CA. Each takes a fresh CN so
+# that -allowrenew 0 never sees a repeated subject.
+
+# --txid-mode pubkey sends 64 hex characters where the default sends 32. A peer
+# that truncates or rejects the longer transactionID fails here, which is the
+# whole reason the option exists.
+"$WC_CLIENT" enroll \
+    --proto scep \
+    --url  "http://127.0.0.1:$PORT/scep" \
+    --txid-mode pubkey \
+    --key-type rsa:2048 \
+    --subject "CN=interop-wolfcert-txid,O=wolfCert-interop" \
+    --out-key  txid.key.pem \
+    --out-cert txid.crt.pem \
+    >txid.log 2>&1 \
+    || { echo "    FAIL (--txid-mode pubkey enroll failed):"; cat txid.log; exit 1; }
+openssl verify -CAfile depot/ca.pem txid.crt.pem >/dev/null
+echo "    PASS  (--txid-mode pubkey accepted)"
+
+# --content-cipher aes256. No GetCACaps keyword advertises AES-256, so this
+# started as a non-fatal probe; the 2026-07-30 run showed micromdm decrypts it,
+# so it is a strict assertion now and a regression here is a real one.
+"$WC_CLIENT" enroll \
+    --proto scep \
+    --url  "http://127.0.0.1:$PORT/scep" \
+    --content-cipher aes256 \
+    --key-type rsa:2048 \
+    --subject "CN=interop-wolfcert-aes256,O=wolfCert-interop" \
+    --out-key  aes256.key.pem \
+    --out-cert aes256.crt.pem \
+    >aes256.log 2>&1 \
+    || { echo "    FAIL (--content-cipher aes256 enroll failed):"; cat aes256.log; exit 1; }
+openssl verify -CAfile depot/ca.pem aes256.crt.pem >/dev/null
+echo "    PASS  (--content-cipher aes256 accepted)"
+
+kill_if "$SRV_PID"; SRV_PID=""
+
 cd ..
 
 # ------------------------------------------------------------------------ D1

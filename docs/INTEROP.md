@@ -13,10 +13,10 @@ Because a failed dependency *build* also ends in a 77 skip (the binary never lan
 | Script | Peer | What it checks |
 |---|---|---|
 | `openssl_pkcs7_xcheck.sh` | OpenSSL `cms`/`x509` | Lower-bound cross-check of wolfCert-produced PKCS#7 / certs. Always present. |
-| `scep_micromdm.sh` | micromdm/scep (`apt install scep`) | D2 wolfcert-client -> scepserver, D1 scepclient -> wolfcert-server. |
+| `scep_micromdm.sh` | micromdm/scep (`apt install scep`) | D2 wolfcert-client -> scepserver, D1 scepclient -> wolfcert-server, plus the SCEP client options: `--ca-id`, `--txid-mode pubkey`, and an AES-256 probe (note 6). |
 | `est_globalsign.sh` | globalsign/est (Go) | wolfcert-client <-> globalsign estserver/estclient, both directions. |
 | `est_libest.sh` | cisco/libest (built from source) | wolfcert-client -> libest estserver, libest estclient -> wolfcert-server. |
-| `est_stepca.sh` | smallstep/step-ca (Go) | EST probe + SCEP enrollment against step-ca. |
+| `est_stepca.sh` | smallstep/step-ca (Go) | EST probe + SCEP enrollment against step-ca, plus a `--ca-id` GetCACert check. |
 
 ## Dependency build notes
 
@@ -35,4 +35,6 @@ Because a failed dependency *build* also ends in a 77 skip (the binary never lan
 
 5. **step-ca needs an RSA CA for SCEP.** SCEP (RFC 8894) is RSA-only: the client encrypts the `pkcsPKIEnvelope` to the RA/CA public key with CMS key transport, and the CA decrypts it with the matching private key - neither works with an ECC key. wolfCert only builds a `KeyTransRecipientInfo` (RSA); an ECC RA cert is rejected up front with `WOLFCERT_ERR_UNSUPPORTED` (rather than failing deep in wolfSSL's encoder with `BAD_KEYWRAP_ALG_E`, `-239`). Because `step ca init` creates an **ECDSA** chain by default, `est_stepca.sh` swaps in an RSA root + intermediate (per Smallstep's own guidance) so the intermediate - which step-ca uses as the SCEP decrypter - and every cert `GetCACert` returns are RSA. The provisioner is set to AES-128-CBC (`--encryption-algorithm-identifier 1`) for the CertRep so wolfCert can decrypt it.
 
-With the RSA chain in place the pkcsPKIEnvelope encrypts and step-ca issues the cert, but step-ca's SCEP is built on `github.com/smallstep/scep` (the micromdm library), so its CertRep carries the same `DigestInfo` signature quirk as micromdm and verifying it hits the same wolfSSL PKCS#7 gap as the micromdm interop (`VerifySignedData` / `ASN_SIG_CONFIRM_E`, `-229`). `est_stepca.sh` [2] is therefore a **strict** assertion, like the micromdm interop: it stays red until wolfSSL PR #10928 reaches `master`, then self-heals to a PASS.
+6. **The SCEP client options, and why AES-256 is only a probe.** `scep_micromdm.sh` exercises all three of the SCEP-specific client options. All three are strict. `--ca-id` must not upset a single-CA responder that ignores the `message=` parameter, and `--txid-mode pubkey` must not have its 64-character transactionID truncated or rejected. `--content-cipher aes256` began as a non-fatal probe, because RFC 8894 defines no GetCACaps keyword for AES-256 and `AUTO` can therefore never negotiate it, so whether the peer could decrypt it was unknown. The 2026-07-30 run answered that: micromdm's PKCS#7 accepts AES-256-CBC, so the case is a plain assertion and a failure means a regression rather than a deployment difference. If a future peer that decrypts only AES-128 or 3DES joins the matrix, this is the case to make conditional again.
+
+   Both scripts run their `--ca-id` case ahead of the enrollment assertions on purpose: GetCACert does not verify a CertRep, so it keeps reporting even when an enrollment regression takes the rest of the script down. `est_stepca.sh` gets no enroll variants because step-ca's SCEP is the same smallstep/micromdm code path that micromdm/scep already exercises, so a second AES-256 or transactionID case there would re-test one library rather than two.
