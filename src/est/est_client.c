@@ -68,7 +68,11 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
     req->connect_ctx       = srv->connect_ctx;
 }
 
-/* RFC 7030 mandates EST over TLS *and* that the client authenticate the
+/* Validate the config before it is used. The protocol check comes first: it
+ * gates every read of proto_opts.est below, which would otherwise reinterpret
+ * a SCEP arm's storage as the HTTP Basic credentials.
+ *
+ * RFC 7030 then mandates EST over TLS *and* that the client authenticate the
  * server on every request. Reject an explicitly non-TLS (http://) server URL
  * first; a schemeless URL already defaults to TLS in wolfcert_http_url_parse(),
  * so only an explicit http:// scheme is refused. Then require server
@@ -77,10 +81,14 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
  * verify_server off always completes an unauthenticated handshake - a pinned
  * trust anchor is loaded but never enforced - which would leak the HTTP Basic
  * credentials and the CSR to a MITM. */
-static int est_require_tls(const WolfCertServerCfg* srv, void* heap)
+static int est_check_cfg(const WolfCertServerCfg* srv, void* heap)
 {
     WolfCertUrl u;
-    int rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
+    int rc = wolfcert_cfg_require_proto(srv, WOLFCERT_PROTO_EST, "est");
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
     if (rc != WOLFCERT_OK)
         return rc;
 
@@ -111,7 +119,7 @@ int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv, WolfCertEncoding 
         return WOLFCERT_ERR_BAD_ARG;
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
-    int trc = est_require_tls(srv, heap);
+    int trc = est_check_cfg(srv, heap);
     if (trc != WOLFCERT_OK)
         return trc;
 
@@ -168,7 +176,7 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
     memset(out, 0, sizeof(*out));
     out->heap = heap;
-    int trc = est_require_tls(srv, heap);
+    int trc = est_check_cfg(srv, heap);
     if (trc != WOLFCERT_OK)
         return trc;
 
@@ -399,10 +407,16 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
 
+    /* The session copies proto_opts.est below, so confirm the discriminator
+     * before reading that arm. */
+    int rc = wolfcert_cfg_require_proto(srv, WOLFCERT_PROTO_EST, "est");
+    if (rc != WOLFCERT_OK)
+        return rc;
+
     /* Split the base URL into scheme://host[:port] for the HTTP session
      * vs the path suffix, so per-endpoint joins still work. */
     WolfCertUrl u;
-    int rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
+    rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
     if (rc != WOLFCERT_OK)
         return rc;
 
@@ -414,7 +428,7 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
 
     /* EST also requires authenticating the server (RFC 7030); refuse a session
      * that would run an unauthenticated (verify_server off) handshake, matching
-     * the one-shot est_require_tls() gate. */
+     * the one-shot est_check_cfg() gate. */
     if (!srv->verify_server) {
         wolfcert_http_url_free(&u);
         return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
@@ -455,7 +469,7 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
         .client_cert_len           = srv->client_cert_len,
         .client_key                = srv->client_key,
         .client_key_len            = srv->client_key_len,
-        .allow_post_handshake_auth = srv->allow_post_handshake_auth,
+        .allow_post_handshake_auth = srv->proto_opts.est.allow_post_handshake_auth,
         .nonblocking               = nonblocking,
         .connect_cb                = srv->connect_cb,
         .connect_ctx               = srv->connect_ctx,
@@ -744,7 +758,7 @@ int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
     memset(out_attrs_der, 0, sizeof(*out_attrs_der));
     out_attrs_der->heap = heap;
-    int trc = est_require_tls(srv, heap);
+    int trc = est_check_cfg(srv, heap);
     if (trc != WOLFCERT_OK)
         return trc;
 

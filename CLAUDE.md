@@ -45,7 +45,7 @@ a legacy peer does not advertise `AES` the client falls back to
 triple DES-CBC, which needs a wolfSSL built with 3DES support. A wolfSSL
 built `NO_DES3` still interoperates with any AES-advertising peer, but the
 client rejects a non-AES peer with `WOLFCERT_ERR_UNSUPPORTED`. A caller can
-override this per-connection via `WolfCertServerCfg.scep_content_cipher`
+override this per-connection via `WolfCertServerCfg.proto_opts.scep.content_cipher`
 (e.g. force AES-256-CBC for a peer that requires it). TLS:
 the HTTPS transport pins its floor to TLS 1.2, or TLS 1.3 when wolfSSL
 is built `WOLFSSL_NO_TLS12`.

@@ -113,6 +113,15 @@ The layering rules that matter to an integrator:
   server lives below the public API — an embedder can hand it an
   already-accepted socket via `wolfcert_server_serve_fd()` instead of using
   its accept loop.
+- **`WolfCertServerCfg` carries the shared transport settings plus one
+  protocol-specific arm.** A connection is either EST or SCEP, so the
+  per-protocol knobs live in the `proto_opts` union (`WolfCertEstServerOpts` /
+  `WolfCertScepServerOpts`) selected by `protocol`; the arm that does not match
+  is never read. Both arms are zero-init-safe, so leaving the union untouched
+  keeps the default behavior. Because `protocol` is the discriminator, every
+  `wolfcert_est_*` and `wolfcert_scep_*` entry point validates it up front and
+  returns `WOLFCERT_ERR_BAD_ARG` on a mismatch, so a config built for one
+  protocol can never be reinterpreted through the other's arm.
 
 ## 3. Protocols: EST and SCEP
 
@@ -140,7 +149,7 @@ what enables the post-handshake-auth bootstrap below.
 2. **mTLS up front** — set `client_cert` / `client_key`; they're presented
    during the handshake.
 3. **TLS 1.3 post-handshake auth** — set `client_cert` / `client_key` *and*
-   `allow_post_handshake_auth = 1`, and use the session API. The first request
+   `proto_opts.est.allow_post_handshake_auth = 1`, and use the session API. The first request
    (`/cacerts`) rides an anonymous handshake; the server triggers a
    mid-session `CertificateRequest` when the client first hits a protected
    endpoint, and wolfSSL answers from the pre-loaded identity with no further
@@ -161,7 +170,7 @@ signature hash, preferred key algorithm + size). `wolfcert_csr_attrs_apply`
 overlays those hints onto a caller-supplied `WolfCertKeyCfg` / `WolfCertCertMeta`
 *one-way* — each field is filled only when the caller left it at its
 zero-value default, so an explicit choice always wins. With
-`WolfCertServerCfg.auto_csrattrs = 1`, `wolfcert_client_enroll` runs
+`WolfCertServerCfg.proto_opts.est.auto_csrattrs = 1`, `wolfcert_client_enroll` runs
 fetch+parse+apply before keygen, so a caller can hand in an empty
 `WolfCertKeyCfg{0}` and let the server pin the algorithm.
 
@@ -214,14 +223,14 @@ prepared (envelope + sign), sent, and its CertRep parsed as one logical step;
 in async mode only the HTTP transport is pumped through `WANT_READ`/`WANT_WRITE`
 while the crypto stays synchronous.
 
-**Client options** (`WolfCertServerCfg`, all zero-init to the default behavior):
-- `scep_ca_id` — CA identifier sent as `message=<id>` on GetCACaps / GetCACert
+**Client options** (`WolfCertServerCfg.proto_opts.scep`, a `WolfCertScepServerOpts`; all zero-init to the default behavior):
+- `ca_id` — CA identifier sent as `message=<id>` on GetCACaps / GetCACert
   to select a specific CA on a multi-CA responder; omitted when NULL.
-- `scep_txid_mode` — `WOLFCERT_SCEP_TXID_RANDOM` (default) or `..._PUBKEY_HASH`,
+- `txid_mode` — `WOLFCERT_SCEP_TXID_RANDOM` (default) or `..._PUBKEY_HASH`,
   which derives the transactionID as the SHA-256 of the signer
   public key (RFC 8894 §3.2.1) so retries of the same key reuse one
   ID. Matches wolfSCEP's derivation.
-- `scep_content_cipher` — `WOLFCERT_SCEP_CIPHER_AUTO` (default: the caps-driven
+- `content_cipher` — `WOLFCERT_SCEP_CIPHER_AUTO` (default: the caps-driven
   AES-128-CBC / 3DES choice) or an explicit `AES128` / `AES256` / `DES3`.
   There is no GetCACaps token for AES-256, so forcing it is a deliberate choice
   for a peer that requires it (e.g. a wolfSCEP deployment); the envelope is
@@ -406,15 +415,15 @@ wolfcert_csr_build(key, &meta, &csr);
 
 /* 4. Non-blocking enrollment over HTTPS with factory mTLS */
 WolfCertServerCfg srv = {
-    .protocol                  = WOLFCERT_PROTO_EST,
-    .server_url                = "https://ca.example/.well-known/est",
-    .trust_anchors             = bootstrap_ca_pem,
-    .trust_anchors_len         = bootstrap_ca_len,
-    .verify_server             = 1,
-    .client_cert               = factory_cert, .client_cert_len = factory_cert_len,
-    .client_key                = factory_key,  .client_key_len  = factory_key_len,
-    .max_response_bytes        = 8 * 1024,   /* tighten for MCU */
-    .allow_post_handshake_auth = 1,
+    .protocol           = WOLFCERT_PROTO_EST,
+    .server_url         = "https://ca.example/.well-known/est",
+    .trust_anchors      = bootstrap_ca_pem,
+    .trust_anchors_len  = bootstrap_ca_len,
+    .verify_server      = 1,
+    .client_cert        = factory_cert, .client_cert_len = factory_cert_len,
+    .client_key         = factory_key,  .client_key_len  = factory_key_len,
+    .max_response_bytes = 8 * 1024,   /* tighten for MCU */
+    .proto_opts.est     = { .allow_post_handshake_auth = 1 },
 };
 WolfCertEstSession* s;
 wolfcert_est_session_open_async(&srv, &s);

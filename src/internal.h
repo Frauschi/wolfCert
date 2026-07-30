@@ -264,6 +264,13 @@ int  wolfcert_rng_new(WC_RNG* rng);
 int  wolfcert_ecc_curve_from_param(int param, int* out_curve_id, int* out_key_size);
 #endif
 
+/* WolfCertServerCfg.protocol is the discriminator for the proto_opts union, so
+ * a protocol-specific entry point must confirm it before reading its arm: the
+ * other arm's members overlay incompatible types and would be reinterpreted.
+ * Every EST and SCEP entry point that takes a WolfCertServerCfg calls this. */
+int wolfcert_cfg_require_proto(const WolfCertServerCfg* srv,
+                               WolfCertProtocol want, const char* module);
+
 typedef struct {
     char* scheme;
     char* host;

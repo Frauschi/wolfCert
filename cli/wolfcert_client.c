@@ -648,7 +648,7 @@ static int cmd_enroll(int argc, char** argv)
         if (opts.pha) {
             /* Keep-alive + TLS 1.3 post-handshake auth: open one session,
              * fetch /cacerts anonymously, then let PHA drive /simpleenroll. */
-            srv.allow_post_handshake_auth = 1;
+            srv.proto_opts.est.allow_post_handshake_auth = 1;
             WolfCertEstSession* es = NULL;
             rc = wolfcert_est_session_open(&srv, &es);
             if (rc == WOLFCERT_OK) {

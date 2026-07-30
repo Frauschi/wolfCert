@@ -350,6 +350,58 @@ static int test_est_require_server_auth(void)
     return 0;
 }
 
+/* WolfCertServerCfg.protocol discriminates the proto_opts union, so an EST
+ * entry point handed a SCEP config must refuse it rather than read the wrong
+ * arm. The overlay is actively dangerous: proto_opts.scep.txid_mode and
+ * .content_cipher share storage with proto_opts.est.password, so reading the
+ * EST arm here would hand basic_auth_header a pointer fabricated from two
+ * enum values. Every rejection happens before any network access. */
+static int test_est_rejects_scep_cfg(void)
+{
+    static const uint8_t dummy_csr[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
+    WolfCertServerCfg srv = {
+        .protocol      = WOLFCERT_PROTO_SCEP,
+        .server_url    = "https://127.0.0.1:1/scep",
+        .verify_server = 1,
+        .proto_opts.scep = {
+            .ca_id          = "RolloverCA",
+            .txid_mode      = WOLFCERT_SCEP_TXID_PUBKEY_HASH,
+            .content_cipher = WOLFCERT_SCEP_CIPHER_AES256
+        }
+    };
+    WolfCertBuffer out = { 0 };
+    WolfCertEstSession* sess = NULL;
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* rk = NULL;
+
+    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_simple_enroll(&srv, dummy_csr, sizeof(dummy_csr),
+                                       &out) == WOLFCERT_ERR_BAD_ARG);
+
+    REQUIRE(wolfcert_key_generate(&kcfg, &rk) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_simple_reenroll(&srv, dummy_csr, sizeof(dummy_csr), rk,
+                                         dummy_csr, sizeof(dummy_csr), &out)
+            == WOLFCERT_ERR_BAD_ARG);
+    wolfcert_key_free(rk);
+
+    /* Both session-open paths gate on the discriminator too, before they copy
+     * the credentials out of the union. */
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(sess == NULL);
+    REQUIRE(wolfcert_est_session_open_async(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(sess == NULL);
+
+    /* An unset discriminator is refused for the same reason: nothing says
+     * which arm of the union the caller populated. */
+    srv.protocol = (WolfCertProtocol)0;
+    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
+
+    return 0;
+}
+
 /* Drive a non-blocking session enroll to completion, poll()ing on the
  * session fd between WANT_READ / WANT_WRITE returns. */
 static int pump_simple_enroll(WolfCertEstSession* s,
@@ -391,6 +443,9 @@ int main(void)
         return 1;
 
     if (test_est_require_server_auth())
+        return 1;
+
+    if (test_est_rejects_scep_cfg())
         return 1;
 
     uint8_t ca_der[4096];

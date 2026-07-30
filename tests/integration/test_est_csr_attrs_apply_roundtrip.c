@@ -21,7 +21,7 @@
  * End-to-end coverage for auto-apply of /csrattrs hints during
  * enrolment. The test server publishes a CsrAttrs policy pinning
  * ECC P-384 + SHA-384 + challengePassword-required; the client
- * runs `wolfcert_client_enroll` with `srv.auto_csrattrs = 1` and an
+ * runs `wolfcert_client_enroll` with `srv.proto_opts.est.auto_csrattrs = 1` and an
  * empty `key_cfg` (type = 0). The result must be:
  *
  *   - effective key is ECC on curve P-384 (server pin applied);
@@ -156,7 +156,7 @@ static int auto_apply_pins_everything(WolfCertServer* s)
     WolfCertServerCfg srv = {
         .protocol = WOLFCERT_PROTO_EST,
         .server_url = url,
-        .auto_csrattrs = 1,
+        .proto_opts.est = { .auto_csrattrs = 1 },
         .trust_anchors = g_ca, .trust_anchors_len = g_ca_len,
         .verify_server = 1,
     };
@@ -201,7 +201,7 @@ static int explicit_caller_wins(WolfCertServer* s)
     WolfCertServerCfg srv = {
         .protocol = WOLFCERT_PROTO_EST,
         .server_url = url,
-        .auto_csrattrs = 1,
+        .proto_opts.est = { .auto_csrattrs = 1 },
         .trust_anchors = g_ca, .trust_anchors_len = g_ca_len,
         .verify_server = 1,
     };

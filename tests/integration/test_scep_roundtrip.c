@@ -185,7 +185,7 @@ static int check_get_fallback(const WolfCertServerCfg* cli,
     return rc;
 }
 
-/* WolfCertServerCfg.scep_txid_mode = PUBKEY_HASH: the transactionID must be the
+/* proto_opts.scep.txid_mode = PUBKEY_HASH: the transactionID must be the
  * 64-char upper-case hex SHA-256 of the enrollee SubjectPublicKeyInfo, must
  * match a value recomputed from the CSR, and must be deterministic (a second
  * enrollment of the same key reuses it). Owns and frees everything it makes. */
@@ -201,7 +201,7 @@ static int check_pubkey_txid(const WolfCertServerCfg* cli,
     WolfCertScepResult r1 = { 0 }, r2 = { 0 };
     int rc;
 
-    cli_ph.scep_txid_mode = WOLFCERT_SCEP_TXID_PUBKEY_HASH;
+    cli_ph.proto_opts.scep.txid_mode = WOLFCERT_SCEP_TXID_PUBKEY_HASH;
 
     rc = wolfcert_key_generate(kcfg, &key);
     if (rc == WOLFCERT_OK)
@@ -267,7 +267,7 @@ static int check_pubkey_txid(const WolfCertServerCfg* cli,
 #endif
 
 #ifdef WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE
-/* WolfCertServerCfg.scep_content_cipher override: enrolling with an explicit
+/* proto_opts.scep.content_cipher override: enrolling with an explicit
  * cipher must still issue a cert - the server de-envelops whatever OID the
  * request carries - proving AES-256 (and explicit AES-128) interoperate. */
 static int check_content_cipher(const WolfCertServerCfg* cli,
@@ -282,7 +282,7 @@ static int check_content_cipher(const WolfCertServerCfg* cli,
     WolfCertBuffer    csr = { 0 }, issued = { 0 };
     int rc;
 
-    c.scep_content_cipher = cipher;
+    c.proto_opts.scep.content_cipher = cipher;
 
     rc = wolfcert_key_generate(kcfg, &key);
     if (rc == WOLFCERT_OK)

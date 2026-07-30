@@ -129,7 +129,7 @@ int wolfcert_scep_get_ca_caps(const WolfCertServerCfg* srv, WolfCertScepCaps* ou
     memset(out, 0, sizeof(*out));
 
     char* url = wolfcert_scep_build_getca_url(srv->server_url, "GetCACaps",
-                                              srv->scep_ca_id, heap);
+                                              srv->proto_opts.scep.ca_id, heap);
     if (url == NULL)
         return WOLFCERT_ERR_MEMORY;
 
@@ -190,7 +190,7 @@ int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv, WolfCertEncoding
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
 
     char* url = wolfcert_scep_build_getca_url(srv->server_url, "GetCACert",
-                                              srv->scep_ca_id, heap);
+                                              srv->proto_opts.scep.ca_id, heap);
     if (url == NULL)
         return WOLFCERT_ERR_MEMORY;
 
@@ -886,7 +886,7 @@ static int scep_finish(void* heap,
  * enveloped + signed pkiMessage (scep_prepare), POST or base64-GET it
  * (run_pki_op), then parse + verify the CertRep and fill `out` (scep_finish).
  * Caller retains ownership of `txid_override`; when NULL the transactionID is
- * derived per srv->scep_txid_mode. */
+ * derived per srv->proto_opts.scep.txid_mode. */
 static int do_scep_round_trip(const WolfCertServerCfg* srv,
                               const WolfCertScepCaps*   caps,
                               const uint8_t* ra_cert, size_t ra_cert_len,
@@ -904,7 +904,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
 
     ScepTxidSel txid_sel = {
         .id = txid_override, .id_len = txid_override_len,
-        .mode = srv->scep_txid_mode
+        .mode = srv->proto_opts.scep.txid_mode
     };
 
     WolfCertBuffer pki = { 0 };
@@ -914,7 +914,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
     int rc = scep_prepare(heap, caps, ra_cert, ra_cert_len,
                           signer_cert, signer_cert_len, signer_key, signer_key_len,
                           msg_type, envelope_content, envelope_content_len,
-                          &txid_sel, srv->scep_content_cipher,
+                          &txid_sel, srv->proto_opts.scep.content_cipher,
                           &pki, &txid, &txid_len, nonce);
     if (rc != WOLFCERT_OK)
         return rc;
@@ -1213,7 +1213,7 @@ int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
 
     char* url = wolfcert_scep_build_getca_url(srv->server_url, "GetNextCACert",
-                                              srv->scep_ca_id, heap);
+                                              srv->proto_opts.scep.ca_id, heap);
     if (url == NULL)
         return WOLFCERT_ERR_MEMORY;
 
@@ -1338,8 +1338,8 @@ static int scep_session_open_common(const WolfCertServerCfg* srv, int nonblockin
     memset(s, 0, sizeof(*s));
     s->heap           = heap;
     s->nonblocking    = nonblocking;
-    s->txid_mode      = srv->scep_txid_mode;
-    s->content_cipher = srv->scep_content_cipher;
+    s->txid_mode      = srv->proto_opts.scep.txid_mode;
+    s->content_cipher = srv->proto_opts.scep.content_cipher;
     s->server_url     = wolfcert_strdup(srv->server_url, heap);
     if (s->server_url == NULL) {
         WOLFCERT_XFREE(s, heap);

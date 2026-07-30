@@ -158,6 +158,18 @@ int wolfcert_rng_new(WC_RNG* rng)
     return rc == 0 ? WOLFCERT_OK : wolfcert_map_wc_err(rc);
 }
 
+int wolfcert_cfg_require_proto(const WolfCertServerCfg* srv,
+                               WolfCertProtocol want, const char* module)
+{
+    if (srv->protocol == want)
+        return WOLFCERT_OK;
+
+    return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, module,
+        "WolfCertServerCfg.protocol is %d, not %d: it selects the proto_opts "
+        "arm, so a %s entry point cannot read a config built for another "
+        "protocol", (int)srv->protocol, (int)want, module);
+}
+
 int wolfcert_map_wc_err(int wc_rc)
 {
     if (wc_rc == 0)

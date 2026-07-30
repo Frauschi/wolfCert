@@ -130,8 +130,8 @@ typedef struct {
      * csr_attributes_der is empty (nothing to enforce).
      *
      * Test-server convenience for exercising the client-side
-     * `srv->auto_csrattrs` round-trip end to end; real deployments
-     * wire this policy into a proper RA. */
+     * `srv->proto_opts.est.auto_csrattrs` round-trip end to end;
+     * real deployments wire this policy into a proper RA. */
     int              est_require_csr_attributes;
 
     /* Heap hint for server-internal allocations. */
