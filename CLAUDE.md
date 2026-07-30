@@ -185,5 +185,8 @@ Minimal orientation:
   MCU / CryptoCb integration guide (start here for non-trivial changes).
 - `docs/EMBEDDED.md` - RAM-sizing knobs for constrained targets
   (`Cert`/`CertName` shrinking, tunable HTTP stack buffers).
+- `docs/MIGRATING-FROM-WOLFSCEP.md` - call mapping and behavioural
+  differences for an existing wolfSCEP integration, including which
+  messageType a renewal should carry.
 - `wolfcert/*.h` - authoritative API reference (inline
   comments document every field and function contract).

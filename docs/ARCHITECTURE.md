@@ -203,6 +203,9 @@ The server's `pkiStatus` maps to a `WolfCertScepResult.status` of `SUCCESS`
 (cert in `cert_pem`), `PENDING` (poll with `GetCertInitial`, quoting the
 returned transaction ID), or `FAILURE`.
 
+Moving an existing wolfSCEP integration across is covered separately in
+[`MIGRATING-FROM-WOLFSCEP.md`](MIGRATING-FROM-WOLFSCEP.md).
+
 **SCEP is RSA-only.** The entry points reject non-RSA keys with
 `WOLFCERT_ERR_UNSUPPORTED` — this is a protocol constraint, not a wolfCert
 limitation. Use EST for Ed25519 / Ed448 / ML-DSA.

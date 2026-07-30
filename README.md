@@ -189,6 +189,9 @@ caveats apply to SCEP and to some servers:
 - [`docs/CI.md`](docs/CI.md) — the GitHub Actions pipeline, the shared
   `scripts/ci/build-wolfssl.sh` helper, and how to reproduce a CI config
   locally.
+- [`docs/MIGRATING-FROM-WOLFSCEP.md`](docs/MIGRATING-FROM-WOLFSCEP.md) — moving an
+  existing wolfSCEP integration to wolfCert: call mapping, the behavioural
+  differences, and a worked enrollment.
 
 ## License
 
