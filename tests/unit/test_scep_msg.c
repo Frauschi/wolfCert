@@ -1166,6 +1166,50 @@ static int test_getca_url(void)
     return 0;
 }
 
+/* The mirror of test_est_rejects_scep_cfg: WolfCertServerCfg.protocol
+ * discriminates the proto_opts union, so a SCEP entry point handed an EST
+ * config must refuse it rather than read the wrong arm. Reading the SCEP arm
+ * here would send the EST username as the CA identifier and derive the txid
+ * mode and content cipher from the bytes of the password pointer. The
+ * enrollment entry points share the same gate; the ones exercised below are
+ * those reachable without a live RSA signer. Nothing here touches the
+ * network. */
+static int test_scep_rejects_est_cfg(void)
+{
+    static const uint8_t dummy_ca[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
+    WolfCertServerCfg srv = {
+        .protocol      = WOLFCERT_PROTO_EST,
+        .server_url    = "http://127.0.0.1:1/scep",
+        .verify_server = 0,
+        .proto_opts.est = { .username = "alice", .password = "hunter2" }
+    };
+    WolfCertScepCaps caps = { 0 };
+    WolfCertBuffer out = { 0 };
+    WolfCertScepSession* sess = NULL;
+
+    REQUIRE(wolfcert_scep_get_ca_caps(&srv, &caps) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_get_ca_cert(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_get_ca_cert_enc(&srv, WOLFCERT_ENCODING_DER, &out)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_get_next_ca_cert(&srv, dummy_ca, sizeof(dummy_ca),
+                                           &out) == WOLFCERT_ERR_BAD_ARG);
+
+    /* Both session-open paths gate on the discriminator too, before they copy
+     * the SCEP options out of the union. */
+    REQUIRE(wolfcert_scep_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(sess == NULL);
+    REQUIRE(wolfcert_scep_session_open_async(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(sess == NULL);
+
+    /* An unset discriminator is refused for the same reason: nothing says
+     * which arm of the union the caller populated. */
+    srv.protocol = (WolfCertProtocol)0;
+    REQUIRE(wolfcert_scep_get_ca_caps(&srv, &caps) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
+
+    return 0;
+}
+
 /* Only meaningful where wolfSSL can actually run an AES-CBC content cipher. */
 #if defined(HAVE_AES_CBC) && \
         (defined(WOLFSSL_AES_128) || defined(WOLFSSL_AES_256))
@@ -1214,6 +1258,8 @@ int main(void)
     REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     if (test_getca_url())
+        return 1;
+    if (test_scep_rejects_est_cfg())
         return 1;
 #if defined(HAVE_AES_CBC) && \
         (defined(WOLFSSL_AES_128) || defined(WOLFSSL_AES_256))

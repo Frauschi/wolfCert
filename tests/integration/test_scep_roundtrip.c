@@ -789,6 +789,24 @@ int main(void)
     /* The CA identifier belongs on GetNextCACert as well (RFC 8894 4.6.1). */
     REQUIRE(check_getnextca_ca_id(ca_der->buffer, ca_der->length) == 0);
 
+    /* One-shot SCEP over https:// must refuse to run unverified, the same rule
+     * the session open applies: verify_server is the only peer-verification
+     * switch, so leaving it off would complete a silent anonymous handshake. */
+    {
+        WolfCertServerCfg tls_cli = { .protocol = WOLFCERT_PROTO_SCEP,
+                                      .server_url = "https://127.0.0.1:1/scep" };
+        WolfCertScepCaps tls_caps = { 0 };
+        WolfCertBuffer   tls_ca = { 0 };
+        REQUIRE(wolfcert_scep_get_ca_caps(&tls_cli, &tls_caps) == WOLFCERT_ERR_TLS);
+        REQUIRE(wolfcert_scep_get_ca_cert(&tls_cli, &tls_ca) == WOLFCERT_ERR_TLS);
+        wolfcert_buffer_free(&tls_ca);
+
+        /* With verification on it must get past the gate and fail on the
+         * network instead, so the check cannot be firing indiscriminately. */
+        tls_cli.verify_server = 1;
+        REQUIRE(wolfcert_scep_get_ca_caps(&tls_cli, &tls_caps) != WOLFCERT_ERR_TLS);
+    }
+
     /* Negative GET PKIOperation branches (RFC 8894 section 4.1): the server must
      * reject each malformed request with 400. These cannot be produced by the
      * client API, so drive the running server over a raw socket. */

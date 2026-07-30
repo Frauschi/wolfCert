@@ -122,12 +122,48 @@ static int has_cap(const char* body, size_t len, const char* needle)
     return 0;
 }
 
+/* Validate the config before it is used. The protocol check comes first: it
+ * gates every read of proto_opts.scep below, which would otherwise reinterpret
+ * an EST arm's storage as the CA identifier and the cipher selectors.
+ *
+ * SCEP itself does not require TLS: RFC 8894 authenticates at the pkiMessage
+ * layer and plaintext http:// is legitimate. But an https:// endpoint must
+ * still be authenticated, since verify_server is the sole peer-verification
+ * switch and leaving it off would complete a silent, unauthenticated
+ * handshake. The session open applies the same rules; this is the one-shot
+ * half of it. */
+static int scep_check_cfg(const WolfCertServerCfg* srv, void* heap)
+{
+    WolfCertUrl u;
+    int rc = wolfcert_cfg_require_proto(srv, WOLFCERT_PROTO_SCEP, "scep");
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    int tls = u.tls;
+    wolfcert_http_url_free(&u);
+
+    if (tls && !srv->verify_server)
+        return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "scep",
+            "TLS SCEP endpoint requires server authentication: set verify_server "
+            "or use a plaintext http:// URL");
+
+    return WOLFCERT_OK;
+}
+
 int wolfcert_scep_get_ca_caps(const WolfCertServerCfg* srv, WolfCertScepCaps* out)
 {
     if (srv == NULL || srv->server_url == NULL || out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
+    int trc = scep_check_cfg(srv, heap);
+    if (trc != WOLFCERT_OK)
+        return trc;
+
     memset(out, 0, sizeof(*out));
 
     char* url = wolfcert_scep_build_getca_url(srv->server_url, "GetCACaps",
@@ -190,6 +226,10 @@ int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv, WolfCertEncoding
         return WOLFCERT_ERR_BAD_ARG;
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
+    int trc = scep_check_cfg(srv, heap);
+    if (trc != WOLFCERT_OK)
+        return trc;
+
 
     char* url = wolfcert_scep_build_getca_url(srv->server_url, "GetCACert",
                                               srv->proto_opts.scep.ca_id, heap);
@@ -996,6 +1036,10 @@ int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
     memset(out, 0, sizeof(*out));
     out->fail_info = -1;
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
+    int trc = scep_check_cfg(srv, heap);
+    if (trc != WOLFCERT_OK)
+        return trc;
+
     uint8_t* signer_der = NULL;
     size_t signer_len = 0;
     int rc = wolfcert_scep_self_signed_rsa((RsaKey*)new_key->impl,
@@ -1082,6 +1126,10 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
     memset(out, 0, sizeof(*out));
     out->fail_info = -1;
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
+    int trc = scep_check_cfg(srv, heap);
+    if (trc != WOLFCERT_OK)
+        return trc;
+
     uint8_t* key_der = NULL;
     size_t key_der_len = 0;
     int rc = rsa_key_to_der(current_key, heap, &key_der, &key_der_len);
@@ -1165,6 +1213,10 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
     memset(out, 0, sizeof(*out));
     out->fail_info = -1;
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
+    int trc = scep_check_cfg(srv, heap);
+    if (trc != WOLFCERT_OK)
+        return trc;
+
 
     WolfCertBuffer ias = { 0 };
     uint8_t* key_der = NULL;
@@ -1223,6 +1275,10 @@ int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
         return WOLFCERT_ERR_BAD_ARG;
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
+    int trc = scep_check_cfg(srv, heap);
+    if (trc != WOLFCERT_OK)
+        return trc;
+
 
     char* url = wolfcert_scep_build_getca_url(srv->server_url, "GetNextCACert",
                                               srv->proto_opts.scep.ca_id, heap);
@@ -1316,12 +1372,18 @@ static int scep_session_open_common(const WolfCertServerCfg* srv, int nonblockin
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
 
+    /* The session copies proto_opts.scep below, so confirm the discriminator
+     * before reading that arm. */
+    int rc = wolfcert_cfg_require_proto(srv, WOLFCERT_PROTO_SCEP, "scep");
+    if (rc != WOLFCERT_OK)
+        return rc;
+
     /* Split the SCEP URL into scheme://host[:port] for the HTTP session vs the
      * path we keep for building per-operation query strings. Unlike EST there
      * is deliberately no TLS-required gate: RFC 8894 authenticates at the
      * pkiMessage layer and commonly runs over plaintext http://. */
     WolfCertUrl u;
-    int rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
+    rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
     if (rc != WOLFCERT_OK)
         return rc;
 
