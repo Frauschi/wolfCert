@@ -191,7 +191,28 @@ endif
 endif
 
 TESTS = $(check_PROGRAMS)
+
+# The CLI's protocol scoping and keyword validation, driven against the built
+# binary rather than the library. Every case fails before any network access,
+# so no server is involved. Kept at parity with the CTest registration in
+# tests/CMakeLists.txt.
+if WOLFCERT_BUILD_CLI
+if WOLFCERT_HAVE_EST
+if WOLFCERT_HAVE_SCEP
+TESTS += tests/integration/cli_proto_scoping.sh
 endif
+endif
+endif
+endif
+
+# TEST_EXTENSIONS and friends cannot live inside a conditional, so they sit at
+# file scope even though only the CLI script above uses them. The script takes
+# the binary under test from WOLFCERT_CLI, since the harness passes no
+# arguments.
+TEST_EXTENSIONS = .sh
+SH_LOG_COMPILER = $(SHELL)
+AM_TESTS_ENVIRONMENT = WOLFCERT_CLI=$(abs_builddir)/wolfcert-client; \
+                       export WOLFCERT_CLI;
 
 EXTRA_DIST = \
     README.md           \
@@ -207,4 +228,5 @@ EXTRA_DIST = \
     cmake/wolfCertConfigVersion.cmake.in \
     cmake/wolfCertTargets.cmake.in \
     cmake/wolfcert.pc.in \
-    tests/integration/tls_test_util.h
+    tests/integration/tls_test_util.h \
+    tests/integration/cli_proto_scoping.sh

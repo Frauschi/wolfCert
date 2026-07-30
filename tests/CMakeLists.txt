@@ -113,3 +113,15 @@ if(WOLFCERT_ENABLE_SCEP AND WOLFCERT_ENABLE_SERVER)
     target_link_libraries(test_scep_async_roundtrip PRIVATE wolfcert Threads::Threads)
     add_test(NAME scep_async_roundtrip COMMAND test_scep_async_roundtrip)
 endif()
+
+# The CLI's protocol scoping and keyword validation, driven against the built
+# binary. Every case fails before any network access, so no server is involved.
+if(WOLFCERT_ENABLE_CLI AND WOLFCERT_ENABLE_EST AND WOLFCERT_ENABLE_SCEP AND UNIX)
+    add_test(NAME cli_proto_scoping
+             COMMAND ${CMAKE_COMMAND} -E env bash
+                     ${CMAKE_CURRENT_SOURCE_DIR}/integration/cli_proto_scoping.sh
+                     $<TARGET_FILE:wolfcert-client>)
+    # The script exits 77 when the CLI cannot initialise, which is the case on a
+    # wolfSSL built WOLFSSL_NO_MALLOC: no pool is installed for it.
+    set_tests_properties(cli_proto_scoping PROPERTIES SKIP_RETURN_CODE 77)
+endif()

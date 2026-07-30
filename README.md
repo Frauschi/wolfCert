@@ -107,7 +107,13 @@ Enroll a certificate from the CLI:
 The CLI also covers TLS / mutual TLS (`--trust`, `--client-cert`,
 `--client-key`), TLS 1.3 post-handshake auth (`--pha`), SCEP polling
 (`--poll-attempts`, `--poll-interval-ms`), `getnextca`, and `/csrattrs`
-key-policy pinning (`--csrattrs-auto`). Run `wolfcert-client --help` and
+key-policy pinning (`--csrattrs-auto`). The SCEP-specific knobs are
+`--ca-id` (select one CA on a multi-CA responder), `--txid-mode` (`random`
+or `pubkey`, the RFC 8894 §3.2.1 public-key derivation) and
+`--content-cipher` (`auto`, `aes128`, `aes256`, `des3` - force one for a
+peer that requires it, since no GetCACaps keyword advertises AES-256).
+Options that belong to one protocol are rejected under the other rather
+than silently ignored. Run `wolfcert-client --help` and
 `wolfcert-server --help` for the full set.
 
 EST mandates authenticating the server (RFC 7030), so an EST enroll needs
