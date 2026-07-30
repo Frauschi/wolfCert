@@ -516,6 +516,14 @@ static int run_pki_op(const WolfCertServerCfg* srv,
     return WOLFCERT_OK;
 }
 
+/* messageType for a renewal. The signer is the certificate being replaced
+ * either way; only the attribute differs, so a CA that predates RenewalReq can
+ * be given the messageType 19 it expects. */
+static const char* scep_renewal_msg_type(WolfCertScepRenewalMsgType m)
+{
+    return (m == WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ) ? "19" : "17";
+}
+
 /* Shared SCEP round-trip sizes. */
 #define SCEP_NONCE_SZ 16
 /* A random transactionID is 16 RNG bytes expanded to 32 hex characters. */
@@ -1084,7 +1092,9 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
                             ca_bundle, ca_bundle_len,
                             current_cert, current_cert_len,
                             key_der, key_der_len,
-                            "17", csr_der, csr_der_len,
+                            scep_renewal_msg_type(
+                                srv->proto_opts.scep.renewal_msg_type),
+                            csr_der, csr_der_len,
                             NULL, 0, out);
 
     wc_ForceZero(key_der, (word32)key_der_len);
@@ -1267,8 +1277,9 @@ struct WolfCertScepSession {
     char*                     server_url;     /* full SCEP endpoint URL, owned */
     void*                     heap;
     int                       nonblocking;    /* opened via _open_async (_nb calls) vs _open (_ex) */
-    WolfCertScepTxidMode      txid_mode;      /* captured from cfg at open */
-    WolfCertScepContentCipher content_cipher; /* captured from cfg at open */
+    WolfCertScepTxidMode       txid_mode;        /* captured from cfg at open */
+    WolfCertScepContentCipher  content_cipher;   /* captured from cfg at open */
+    WolfCertScepRenewalMsgType renewal_msg_type; /* captured from cfg at open */
 
     /* Async in-flight state: one round trip at a time. */
     int                  in_active;
@@ -1340,8 +1351,9 @@ static int scep_session_open_common(const WolfCertServerCfg* srv, int nonblockin
     memset(s, 0, sizeof(*s));
     s->heap           = heap;
     s->nonblocking    = nonblocking;
-    s->txid_mode      = srv->proto_opts.scep.txid_mode;
-    s->content_cipher = srv->proto_opts.scep.content_cipher;
+    s->txid_mode        = srv->proto_opts.scep.txid_mode;
+    s->content_cipher   = srv->proto_opts.scep.content_cipher;
+    s->renewal_msg_type = srv->proto_opts.scep.renewal_msg_type;
     s->server_url     = wolfcert_strdup(srv->server_url, heap);
     if (s->server_url == NULL) {
         WOLFCERT_XFREE(s, heap);
@@ -1645,7 +1657,8 @@ static int scep_session_begin_renewal(WolfCertScepSession* s,
 
     rc = scep_session_begin(s, caps, ra_cert, ra_cert_len, ca_bundle, ca_bundle_len,
                             current_cert, current_cert_len, key_der, key_der_len,
-                            "17", SCEP_SESS_OP_RENEWAL,
+                            scep_renewal_msg_type(s->renewal_msg_type),
+                            SCEP_SESS_OP_RENEWAL,
                             csr_der, csr_der_len, NULL, 0, out);
 
     wc_ForceZero(key_der, (word32)key_der_len);

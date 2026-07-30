@@ -169,6 +169,16 @@ typedef enum {
     WOLFCERT_SCEP_CIPHER_DES3   = 3
 } WolfCertScepContentCipher;
 
+/* Which messageType a SCEP renewal carries (WolfCertScepServerOpts.renewal_msg_type).
+ * Either way the pkiMessage is signed by the certificate being replaced; only the
+ * messageType attribute changes. RENEWAL_REQ is RFC 8894 section 3.3.1's
+ * messageType 17. PKCS_REQ sends 19 instead, which is what CAs that predate
+ * RenewalReq expect for a renewal. */
+typedef enum {
+    WOLFCERT_SCEP_RENEWAL_MSG_RENEWAL_REQ = 0, /* messageType 17 (default) */
+    WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ    = 1  /* messageType 19 */
+} WolfCertScepRenewalMsgType;
+
 /* EST-only knobs, reached through WolfCertServerCfg.proto_opts.est. */
 typedef struct {
     /* HTTP Basic credentials (RFC 7030 section 3.2.3), optional. Sent on
@@ -200,8 +210,8 @@ typedef struct {
 } WolfCertEstServerOpts;
 
 /* SCEP-only knobs, reached through WolfCertServerCfg.proto_opts.scep.
- * All three are zero-init-safe: the default value preserves wolfCert's
- * pre-existing behavior. */
+ * Every field is zero-init-safe: the all-zero value of each preserves
+ * wolfCert's pre-existing behavior, so a caller only sets what it needs. */
 typedef struct {
     /* CA identifier sent as the `message` query parameter on GetCACaps and
      * GetCACert (RFC 8894 section 3.5.2 / 4.2), used to select a specific CA on
@@ -217,6 +227,13 @@ typedef struct {
      * keeps the RFC 8894 caps-driven choice (AES-128-CBC, else 3DES); an
      * explicit value forces that cipher for a peer that requires it. */
     WolfCertScepContentCipher content_cipher;
+
+    /* messageType a renewal carries. The default is RFC 8894's RenewalReq;
+     * PKCS_REQ sends messageType 19 with the same existing-certificate signer,
+     * for a CA that predates RenewalReq. Read only by the renewal entry
+     * points. Check WolfCertScepCaps.renewal to see whether the CA advertises
+     * the RFC form before choosing. */
+    WolfCertScepRenewalMsgType renewal_msg_type;
 } WolfCertScepServerOpts;
 
 typedef struct {

@@ -186,7 +186,7 @@ static int check_get_fallback(const WolfCertServerCfg* cli,
 }
 
 /* proto_opts.scep.txid_mode = PUBKEY_HASH: the transactionID must be the
- * 64-char upper-case hex SHA-256 of the enrollee SubjectPublicKeyInfo, must
+ * 64-char upper-case hex SHA-256 of the enrollee public keyInfo, must
  * match a value recomputed from the CSR, and must be deterministic (a second
  * enrollment of the same key reuses it). Owns and frees everything it makes. */
 static int check_pubkey_txid(const WolfCertServerCfg* cli,
@@ -399,6 +399,277 @@ static int test_caps_token_matching(void)
     return 0;
 }
 
+/* Captures one POSTed pkiMessage and reports the messageType it carried. The
+ * in-tree server routes 19 and 17 through the same handler, so only a look at
+ * the wire can tell the two renewal shapes apart.
+ *
+ * Every declaration below initializes .listen_fd, which zero-fills the rest of
+ * the struct (C99 6.7.9p19), so the char buffers are empty strings even when
+ * the thread bails out before parsing and the assertions compare cleanly. */
+struct msgtype_ctx {
+    int    listen_fd;
+    char   seen[8];      /* the messageType attribute, or "" if not reached */
+    char   reqline[256]; /* the HTTP request line, for the GET operations */
+    size_t tid_len;      /* transactionID length, 0 if not reached */
+    char   cipher[8];    /* content-encryption OID seen in the EnvelopedData */
+};
+
+static void* msgtype_srv_thread(void* arg)
+{
+    struct msgtype_ctx* mc = (struct msgtype_ctx*)arg;
+    int cs = accept(mc->listen_fd, NULL, NULL);
+    close(mc->listen_fd);
+    if (cs < 0)
+        return NULL;
+
+    /* Bound the read so a client that never POSTs fails the assertion instead
+     * of hanging until the ctest timeout. */
+    struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
+    setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+
+    /* Read headers, find Content-Length, then the body that follows. One byte
+     * is held back so the header scan below can NUL-terminate what arrived:
+     * recv() does not, and strstr must not run off the end. */
+    uint8_t buf[16384];
+    size_t n = 0;
+    size_t hdr_end = 0, want = 0;
+    while (n < sizeof(buf) - 1) {
+        ssize_t r = recv(cs, buf + n, sizeof(buf) - 1 - n, 0);
+        if (r <= 0)
+            break;
+        n += (size_t)r;
+        if (hdr_end == 0) {
+            for (size_t i = 3; i < n; i++) {
+                if (memcmp(buf + i - 3, "\r\n\r\n", 4) == 0) {
+                    hdr_end = i + 1;
+                    break;
+                }
+            }
+            if (hdr_end != 0) {
+                buf[hdr_end - 1] = '\0';   /* terminate the header block only */
+                const char* cl = strstr((const char*)buf, "Content-Length:");
+                if (cl != NULL)
+                    want = (size_t)strtoul(cl + 15, NULL, 10);
+                buf[hdr_end - 1] = '\n';   /* restore; the body starts after */
+            }
+        }
+        if (hdr_end != 0 && n >= hdr_end + want)
+            break;
+    }
+
+    /* The request line, which is all a GET operation carries. */
+    for (size_t i = 0; i < n && i < sizeof(mc->reqline) - 1; i++) {
+        if (buf[i] == '\r' || buf[i] == '\n')
+            break;
+        mc->reqline[i] = (char)buf[i];
+        mc->reqline[i + 1] = '\0';
+    }
+
+    if (hdr_end != 0 && want > 0 && n >= hdr_end + want) {
+        char*    mt  = NULL;
+        uint8_t* tid = NULL;
+        size_t   tid_len = 0;
+        WolfCertBuffer env = { 0 };
+        if (wolfcert_scep_parse_pki_message(buf + hdr_end, want, &env,
+                                            &tid, &tid_len,     /* txid      */
+                                            NULL, NULL,         /* senderNonce */
+                                            NULL, NULL,         /* recipNonce  */
+                                            &mt,                /* messageType */
+                                            NULL,               /* pkiStatus   */
+                                            NULL, NULL,         /* signer cert */
+                                            NULL,               /* failInfo    */
+                                            NULL) == WOLFCERT_OK) {
+            if (mt != NULL)
+                snprintf(mc->seen, sizeof(mc->seen), "%s", mt);
+            mc->tid_len = tid_len;
+
+            /* The content-encryption AlgorithmIdentifier inside the
+             * EnvelopedData: the option is only honoured if this changes. */
+            static const uint8_t OID_AES128[] =
+                { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x01,0x02 };
+            static const uint8_t OID_AES256[] =
+                { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x01,0x2a };
+            static const uint8_t OID_DES3[] =
+                { 0x06,0x08,0x2a,0x86,0x48,0x86,0xf7,0x0d,0x03,0x07 };
+            if (env.data != NULL) {
+                if (memmem(env.data, env.len, OID_AES256, sizeof(OID_AES256)))
+                    snprintf(mc->cipher, sizeof(mc->cipher), "aes256");
+                else if (memmem(env.data, env.len, OID_AES128, sizeof(OID_AES128)))
+                    snprintf(mc->cipher, sizeof(mc->cipher), "aes128");
+                else if (memmem(env.data, env.len, OID_DES3, sizeof(OID_DES3)))
+                    snprintf(mc->cipher, sizeof(mc->cipher), "des3");
+            }
+        }
+        /* Parser output comes from the wolfCert heap, not libc. */
+        WOLFCERT_XFREE(mt, NULL);
+        WOLFCERT_XFREE(tid, NULL);
+        wolfcert_buffer_free(&env);
+    }
+
+    /* The client's round trip fails from here; the request is all we wanted. */
+    close(cs);
+    return NULL;
+}
+
+#ifdef WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE
+/* The end-to-end cipher check above only proves the server de-enveloped
+ * whatever arrived, which it does for any OID, so it would pass even if the
+ * override were ignored. Read the algorithm off the wire instead. */
+static int check_content_cipher_wire(const WolfCertScepCaps* caps,
+                                     const WolfCertKeyCfg* kcfg,
+                                     const uint8_t* ca_der_buf, size_t ca_der_len,
+                                     WolfCertScepContentCipher cipher,
+                                     const char* expect)
+{
+    struct msgtype_ctx mc = { .listen_fd = -1 };
+    pthread_t tid;
+    int port = 0;
+    mc.listen_fd = listen_loopback(&port);
+    REQUIRE(mc.listen_fd >= 0);
+    REQUIRE(pthread_create(&tid, NULL, msgtype_srv_thread, &mc) == 0);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    WolfCertServerCfg cli = {
+        .protocol   = WOLFCERT_PROTO_SCEP,
+        .server_url = url,
+        .proto_opts.scep = { .content_cipher = cipher },
+    };
+
+    WolfCertCertMeta meta = { .subject_dn = "CN=device-cipher-wire" };
+    WolfCertKey*     key = NULL;
+    WolfCertBuffer   csr = { 0 }, issued = { 0 };
+    REQUIRE(wolfcert_key_generate(kcfg, &key) == WOLFCERT_OK);
+    REQUIRE(wolfcert_csr_build(key, &meta, &csr) == WOLFCERT_OK);
+
+    /* The listener never answers, so the call fails; the request is the point. */
+    (void)wolfcert_scep_pkcs_req(&cli, caps, ca_der_buf, ca_der_len, key,
+                                 csr.data, csr.len, &issued);
+    wolfcert_buffer_free(&issued);
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(key);
+    pthread_join(tid, NULL);
+
+    REQUIRE(strcmp(mc.cipher, expect) == 0);
+    return 0;
+}
+#endif /* WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE */
+
+/* proto_opts.scep.renewal_msg_type picks the messageType a renewal carries,
+ * while the signer stays the certificate being replaced either way. Default is
+ * RFC 8894's RenewalReq (17); PKCS_REQ sends 19 for a CA that predates it. */
+static int check_renewal_msg_type(const WolfCertScepCaps* caps,
+                                  const uint8_t* ca_der_buf, size_t ca_der_len,
+                                  const uint8_t* cur_cert, size_t cur_cert_len,
+                                  const WolfCertKey* cur_key,
+                                  const uint8_t* csr, size_t csr_len,
+                                  WolfCertScepRenewalMsgType mode,
+                                  const char* expect)
+{
+    struct msgtype_ctx mc = { .listen_fd = -1 };
+    pthread_t tid;
+    int port = 0;
+    mc.listen_fd = listen_loopback(&port);
+    REQUIRE(mc.listen_fd >= 0);
+    REQUIRE(pthread_create(&tid, NULL, msgtype_srv_thread, &mc) == 0);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    WolfCertServerCfg cli = {
+        .protocol   = WOLFCERT_PROTO_SCEP,
+        .server_url = url,
+        .proto_opts.scep = { .renewal_msg_type = mode },
+    };
+
+    WolfCertScepResult r = { 0 };
+    /* The capture server never answers, so the call fails; the assertion is
+     * about what it put on the wire before that. */
+    (void)wolfcert_scep_renewal_req_ex(&cli, caps, ca_der_buf, ca_der_len,
+                                       ca_der_buf, ca_der_len,
+                                       cur_cert, cur_cert_len, cur_key,
+                                       csr, csr_len, &r);
+    wolfcert_scep_result_free(&r);
+    pthread_join(tid, NULL);
+
+    REQUIRE(strcmp(mc.seen, expect) == 0);
+    return 0;
+}
+
+/* The session captures the SCEP options at open rather than reading the config
+ * per request, so the capture has its own coverage: drive a session renewal
+ * against the recording listener and check both the messageType it chose and
+ * the transactionID form it derived. */
+static int check_session_opts_capture(const WolfCertScepCaps* caps,
+                                      const uint8_t* ca_der_buf, size_t ca_der_len,
+                                      const uint8_t* cur_cert, size_t cur_cert_len,
+                                      const WolfCertKey* cur_key,
+                                      const uint8_t* csr, size_t csr_len)
+{
+    struct msgtype_ctx mc = { .listen_fd = -1 };
+    pthread_t tid;
+    int port = 0;
+    mc.listen_fd = listen_loopback(&port);
+    REQUIRE(mc.listen_fd >= 0);
+    REQUIRE(pthread_create(&tid, NULL, msgtype_srv_thread, &mc) == 0);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    WolfCertServerCfg cli = {
+        .protocol   = WOLFCERT_PROTO_SCEP,
+        .server_url = url,
+        .proto_opts.scep = {
+            .txid_mode        = WOLFCERT_SCEP_TXID_PUBKEY_HASH,
+            .renewal_msg_type = WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ,
+        },
+    };
+
+    WolfCertScepSession* sess = NULL;
+    REQUIRE(wolfcert_scep_session_open(&cli, &sess) == WOLFCERT_OK);
+
+    WolfCertScepResult r = { 0 };
+    /* The listener never answers, so this fails; the request is the assertion. */
+    (void)wolfcert_scep_session_renewal_req_ex(sess, caps, ca_der_buf, ca_der_len,
+                                               ca_der_buf, ca_der_len,
+                                               cur_cert, cur_cert_len, cur_key,
+                                               csr, csr_len, &r);
+    wolfcert_scep_result_free(&r);
+    wolfcert_scep_session_close(sess);
+    pthread_join(tid, NULL);
+
+    REQUIRE(strcmp(mc.seen, "19") == 0);   /* renewal_msg_type captured */
+    REQUIRE(mc.tid_len == 64);             /* txid_mode captured        */
+    return 0;
+}
+
+/* RFC 8894 section 4.6.1: GetNextCACert takes the CA identifier too, so a
+ * multi-CA responder can be told which rollover certificate is wanted. */
+static int check_getnextca_ca_id(const uint8_t* ca_der_buf, size_t ca_der_len)
+{
+    struct msgtype_ctx mc = { .listen_fd = -1 };
+    pthread_t tid;
+    int port = 0;
+    mc.listen_fd = listen_loopback(&port);
+    REQUIRE(mc.listen_fd >= 0);
+    REQUIRE(pthread_create(&tid, NULL, msgtype_srv_thread, &mc) == 0);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    WolfCertServerCfg cli = {
+        .protocol   = WOLFCERT_PROTO_SCEP,
+        .server_url = url,
+        .proto_opts.scep = { .ca_id = "RolloverCA" },
+    };
+
+    WolfCertBuffer next = { 0 };
+    (void)wolfcert_scep_get_next_ca_cert(&cli, ca_der_buf, ca_der_len, &next);
+    wolfcert_buffer_free(&next);
+    pthread_join(tid, NULL);
+
+    REQUIRE(strstr(mc.reqline, "operation=GetNextCACert") != NULL);
+    REQUIRE(strstr(mc.reqline, "message=RolloverCA") != NULL);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -479,6 +750,44 @@ int main(void)
                                  ca_der->length, WOLFCERT_SCEP_CIPHER_AES128)
             == WOLFCERT_OK);
 #endif
+
+    /* ---- Renewal messageType. The signer is the certificate being replaced
+     * in both cases; only the attribute changes, and the in-tree server routes
+     * 19 and 17 through one handler, so this reads the value off the wire. */
+    REQUIRE(check_renewal_msg_type(&caps, ca_der->buffer, ca_der->length,
+                                   issued_der->buffer, issued_der->length, dk,
+                                   csr.data, csr.len,
+                                   WOLFCERT_SCEP_RENEWAL_MSG_RENEWAL_REQ,
+                                   "17") == 0);
+    REQUIRE(check_renewal_msg_type(&caps, ca_der->buffer, ca_der->length,
+                                   issued_der->buffer, issued_der->length, dk,
+                                   csr.data, csr.len,
+                                   WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ,
+                                   "19") == 0);
+
+    /* ...and the same options read off the wire, since the server de-envelops
+     * any OID and so cannot tell an honoured override from an ignored one. */
+#if defined(WOLFSSL_AES_256) && defined(HAVE_AES_CBC)
+    REQUIRE(check_content_cipher_wire(&caps, &kcfg, ca_der->buffer,
+                                      ca_der->length,
+                                      WOLFCERT_SCEP_CIPHER_AES256,
+                                      "aes256") == 0);
+#endif
+#if defined(WOLFSSL_AES_128) && defined(HAVE_AES_CBC)
+    REQUIRE(check_content_cipher_wire(&caps, &kcfg, ca_der->buffer,
+                                      ca_der->length,
+                                      WOLFCERT_SCEP_CIPHER_AES128,
+                                      "aes128") == 0);
+#endif
+
+    /* The session captures the SCEP options at open, so that path needs its own
+     * check rather than inheriting the one-shot coverage above. */
+    REQUIRE(check_session_opts_capture(&caps, ca_der->buffer, ca_der->length,
+                                       issued_der->buffer, issued_der->length,
+                                       dk, csr.data, csr.len) == 0);
+
+    /* The CA identifier belongs on GetNextCACert as well (RFC 8894 4.6.1). */
+    REQUIRE(check_getnextca_ca_id(ca_der->buffer, ca_der->length) == 0);
 
     /* Negative GET PKIOperation branches (RFC 8894 section 4.1): the server must
      * reject each malformed request with 400. These cannot be produced by the
