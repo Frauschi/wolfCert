@@ -126,8 +126,10 @@ typedef struct {
 
 WOLFCERT_API void wolfcert_scep_result_free(WolfCertScepResult* r);
 
-/* PKCSReq: enroll a new certificate. challengePassword is taken from
- * srv->password.
+/* PKCSReq: enroll a new certificate. The RFC 8894 section 2.9 challengePassword
+ * travels inside the CSR as its PKCS#9 attribute - set
+ * WolfCertCertMeta.challenge_password before wolfcert_csr_build. SCEP sends no
+ * HTTP-layer credentials.
  *
  * `ra_cert` is the DER cert the request is enveloped to (the CA/RA encryption
  * cert). `ca_bundle` is the trusted GetCACert response (one or more
@@ -246,11 +248,11 @@ WOLFCERT_API int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
  *
  * Transport auth: a plaintext http:// session is accepted, but an https://
  * session requires srv->verify_server (an unverified TLS handshake is refused).
- * The session authenticates the enrollment at the pkiMessage layer (the CMS
- * signature bound to the CA/RA bundle, plus the PKCS#9 challengePassword) and
- * via optional mTLS; it does NOT apply HTTP Basic auth, so srv->username /
- * srv->password are ignored by the session API (they are an EST-oriented
- * transport credential). */
+ * The enrollment is authenticated at the pkiMessage layer (the CMS signature
+ * bound to the CA/RA bundle, plus the PKCS#9 challengePassword) and via
+ * optional mTLS. No SCEP entry point sends HTTP Basic credentials - RFC 8894
+ * defines no HTTP-layer authentication - which is why WolfCertServerCfg keeps
+ * username / password in the EST arm of proto_opts. */
 typedef struct WolfCertScepSession WolfCertScepSession;
 
 /* NOTE (transport, differs from the EST session): a plaintext http:// URL is

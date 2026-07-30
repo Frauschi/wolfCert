@@ -141,7 +141,8 @@ int main(void)
              wolfcert_server_port(s));
     WolfCertServerCfg client_cfg = { .protocol = WOLFCERT_PROTO_EST,
                                      .server_url = url,
-                                     .username = "alice", .password = "hunter2",
+                                     .proto_opts.est = { .username = "alice",
+                                                         .password = "hunter2" },
                                      .trust_anchors = tls_cert,
                                      .trust_anchors_len = tls_cert_len,
                                      .verify_server = 1 };

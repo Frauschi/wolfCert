@@ -189,14 +189,62 @@ int main(void)
     REQUIRE(memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) != NULL);
 
     wolfcert_buffer_free(&ca_pem);
-    wolfcert_buffer_free(&csr);
     wolfcert_buffer_free(&issued);
-    wolfcert_key_free(dk);
     wolfcert_est_session_close(es);
 
     wolfcert_server_stop(srv);
     pthread_join(tid, NULL);
     wolfcert_server_free(srv);
+
+    /* --- HTTP Basic on the async session (RFC 7030 section 3.2.3). The
+     * credentials must ride every request the session pumps out, so /cacerts
+     * and /simpleenroll both have to satisfy a server that demands them.
+     * Reuses the CSR built above against a second, Basic-only server. */
+    WolfCertServerCfgSrv bcfg = {
+        .protocol        = WOLFCERT_PROTO_EST,
+        .bind_host       = "127.0.0.1",
+        .bind_port       = 0,
+        .http_basic_user = "alice",
+        .http_basic_pass = "hunter2",
+        .tls_cert_pem    = tls_cert, .tls_cert_pem_len = tls_cert_len,
+        .tls_key_pem     = tls_key,  .tls_key_pem_len  = tls_key_len,
+    };
+    WolfCertServer* bsrv = NULL;
+    REQUIRE(wolfcert_server_start(&bcfg, &bsrv) == WOLFCERT_OK);
+    pthread_t btid;
+    REQUIRE(pthread_create(&btid, NULL, server_thread, bsrv) == 0);
+
+    char burl[128];
+    snprintf(burl, sizeof(burl), "https://127.0.0.1:%u/.well-known/est",
+             wolfcert_server_port(bsrv));
+
+    WolfCertServerCfg bcli = {
+        .protocol          = WOLFCERT_PROTO_EST,
+        .server_url        = burl,
+        .proto_opts.est    = { .username = "alice", .password = "hunter2" },
+        .trust_anchors     = tls_cert,
+        .trust_anchors_len = tls_cert_len,
+        .verify_server     = 1,
+    };
+    WolfCertEstSession* bes = NULL;
+    REQUIRE(wolfcert_est_session_open_async(&bcli, &bes) == WOLFCERT_OK);
+
+    WolfCertBuffer bca = { 0 }, bissued = { 0 };
+    REQUIRE(pump_get_cacerts(bes, &bca) == 0);
+    REQUIRE(bca.len > 0);
+    REQUIRE(pump_simple_enroll(bes, csr.data, csr.len, &bissued) == 0);
+    REQUIRE(memmem(bissued.data, bissued.len, "BEGIN CERTIFICATE", 17) != NULL);
+
+    wolfcert_buffer_free(&bca);
+    wolfcert_buffer_free(&bissued);
+    wolfcert_est_session_close(bes);
+
+    wolfcert_server_stop(bsrv);
+    pthread_join(btid, NULL);
+    wolfcert_server_free(bsrv);
+
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(dk);
 
     free(tls_cert);
     free(tls_key);

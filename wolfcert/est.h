@@ -241,6 +241,11 @@ WOLFCERT_API int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
  *      wolfSSL answers from the pre-loaded identity without further
  *      caller involvement.
  *
+ * HTTP Basic (RFC 7030 section 3.2.3) works just as well as a client
+ * certificate here: proto_opts.est.username / .password are copied at
+ * session open and replayed on every request the session issues, blocking
+ * and async alike.
+ *
  * On a build where wolfSSL lacks WOLFSSL_POST_HANDSHAKE_AUTH the
  * session_open call fails with WOLFCERT_ERR_UNSUPPORTED when the caller
  * asked for PHA. */

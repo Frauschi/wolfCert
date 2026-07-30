@@ -171,6 +171,12 @@ typedef enum {
 
 /* EST-only knobs, reached through WolfCertServerCfg.proto_opts.est. */
 typedef struct {
+    /* HTTP Basic credentials (RFC 7030 section 3.2.3), optional. Sent on
+     * every one-shot request and on every request a keep-alive session
+     * issues. */
+    const char* username;
+    const char* password;
+
     /* TLS 1.3 post-handshake authentication opt-in (RFC 8446 section 4.6.2).
      * Read only by the keep-alive EST session API; the one-shot
      * per-request transports don't keep a session to re-auth on. When
@@ -216,8 +222,6 @@ typedef struct {
 typedef struct {
     WolfCertProtocol protocol;
     const char*      server_url;     /* e.g. https://ca.example/.well-known/est */
-    const char*      username;       /* EST HTTP Basic user (optional) */
-    const char*      password;       /* EST HTTP Basic password (EST only) */
     const uint8_t*   trust_anchors; /* bootstrap trust for TLS; PEM or DER; optional */
     size_t           trust_anchors_len;
     int              verify_server;  /* 0 = explicit-TA bootstrap, 1 = full verify */

@@ -84,8 +84,8 @@ static void print_usage(FILE* out)
         "  --trust PEMFILE            Trust anchors for TLS; turns on server\n"
         "                             certificate verification. Required for EST\n"
         "                             (RFC 7030 mandates authenticating the server).\n"
-        "  --user USER                HTTP Basic user (EST)\n"
-        "  --pass PASS                HTTP Basic password (EST)\n"
+        "  --user USER                HTTP Basic user (EST only)\n"
+        "  --pass PASS                HTTP Basic password (EST only)\n"
         "  --challenge PASS           SCEP challengePassword (CSR attribute, RFC 8894 section 2.9)\n"
         "  --client-cert PEMFILE      Client certificate for mutual TLS\n"
         "  --client-key  PEMFILE      Private key for --client-cert\n"
@@ -437,6 +437,51 @@ static void fill_trust(const Opts* opts, WolfCertServerCfg* cfg,
     *trust_hold = trust_buf;
 }
 
+/* Reject the EST-only options when the caller picked SCEP, rather than quietly
+ * ignoring something they asked for. Each has no SCEP counterpart: RFC 8894
+ * authenticates the enrollment inside the pkiMessage (--challenge) and defines
+ * nothing at the HTTP layer, has no attribute-hint endpoint to fetch, and no
+ * keep-alive TLS identity to re-authenticate mid-session. Single home for this
+ * policy, so every command scopes the same flags the same way. */
+static int check_est_only_opts(const Opts* opts, WolfCertProtocol p)
+{
+    if (p == WOLFCERT_PROTO_EST)
+        return 0;
+
+    if (opts->user != NULL || opts->pass != NULL) {
+        fprintf(stderr, "--user/--pass are EST-only; SCEP authenticates with "
+                        "--challenge (RFC 8894 section 2.9)\n");
+        return -1;
+    }
+
+    if (opts->csrattrs_auto) {
+        fprintf(stderr, "--csrattrs-auto is EST-only; SCEP has no /csrattrs "
+                        "endpoint\n");
+        return -1;
+    }
+
+    if (opts->pha) {
+        fprintf(stderr, "--pha is EST-only; SCEP authenticates at the "
+                        "pkiMessage layer, not in the TLS handshake\n");
+        return -1;
+    }
+
+    return 0;
+}
+
+/* Copy the HTTP Basic credentials into the EST arm of proto_opts. The protocol
+ * test is what keeps this from writing an inactive union member - a SCEP config
+ * would alias them onto proto_opts.scep - and check_est_only_opts has already
+ * rejected credentials supplied under SCEP. cfg->protocol must be set. */
+static void fill_basic_auth(const Opts* opts, WolfCertServerCfg* cfg)
+{
+    if (cfg->protocol != WOLFCERT_PROTO_EST)
+        return;
+
+    cfg->proto_opts.est.username = opts->user;
+    cfg->proto_opts.est.password = opts->pass;
+}
+
 static int fill_client_ident(const Opts* opts, WolfCertServerCfg* cfg,
                              uint8_t** cert_hold, uint8_t** key_hold)
 {
@@ -486,12 +531,15 @@ static int cmd_getcacerts(int argc, char** argv)
     if (ret == 0 && proto_of(opts.proto, &p) != 0)
         ret = 1;
 
+    if (ret == 0 && check_est_only_opts(&opts, p) != 0)
+        ret = 1;
+
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
-                              .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
 
     if (ret == 0) {
         fill_trust(&opts, &srv, &trust_hold);
+        fill_basic_auth(&opts, &srv);
         if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
             ret = 1;
     }
@@ -552,6 +600,9 @@ static int cmd_enroll(int argc, char** argv)
     if (ret == 0 && proto_of(opts.proto, &p) != 0)
         ret = 1;
 
+    if (ret == 0 && check_est_only_opts(&opts, p) != 0)
+        ret = 1;
+
     if (ret == 0 && opts.subject == NULL) {
         fprintf(stderr, "enroll: --subject required\n");
         ret = 1;
@@ -561,7 +612,6 @@ static int cmd_enroll(int argc, char** argv)
      * pick a key type. The key cfg + meta are populated below, then
      * optionally overlaid with /csrattrs hints, then used to generate. */
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
-                              .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
     WolfCertCertMeta meta = { .subject_dn = opts.subject,
                               .san_dns = opts.san_dns, .san_dns_len = opts.san_dns_len,
@@ -572,6 +622,7 @@ static int cmd_enroll(int argc, char** argv)
 
     if (ret == 0) {
         fill_trust(&opts, &srv, &trust_hold);
+        fill_basic_auth(&opts, &srv);
         if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
             ret = 1;
     }
@@ -852,6 +903,9 @@ static int cmd_reenroll(int argc, char** argv)
     if (ret == 0 && proto_of(opts.proto, &p) != 0)
         ret = 1;
 
+    if (ret == 0 && check_est_only_opts(&opts, p) != 0)
+        ret = 1;
+
     if (ret == 0 && p != WOLFCERT_PROTO_EST) {
         fprintf(stderr, "reenroll: only EST is supported in the CLI today\n");
         ret = 2;
@@ -893,11 +947,11 @@ static int cmd_reenroll(int argc, char** argv)
     }
 
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
-                              .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
 
     if (ret == 0) {
         fill_trust(&opts, &srv, &trust_hold);
+        fill_basic_auth(&opts, &srv);
         if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
             ret = 1;
     }
@@ -965,17 +1019,20 @@ static int cmd_getnextca(int argc, char** argv)
     if (ret == 0 && proto_of(opts.proto, &p) != 0)
         ret = 1;
 
+    if (ret == 0 && check_est_only_opts(&opts, p) != 0)
+        ret = 1;
+
     if (ret == 0 && p != WOLFCERT_PROTO_SCEP) {
         fprintf(stderr, "getnextca: only --proto scep is supported\n");
         ret = 1;
     }
 
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
-                              .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
 
     if (ret == 0) {
         fill_trust(&opts, &srv, &trust_hold);
+        fill_basic_auth(&opts, &srv);
         if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
             ret = 1;
     }

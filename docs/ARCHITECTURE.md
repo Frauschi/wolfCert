@@ -145,7 +145,10 @@ what enables the post-handshake-auth bootstrap below.
 **Authentication shapes.** EST supports three, all through the same
 `WolfCertServerCfg`:
 
-1. **HTTP Basic over TLS** — set `username` / `password`.
+1. **HTTP Basic over TLS** — set `proto_opts.est.username` / `.password`. Sent
+   on the one-shot calls and on every request a keep-alive session issues.
+   EST-only: SCEP authenticates inside the pkiMessage, so the fields live in
+   the EST arm of the union and no SCEP entry point reads them.
 2. **mTLS up front** — set `client_cert` / `client_key`; they're presented
    during the handshake.
 3. **TLS 1.3 post-handshake auth** — set `client_cert` / `client_key` *and*

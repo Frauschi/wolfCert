@@ -161,6 +161,57 @@ static int enroll_check_san(const WolfCertServerCfg* client_cfg)
     return 0;
 }
 
+/* HTTP Basic (RFC 7030 section 3.2.3) must authenticate a keep-alive session
+ * too, not just the one-shot calls: the credentials have to ride every request
+ * on the connection. Enrolls with the good credentials from `client_cfg`, then
+ * repeats with a wrong password and requires a rejection - so a session that
+ * silently dropped the Authorization header cannot pass both halves. */
+static int session_basic_auth(const WolfCertServerCfg* client_cfg)
+{
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* dk = NULL;
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
+    WolfCertCertMeta meta = { .subject_dn = "CN=session-basic-auth" };
+    WolfCertBuffer csr = { 0 };
+    REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
+
+    WolfCertEstSession* s = NULL;
+    REQUIRE(wolfcert_est_session_open(client_cfg, &s) == WOLFCERT_OK);
+
+    WolfCertBuffer ca_pem = { 0 }, issued = { 0 };
+    REQUIRE(wolfcert_est_session_get_cacerts(s, &ca_pem) == WOLFCERT_OK);
+    REQUIRE(ca_pem.len > 0);
+    REQUIRE(wolfcert_est_session_simple_enroll(s, csr.data, csr.len, &issued)
+            == WOLFCERT_OK);
+
+    DerBuffer* issued_der = NULL;
+    REQUIRE(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE,
+                        &issued_der, NULL, NULL, NULL) == 0);
+    wc_FreeDer(&issued_der);
+
+    wolfcert_buffer_free(&ca_pem);
+    wolfcert_buffer_free(&issued);
+    wolfcert_est_session_close(s);
+
+    /* Same session shape, wrong password: the server must reject the enroll. */
+    WolfCertServerCfg bad_cfg = *client_cfg;
+    bad_cfg.proto_opts.est.password = "wrong";
+
+    WolfCertEstSession* bs = NULL;
+    REQUIRE(wolfcert_est_session_open(&bad_cfg, &bs) == WOLFCERT_OK);
+
+    WolfCertBuffer bad_out = { 0 };
+    REQUIRE(wolfcert_est_session_simple_enroll(bs, csr.data, csr.len, &bad_out)
+            == WOLFCERT_ERR_AUTH);
+    REQUIRE(bad_out.data == NULL);
+    wolfcert_est_session_close(bs);
+
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(dk);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -192,7 +243,8 @@ int main(void)
              wolfcert_server_port(s));
     WolfCertServerCfg client_cfg = { .protocol = WOLFCERT_PROTO_EST,
                                      .server_url = url,
-                                     .username = "alice", .password = "hunter2",
+                                     .proto_opts.est = { .username = "alice",
+                                                         .password = "hunter2" },
                                      .trust_anchors = tls_cert,
                                      .trust_anchors_len = tls_cert_len,
                                      .verify_server = 1,
@@ -236,6 +288,10 @@ int main(void)
     if (enroll_check_san(&client_cfg))
         return 1;
 
+    /* Keep-alive session against the same Basic-auth-protected server. */
+    if (session_basic_auth(&client_cfg))
+        return 1;
+
     /* Proof-of-possession: a CSR whose self-signature does not validate must
      * be rejected. Build a valid CSR, corrupt a byte of its trailing
      * signature value (DER structure stays intact so it still parses), and
@@ -268,8 +324,8 @@ int main(void)
     WolfCertBuffer csr = { 0 };
     REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
 
-    client_cfg.username = "bad";
-    client_cfg.password = "wrong";
+    client_cfg.proto_opts.est.username = "bad";
+    client_cfg.proto_opts.est.password = "wrong";
     WolfCertBuffer bad = { 0 };
     REQUIRE(wolfcert_est_simple_enroll(&client_cfg, csr.data, csr.len, &bad)
             == WOLFCERT_ERR_AUTH);
@@ -301,7 +357,8 @@ int main(void)
                                .trust_anchors = tls_cert,
                                .trust_anchors_len = tls_cert_len,
                                .verify_server = 1,
-                               .username = "alice", .password = "hunter" };
+                               .proto_opts.est = { .username = "alice",
+                                                   .password = "hunter" } };
 
     WolfCertKeyCfg akcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                              .dev_id = WOLFCERT_DEVID_SOFTWARE };
@@ -318,7 +375,7 @@ int main(void)
     wolfcert_buffer_free(&aok);
 
     /* Correct token prefix plus trailing bytes must be rejected. */
-    acli.password = "hunterABC";
+    acli.proto_opts.est.password = "hunterABC";
     WolfCertBuffer abad = { 0 };
     REQUIRE(wolfcert_est_simple_enroll(&acli, acsr.data, acsr.len, &abad)
             == WOLFCERT_ERR_AUTH);

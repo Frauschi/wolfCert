@@ -57,10 +57,12 @@ static char* append_query(const char* base, const char* op, void* heap)
     return url;
 }
 
+/* No HTTP Basic credentials here, unlike EST: RFC 8894 authenticates the
+ * enrollment inside the pkiMessage - the CMS signature bound to the CA/RA
+ * bundle plus the PKCS#9 challengePassword - and defines nothing at the HTTP
+ * layer. */
 static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
 {
-    req->basic_user         = srv->username;
-    req->basic_pass         = srv->password;
     req->trust_anchors      = srv->trust_anchors;
     req->trust_anchors_len  = srv->trust_anchors_len;
     req->verify_server      = srv->verify_server;
