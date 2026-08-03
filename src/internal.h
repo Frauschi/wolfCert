@@ -264,6 +264,13 @@ int  wolfcert_rng_new(WC_RNG* rng);
 int  wolfcert_ecc_curve_from_param(int param, int* out_curve_id, int* out_key_size);
 #endif
 
+/* WolfCertServerCfg.protocol is the discriminator for the proto_opts union, so
+ * a protocol-specific entry point must confirm it before reading its arm: the
+ * other arm's members overlay incompatible types and would be reinterpreted.
+ * Every EST and SCEP entry point that takes a WolfCertServerCfg calls this. */
+int wolfcert_cfg_require_proto(const WolfCertServerCfg* srv,
+                               WolfCertProtocol want, const char* module);
+
 typedef struct {
     char* scheme;
     char* host;
@@ -291,6 +298,13 @@ WOLFCERT_TEST_VIS int wolfcert_base64_encode_mime(const uint8_t* in, size_t in_l
                                                   WolfCertBuffer* out, void* heap);
 WOLFCERT_TEST_VIS int wolfcert_base64_decode(const uint8_t* in, size_t in_len,
                                              WolfCertBuffer* out, void* heap);
+
+/* Hex-encode `in_len` bytes into `out`, which must hold at least 2 * in_len
+ * characters. `upper` selects upper-case digits. No NUL terminator is written,
+ * so the same helper serves both string building (caller terminates) and
+ * fixed-length wire fields such as the SCEP transactionID. */
+WOLFCERT_TEST_VIS void wolfcert_hex_encode(const uint8_t* in, size_t in_len,
+                                           int upper, char* out);
 
 int  wolfcert_pem_cert_to_der(const uint8_t* pem, size_t pem_len,
                               WolfCertBuffer* out_der, void* heap);
@@ -355,6 +369,14 @@ WOLFCERT_TEST_VIS int wolfcert_scep_envelop(const uint8_t* ra_cert_der,
  * WOLFCERT_SCEP_MAX_GET_URL. Exposed for white-box testing. */
 WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_get_url(const char* base,
     const uint8_t* pki_msg, size_t pki_len, void* heap, char** out_url);
+
+/* Build the URL for any SCEP operation whose only parameter is the CA
+ * identifier: base?operation=<op>[&message=<ca_id>]. That covers GetCACaps,
+ * GetCACert and GetNextCACert; `op` is copied verbatim. The CA identifier is
+ * appended (URL-encoded) only when ca_id is non-NULL and non-empty. Returns a
+ * heap-allocated URL owned by the caller, or NULL. */
+WOLFCERT_TEST_VIS char* wolfcert_scep_build_getca_url(const char* base,
+    const char* op, const char* ca_id, void* heap);
 int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_cert_len,
                             const uint8_t* recipient_key_der,  size_t recipient_key_len,
                             const uint8_t* env_der, size_t env_len,

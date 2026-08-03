@@ -168,19 +168,18 @@ int wolfcert_client_enroll(WolfCertClient* client, const WolfCertServerCfg* srv,
     WolfCertKeyCfg   eff_key  = *key_cfg;
     WolfCertCertMeta eff_meta = *meta;
 
-    if (srv->auto_csrattrs) {
 #ifdef WOLFCERT_HAVE_EST
-        if (srv->protocol == WOLFCERT_PROTO_EST) {
-            int rc = wolfcert_client_auto_csrattrs(srv, &eff_key, &eff_meta);
-            if (rc != WOLFCERT_OK)
-                return rc;
-        }
-        else
-#endif
-        {
-            return WOLFCERT_ERR_UNSUPPORTED;
-        }
+    /* auto_csrattrs lives in the EST arm of proto_opts, so the protocol test
+     * has to come first: on a SCEP config that arm is not the active union
+     * member and its contents mean nothing. There is no SCEP equivalent of
+     * /csrattrs, and no way to ask for one - the flag simply does not exist
+     * on WolfCertScepServerOpts. */
+    if (srv->protocol == WOLFCERT_PROTO_EST && srv->proto_opts.est.auto_csrattrs) {
+        int rc = wolfcert_client_auto_csrattrs(srv, &eff_key, &eff_meta);
+        if (rc != WOLFCERT_OK)
+            return rc;
     }
+#endif
 
     WolfCertKey* key = NULL;
     int rc = wolfcert_key_generate(&eff_key, &key);

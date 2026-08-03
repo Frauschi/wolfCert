@@ -158,6 +158,18 @@ int wolfcert_rng_new(WC_RNG* rng)
     return rc == 0 ? WOLFCERT_OK : wolfcert_map_wc_err(rc);
 }
 
+int wolfcert_cfg_require_proto(const WolfCertServerCfg* srv,
+                               WolfCertProtocol want, const char* module)
+{
+    if (srv->protocol == want)
+        return WOLFCERT_OK;
+
+    return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, module,
+        "WolfCertServerCfg.protocol is %d, not %d: it selects the proto_opts "
+        "arm, so a %s entry point cannot read a config built for another "
+        "protocol", (int)srv->protocol, (int)want, module);
+}
+
 int wolfcert_map_wc_err(int wc_rc)
 {
     if (wc_rc == 0)
@@ -285,6 +297,23 @@ WOLFCERT_TEST_VIS int wolfcert_base64_decode(const uint8_t* in, size_t in_len,
     out->heap = heap;
 
     return WOLFCERT_OK;
+}
+
+WOLFCERT_TEST_VIS void wolfcert_hex_encode(const uint8_t* in, size_t in_len,
+                                           int upper, char* out)
+{
+    static const char HEX_LOWER[] = "0123456789abcdef";
+    static const char HEX_UPPER[] = "0123456789ABCDEF";
+    const char* hex = upper ? HEX_UPPER : HEX_LOWER;
+    size_t i;
+
+    if (in == NULL || out == NULL)
+        return;
+
+    for (i = 0; i < in_len; ++i) {
+        out[i*2]   = hex[in[i] >> 4];
+        out[i*2+1] = hex[in[i] & 0x0F];
+    }
 }
 
 WOLFCERT_TEST_VIS int wolfcert_buffer_is_der(const uint8_t* buf, size_t len)

@@ -84,8 +84,8 @@ static void print_usage(FILE* out)
         "  --trust PEMFILE            Trust anchors for TLS; turns on server\n"
         "                             certificate verification. Required for EST\n"
         "                             (RFC 7030 mandates authenticating the server).\n"
-        "  --user USER                HTTP Basic user (EST)\n"
-        "  --pass PASS                HTTP Basic password (EST)\n"
+        "  --user USER                HTTP Basic user (EST only)\n"
+        "  --pass PASS                HTTP Basic password (EST only)\n"
         "  --challenge PASS           SCEP challengePassword (CSR attribute, RFC 8894 section 2.9)\n"
         "  --client-cert PEMFILE      Client certificate for mutual TLS\n"
         "  --client-key  PEMFILE      Private key for --client-cert\n"
@@ -93,16 +93,28 @@ static void print_usage(FILE* out)
         "                             Runs /cacerts and /simpleenroll on one keep-alive\n"
         "                             TLS connection; initial handshake is anonymous and\n"
         "                             the server requests the client cert mid-session.\n"
+        "  --ca-id ID                 CA identifier for a multi-CA responder (SCEP only).\n"
+        "                             Sent as message=<id> on GetCACaps / GetCACert\n"
+        "                             (RFC 8894 section 3.5.2); omitted by default.\n"
+        "  --txid-mode random|pubkey  transactionID derivation (SCEP only, default\n"
+        "                             random). pubkey = SHA-256 of the signer public key\n"
+        "                             (RFC 8894 section 3.2.1), so retries of one key\n"
+        "                             reuse a single transactionID.\n"
+        "  --content-cipher auto|aes128|aes256|des3\n"
+        "                             Request content encryption (SCEP only, default\n"
+        "                             auto: AES-128-CBC when the CA advertises AES, else\n"
+        "                             3DES). Force a value for a peer that requires one -\n"
+        "                             no GetCACaps keyword advertises AES-256.\n"
         "\n"
         "enroll options:\n"
         "  --key-type KT                   Key type (default ecc:256; SCEP needs rsa)\n"
         "                                  KT = rsa:BITS | ecc:CURVE | ed25519 |\n"
         "                                       ed448    | mldsa:44|65|87\n"
         "  --subject DN                    Subject DN\n"
-        "  --san-dns NAME                  SAN dNSName (repeatable, EST)\n"
-        "  --san-ip ADDR                   SAN iPAddress, IPv4 or IPv6 (repeatable, EST)\n"
-        "  --san-uri URI                   SAN uniformResourceIdentifier (repeatable, EST)\n"
-        "  --san-email ADDR                SAN rfc822Name (repeatable, EST)\n"
+        "  --san-dns NAME                  SAN dNSName (repeatable)\n"
+        "  --san-ip ADDR                   SAN iPAddress, IPv4 or IPv6 (repeatable)\n"
+        "  --san-uri URI                   SAN uniformResourceIdentifier (repeatable)\n"
+        "  --san-email ADDR                SAN rfc822Name (repeatable)\n"
         "  --out-key FILE                  Write new private key (PEM)\n"
         "  --out-cert FILE                 Write issued certificate (PEM)\n"
         "  --poll-attempts N               Retry on PENDING up to N times (default 0). Applies\n"
@@ -154,6 +166,9 @@ typedef struct {
     int          poll_interval_ms;
     int          pha;
     int          csrattrs_auto;
+    const char*  ca_id;          /* SCEP-only, see check_proto_only_opts */
+    const char*  txid_mode;
+    const char*  content_cipher;
 } Opts;
 
 /* Append a value to a growable string-pointer array (used for repeatable
@@ -208,6 +223,9 @@ static int parse_common(int argc, char** argv, Opts* opts)
         { "poll-interval-ms", required_argument, NULL, 'I' },
         { "pha",              no_argument,       NULL, 'H' },
         { "csrattrs-auto",    no_argument,       NULL, 'Z' },
+        { "ca-id",            required_argument, NULL, 'D' },
+        { "txid-mode",        required_argument, NULL, 'T' },
+        { "content-cipher",   required_argument, NULL, 'E' },
         { 0 }
     };
     memset(opts, 0, sizeof(*opts));
@@ -295,6 +313,15 @@ static int parse_common(int argc, char** argv, Opts* opts)
                 break;
             case 'Z':
                 opts->csrattrs_auto = 1;
+                break;
+            case 'D':
+                opts->ca_id = optarg;
+                break;
+            case 'T':
+                opts->txid_mode = optarg;
+                break;
+            case 'E':
+                opts->content_cipher = optarg;
                 break;
             default:
                 return -1;
@@ -437,6 +464,123 @@ static void fill_trust(const Opts* opts, WolfCertServerCfg* cfg,
     *trust_hold = trust_buf;
 }
 
+/* Reject the options that belong to the other protocol, rather than quietly
+ * ignoring something the caller asked for. They map one-to-one onto the two
+ * arms of WolfCertServerCfg.proto_opts, so an option that survives this check
+ * is always written to the active union member. Single home for the policy, so
+ * every command scopes the same flags the same way.
+ *
+ * --challenge is deliberately absent: a PKCS#9 challengePassword is SCEP's
+ * authenticator but is legitimate in an EST CSR too, since /csrattrs can ask
+ * for one. */
+static int check_proto_only_opts(const Opts* opts, WolfCertProtocol p)
+{
+    /* proto_of() yields EST or SCEP and nothing else, so the two arms below
+     * cover every protocol a command can reach this point with. */
+    if (p == WOLFCERT_PROTO_EST) {
+        if (opts->ca_id != NULL) {
+            fprintf(stderr, "--ca-id is SCEP-only; EST has no CA-identifier "
+                            "selector\n");
+            return -1;
+        }
+
+        if (opts->txid_mode != NULL) {
+            fprintf(stderr, "--txid-mode is SCEP-only; EST has no "
+                            "transactionID\n");
+            return -1;
+        }
+
+        if (opts->content_cipher != NULL) {
+            fprintf(stderr, "--content-cipher is SCEP-only; EST carries the "
+                            "CSR over TLS, not in an encrypted CMS envelope\n");
+            return -1;
+        }
+    }
+    else {
+        if (opts->user != NULL || opts->pass != NULL) {
+            fprintf(stderr, "--user/--pass are EST-only; SCEP authenticates "
+                            "with --challenge (RFC 8894 section 2.9)\n");
+            return -1;
+        }
+
+        if (opts->csrattrs_auto) {
+            fprintf(stderr, "--csrattrs-auto is EST-only; SCEP has no "
+                            "/csrattrs endpoint\n");
+            return -1;
+        }
+
+        if (opts->pha) {
+            fprintf(stderr, "--pha is EST-only; SCEP authenticates at the "
+                            "pkiMessage layer, not in the TLS handshake\n");
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
+/* Copy the HTTP Basic credentials into the EST arm of proto_opts. A no-op on
+ * any other protocol, so a caller can invoke it unconditionally. The protocol
+ * test is what keeps this from writing an inactive union member - a SCEP config
+ * would alias them onto proto_opts.scep - and check_proto_only_opts has already
+ * rejected credentials supplied under SCEP. cfg->protocol must be set. */
+static void fill_basic_auth(const Opts* opts, WolfCertServerCfg* cfg)
+{
+    if (cfg->protocol != WOLFCERT_PROTO_EST)
+        return;
+
+    cfg->proto_opts.est.username = opts->user;
+    cfg->proto_opts.est.password = opts->pass;
+}
+
+/* Fill the SCEP arm of proto_opts from --ca-id / --txid-mode / --content-cipher,
+ * rejecting an unknown keyword. Like fill_basic_auth this is a no-op on any
+ * other protocol and safe to call unconditionally, guarded for the same reason:
+ * on an EST config this arm is not the active union member. cfg->protocol must
+ * be set. */
+static int fill_scep_opts(const Opts* opts, WolfCertServerCfg* cfg)
+{
+    if (cfg->protocol != WOLFCERT_PROTO_SCEP)
+        return 0;
+
+    cfg->proto_opts.scep.ca_id = opts->ca_id;
+
+    if (opts->txid_mode != NULL) {
+        if (strcmp(opts->txid_mode, "random") == 0) {
+            cfg->proto_opts.scep.txid_mode = WOLFCERT_SCEP_TXID_RANDOM;
+        }
+        else if (strcmp(opts->txid_mode, "pubkey") == 0) {
+            cfg->proto_opts.scep.txid_mode = WOLFCERT_SCEP_TXID_PUBKEY_HASH;
+        }
+        else {
+            fprintf(stderr, "--txid-mode must be random or pubkey\n");
+            return -1;
+        }
+    }
+
+    if (opts->content_cipher != NULL) {
+        if (strcmp(opts->content_cipher, "auto") == 0) {
+            cfg->proto_opts.scep.content_cipher = WOLFCERT_SCEP_CIPHER_AUTO;
+        }
+        else if (strcmp(opts->content_cipher, "aes128") == 0) {
+            cfg->proto_opts.scep.content_cipher = WOLFCERT_SCEP_CIPHER_AES128;
+        }
+        else if (strcmp(opts->content_cipher, "aes256") == 0) {
+            cfg->proto_opts.scep.content_cipher = WOLFCERT_SCEP_CIPHER_AES256;
+        }
+        else if (strcmp(opts->content_cipher, "des3") == 0) {
+            cfg->proto_opts.scep.content_cipher = WOLFCERT_SCEP_CIPHER_DES3;
+        }
+        else {
+            fprintf(stderr, "--content-cipher must be auto, aes128, aes256 "
+                            "or des3\n");
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 static int fill_client_ident(const Opts* opts, WolfCertServerCfg* cfg,
                              uint8_t** cert_hold, uint8_t** key_hold)
 {
@@ -486,13 +630,18 @@ static int cmd_getcacerts(int argc, char** argv)
     if (ret == 0 && proto_of(opts.proto, &p) != 0)
         ret = 1;
 
+    if (ret == 0 && check_proto_only_opts(&opts, p) != 0)
+        ret = 1;
+
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
-                              .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
 
     if (ret == 0) {
         fill_trust(&opts, &srv, &trust_hold);
-        if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
+        fill_basic_auth(&opts, &srv);
+        if (fill_scep_opts(&opts, &srv) != 0)
+            ret = 1;
+        if (ret == 0 && fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
             ret = 1;
     }
 
@@ -552,6 +701,9 @@ static int cmd_enroll(int argc, char** argv)
     if (ret == 0 && proto_of(opts.proto, &p) != 0)
         ret = 1;
 
+    if (ret == 0 && check_proto_only_opts(&opts, p) != 0)
+        ret = 1;
+
     if (ret == 0 && opts.subject == NULL) {
         fprintf(stderr, "enroll: --subject required\n");
         ret = 1;
@@ -561,7 +713,6 @@ static int cmd_enroll(int argc, char** argv)
      * pick a key type. The key cfg + meta are populated below, then
      * optionally overlaid with /csrattrs hints, then used to generate. */
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
-                              .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
     WolfCertCertMeta meta = { .subject_dn = opts.subject,
                               .san_dns = opts.san_dns, .san_dns_len = opts.san_dns_len,
@@ -572,7 +723,10 @@ static int cmd_enroll(int argc, char** argv)
 
     if (ret == 0) {
         fill_trust(&opts, &srv, &trust_hold);
-        if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
+        fill_basic_auth(&opts, &srv);
+        if (fill_scep_opts(&opts, &srv) != 0)
+            ret = 1;
+        if (ret == 0 && fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
             ret = 1;
     }
 
@@ -648,7 +802,7 @@ static int cmd_enroll(int argc, char** argv)
         if (opts.pha) {
             /* Keep-alive + TLS 1.3 post-handshake auth: open one session,
              * fetch /cacerts anonymously, then let PHA drive /simpleenroll. */
-            srv.allow_post_handshake_auth = 1;
+            srv.proto_opts.est.allow_post_handshake_auth = 1;
             WolfCertEstSession* es = NULL;
             rc = wolfcert_est_session_open(&srv, &es);
             if (rc == WOLFCERT_OK) {
@@ -852,6 +1006,9 @@ static int cmd_reenroll(int argc, char** argv)
     if (ret == 0 && proto_of(opts.proto, &p) != 0)
         ret = 1;
 
+    if (ret == 0 && check_proto_only_opts(&opts, p) != 0)
+        ret = 1;
+
     if (ret == 0 && p != WOLFCERT_PROTO_EST) {
         fprintf(stderr, "reenroll: only EST is supported in the CLI today\n");
         ret = 2;
@@ -893,12 +1050,14 @@ static int cmd_reenroll(int argc, char** argv)
     }
 
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
-                              .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
 
     if (ret == 0) {
         fill_trust(&opts, &srv, &trust_hold);
-        if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
+        fill_basic_auth(&opts, &srv);
+        if (fill_scep_opts(&opts, &srv) != 0)
+            ret = 1;
+        if (ret == 0 && fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
             ret = 1;
     }
 
@@ -965,18 +1124,23 @@ static int cmd_getnextca(int argc, char** argv)
     if (ret == 0 && proto_of(opts.proto, &p) != 0)
         ret = 1;
 
+    if (ret == 0 && check_proto_only_opts(&opts, p) != 0)
+        ret = 1;
+
     if (ret == 0 && p != WOLFCERT_PROTO_SCEP) {
         fprintf(stderr, "getnextca: only --proto scep is supported\n");
         ret = 1;
     }
 
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url,
-                              .username = opts.user, .password = opts.pass,
                               .connect_cb = wolfcert_posix_connect };
 
     if (ret == 0) {
         fill_trust(&opts, &srv, &trust_hold);
-        if (fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
+        fill_basic_auth(&opts, &srv);
+        if (fill_scep_opts(&opts, &srv) != 0)
+            ret = 1;
+        if (ret == 0 && fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
             ret = 1;
     }
 

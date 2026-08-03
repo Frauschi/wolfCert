@@ -249,6 +249,7 @@ static int basic_auth_header(const char* user, const char* pass,
     word32 enc_cap = (word32)(((total + 2) / 3) * 4 + 4);
     uint8_t* enc = (uint8_t*)WOLFCERT_XMALLOC(enc_cap, heap);
     if (enc == NULL) {
+        wc_ForceZero(raw, (word32)total);
         WOLFCERT_XFREE(raw, heap);
         return WOLFCERT_ERR_MEMORY;
     }
@@ -256,8 +257,13 @@ static int basic_auth_header(const char* user, const char* pass,
     word32 enc_len = enc_cap;
     int rc = Base64_Encode_NoNl(raw, (word32)total, enc, &enc_len);
 
+    /* `raw` is the credential in the clear and `enc` is base64, which is
+     * encoding rather than protection - neither has any reason to sit in freed
+     * heap after the header is built. */
+    wc_ForceZero(raw, (word32)total);
     WOLFCERT_XFREE(raw, heap);
     if (rc != 0) {
+        wc_ForceZero(enc, enc_cap);
         WOLFCERT_XFREE(enc, heap);
         return WOLFCERT_ERR_CRYPTO;
     }
@@ -265,9 +271,14 @@ static int basic_auth_header(const char* user, const char* pass,
     int n = snprintf(out, out_cap, "Authorization: Basic %.*s\r\n",
                      (int)enc_len, (char*)enc);
 
+    wc_ForceZero(enc, enc_cap);
     WOLFCERT_XFREE(enc, heap);
-    if (n < 0 || (size_t)n >= out_cap)
+    if (n < 0 || (size_t)n >= out_cap) {
+        /* snprintf wrote into the caller's buffer before this check, so the
+         * error path still has a truncated credential to clear. */
+        wc_ForceZero(out, (word32)out_cap);
         return WOLFCERT_ERR_MEMORY;
+    }
 
     return n;
 }
@@ -859,8 +870,10 @@ static int http_write_request(WolfCertConn* c, const WolfCertUrl* u,
     if (req->basic_user != NULL) {
         int n = basic_auth_header(req->basic_user, req->basic_pass,
                                   auth, sizeof(auth), heap);
-        if (n < 0)
+        if (n < 0) {
+            wc_ForceZero(auth, (word32)sizeof(auth));
             return n;
+        }
     }
 
     char port_frag[16] = { 0 };
@@ -874,8 +887,10 @@ static int http_write_request(WolfCertConn* c, const WolfCertUrl* u,
                            + (req->accept ? strlen(req->accept) : 0)
                            + strlen(u->host) + strlen(u->path) + strlen(auth);
     char* head = (char*)WOLFCERT_XMALLOC(head_cap, heap);
-    if (head == NULL)
+    if (head == NULL) {
+        wc_ForceZero(auth, (word32)sizeof(auth));
         return WOLFCERT_ERR_MEMORY;
+    }
 
     int hn = snprintf(head, head_cap,
         "%s %s HTTP/1.1\r\n"
@@ -904,13 +919,19 @@ static int http_write_request(WolfCertConn* c, const WolfCertUrl* u,
         req->body_len,
         auth);
 
+    /* The Authorization line has been copied into `head`; drop this copy. */
+    wc_ForceZero(auth, (word32)sizeof(auth));
+
     if (hn < 0 || (size_t)hn >= head_cap) {
+        /* A truncated head can still carry part of the Authorization line. */
+        wc_ForceZero(head, (word32)head_cap);
         WOLFCERT_XFREE(head, heap);
         return WOLFCERT_ERR_MEMORY;
     }
 
     int rc = conn_write(c, head, (size_t)hn);
 
+    wc_ForceZero(head, (word32)hn);
     WOLFCERT_XFREE(head, heap);
     if (rc != WOLFCERT_OK)
         return rc;
@@ -1187,14 +1208,24 @@ int wolfcert_http_session_request(WolfCertHttpSession* s,
     return rc;
 }
 
-static void sm_reset(WolfCertHttpSession* s)
+/* Release the stored request head. It carries the Authorization line, so clear
+ * it rather than just releasing it. Every site that frees the head goes through
+ * here. */
+static void sm_drop_head(WolfCertHttpSession* s)
 {
-    WOLFCERT_XFREE(s->sm_head,         s->heap);
-    WOLFCERT_XFREE(s->sm_rx,           s->heap);
-    WOLFCERT_XFREE(s->sm_content_type, s->heap);
+    if (s->sm_head != NULL)
+        wc_ForceZero(s->sm_head, (word32)s->sm_head_len);
+    WOLFCERT_XFREE(s->sm_head, s->heap);
     s->sm_head = NULL;
     s->sm_head_len = 0;
     s->sm_head_off = 0;
+}
+
+static void sm_reset(WolfCertHttpSession* s)
+{
+    sm_drop_head(s);
+    WOLFCERT_XFREE(s->sm_rx,           s->heap);
+    WOLFCERT_XFREE(s->sm_content_type, s->heap);
     s->sm_body = NULL;
     s->sm_body_len = 0;
     s->sm_body_off = 0;
@@ -1375,8 +1406,10 @@ static int build_head(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
     if (req->basic_user != NULL) {
         int n = basic_auth_header(req->basic_user, req->basic_pass,
                                   auth, sizeof(auth), s->heap);
-        if (n < 0)
+        if (n < 0) {
+            wc_ForceZero(auth, (word32)sizeof(auth));
             return n;
+        }
     }
 
     char port_frag[16] = { 0 };
@@ -1389,8 +1422,10 @@ static int build_head(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
                            + (req->accept ? strlen(req->accept) : 0)
                            + strlen(u->host) + strlen(u->path) + strlen(auth);
     char* head = (char*)WOLFCERT_XMALLOC(head_cap, s->heap);
-    if (head == NULL)
+    if (head == NULL) {
+        wc_ForceZero(auth, (word32)sizeof(auth));
         return WOLFCERT_ERR_MEMORY;
+    }
 
     int hn = snprintf(head, head_cap,
         "%s %s HTTP/1.1\r\n"
@@ -1418,7 +1453,11 @@ static int build_head(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
         req->body_len,
         auth);
 
+    /* The Authorization line has been copied into `head`; drop this copy. */
+    wc_ForceZero(auth, (word32)sizeof(auth));
+
     if (hn < 0 || (size_t)hn >= head_cap) {
+        wc_ForceZero(head, (word32)head_cap);
         WOLFCERT_XFREE(head, s->heap);
         return WOLFCERT_ERR_MEMORY;
     }
@@ -1566,8 +1605,12 @@ int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
         if (s->residual_len > 0) {
             int rr = nb_rx_reserve(s, s->residual_len);
             if (rr != WOLFCERT_OK) {
-                s->sm_resp = NULL;
-                return rr;
+                /* build_head has already stored the Authorization line in
+                 * s->sm_head, so unwind through sm_fail: it scrubs the head
+                 * and closes the session. Returning directly would leave the
+                 * credentials allocated for the next build_head to overwrite
+                 * unzeroized. */
+                return sm_fail(s, rr);
             }
             memcpy(s->sm_rx, s->residual, s->residual_len);
             s->sm_rx_len = s->residual_len;
@@ -1713,11 +1756,8 @@ int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
             {
                 /* Release per-request scratch. sm_resp stays referenced
                 * by the caller via the returned response. */
-                WOLFCERT_XFREE(s->sm_head, s->heap);
+                sm_drop_head(s);
                 WOLFCERT_XFREE(s->sm_rx,   s->heap);
-                s->sm_head = NULL;
-                s->sm_head_len = 0;
-                s->sm_head_off = 0;
                 s->sm_rx = NULL;
                 s->sm_rx_len = 0;
                 s->sm_rx_cap = 0;

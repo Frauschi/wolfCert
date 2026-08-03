@@ -48,8 +48,8 @@ static char* join_path(const char* base, const char* suffix, void* heap)
 
 static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
 {
-    req->basic_user        = srv->username;
-    req->basic_pass        = srv->password;
+    req->basic_user        = srv->proto_opts.est.username;
+    req->basic_pass        = srv->proto_opts.est.password;
     req->trust_anchors     = srv->trust_anchors;
     req->trust_anchors_len = srv->trust_anchors_len;
     req->verify_server     = srv->verify_server;
@@ -68,7 +68,11 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
     req->connect_ctx       = srv->connect_ctx;
 }
 
-/* RFC 7030 mandates EST over TLS *and* that the client authenticate the
+/* Validate the config before it is used. The protocol check comes first: it
+ * gates every read of proto_opts.est below, which would otherwise reinterpret
+ * a SCEP arm's storage as the HTTP Basic credentials.
+ *
+ * RFC 7030 then mandates EST over TLS *and* that the client authenticate the
  * server on every request. Reject an explicitly non-TLS (http://) server URL
  * first; a schemeless URL already defaults to TLS in wolfcert_http_url_parse(),
  * so only an explicit http:// scheme is refused. Then require server
@@ -77,10 +81,14 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
  * verify_server off always completes an unauthenticated handshake - a pinned
  * trust anchor is loaded but never enforced - which would leak the HTTP Basic
  * credentials and the CSR to a MITM. */
-static int est_require_tls(const WolfCertServerCfg* srv, void* heap)
+static int est_check_cfg(const WolfCertServerCfg* srv, void* heap)
 {
     WolfCertUrl u;
-    int rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
+    int rc = wolfcert_cfg_require_proto(srv, WOLFCERT_PROTO_EST, "est");
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
     if (rc != WOLFCERT_OK)
         return rc;
 
@@ -111,7 +119,7 @@ int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv, WolfCertEncoding 
         return WOLFCERT_ERR_BAD_ARG;
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
-    int trc = est_require_tls(srv, heap);
+    int trc = est_check_cfg(srv, heap);
     if (trc != WOLFCERT_OK)
         return trc;
 
@@ -168,7 +176,7 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
     memset(out, 0, sizeof(*out));
     out->heap = heap;
-    int trc = est_require_tls(srv, heap);
+    int trc = est_check_cfg(srv, heap);
     if (trc != WOLFCERT_OK)
         return trc;
 
@@ -381,6 +389,12 @@ struct WolfCertEstSession {
     size_t               max_body;
     void*                heap;
 
+    /* HTTP Basic credentials, copied from the config at open (the caller's
+     * WolfCertServerCfg need not outlive the session) and replayed on every
+     * request the session issues. NULL when the caller supplied none. */
+    char*                basic_user;
+    char*                basic_pass;
+
     /* Async in-flight state: at most one request at a time. */
     int                  in_active;
     char*                in_url;
@@ -399,10 +413,16 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
 
+    /* The session copies proto_opts.est below, so confirm the discriminator
+     * before reading that arm. */
+    int rc = wolfcert_cfg_require_proto(srv, WOLFCERT_PROTO_EST, "est");
+    if (rc != WOLFCERT_OK)
+        return rc;
+
     /* Split the base URL into scheme://host[:port] for the HTTP session
      * vs the path suffix, so per-endpoint joins still work. */
     WolfCertUrl u;
-    int rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
+    rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
     if (rc != WOLFCERT_OK)
         return rc;
 
@@ -414,7 +434,7 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
 
     /* EST also requires authenticating the server (RFC 7030); refuse a session
      * that would run an unauthenticated (verify_server off) handshake, matching
-     * the one-shot est_require_tls() gate. */
+     * the one-shot est_check_cfg() gate. */
     if (!srv->verify_server) {
         wolfcert_http_url_free(&u);
         return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
@@ -444,6 +464,22 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
         return WOLFCERT_ERR_MEMORY;
     }
 
+    /* RFC 7030 section 3.2.3: HTTP Basic is one of the client authentication
+     * mechanisms an EST server may demand, so the session has to carry the
+     * credentials across every request on the connection, not just the first. */
+    const char* user = srv->proto_opts.est.username;
+    const char* pass = srv->proto_opts.est.password;
+    if (user != NULL)
+        s->basic_user = wolfcert_strdup(user, heap);
+    if (pass != NULL)
+        s->basic_pass = wolfcert_strdup(pass, heap);
+    if ((user != NULL && s->basic_user == NULL) ||
+        (pass != NULL && s->basic_pass == NULL)) {
+        wolfcert_est_session_close(s);
+        WOLFCERT_XFREE(origin, heap);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
     WolfCertHttpSessionCfg hcfg = {
         .base_url                  = origin,
         .trust_anchors             = srv->trust_anchors,
@@ -455,7 +491,7 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
         .client_cert_len           = srv->client_cert_len,
         .client_key                = srv->client_key,
         .client_key_len            = srv->client_key_len,
-        .allow_post_handshake_auth = srv->allow_post_handshake_auth,
+        .allow_post_handshake_auth = srv->proto_opts.est.allow_post_handshake_auth,
         .nonblocking               = nonblocking,
         .connect_cb                = srv->connect_cb,
         .connect_ctx               = srv->connect_ctx,
@@ -465,8 +501,13 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
 
     WOLFCERT_XFREE(origin, heap);
     if (rc != WOLFCERT_OK) {
-        WOLFCERT_XFREE(s->base_url, heap);
-        WOLFCERT_XFREE(s, heap);
+        /* Tear down through the close helper rather than freeing by hand: it
+         * is the one place that zeroizes the Basic password copy, and a dial
+         * failure here (DNS, connect, or a rejected server certificate) is
+         * routine enough that an enrolment retry loop would otherwise strand
+         * one plaintext copy per attempt. s->http is NULL, so the helper's
+         * `if (s->http)` guard makes it safe on a half-built session. */
+        wolfcert_est_session_close(s);
         return rc;
     }
 
@@ -513,6 +554,15 @@ void wolfcert_est_session_close(WolfCertEstSession* s)
         wolfcert_http_session_close(s->http);
 
     WOLFCERT_XFREE(s->base_url, s->heap);
+
+    /* The credential pair has no reason to outlive the session; the user half
+     * counts too, since half a credential still narrows an attacker's search. */
+    if (s->basic_user != NULL)
+        wc_ForceZero(s->basic_user, (word32)strlen(s->basic_user));
+    WOLFCERT_XFREE(s->basic_user, s->heap);
+    if (s->basic_pass != NULL)
+        wc_ForceZero(s->basic_pass, (word32)strlen(s->basic_pass));
+    WOLFCERT_XFREE(s->basic_pass, s->heap);
     WOLFCERT_XFREE(s, s->heap);
 }
 
@@ -530,6 +580,7 @@ int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
         s->in_req = (WolfCertHttpRequest){
             .method = "GET", .url = s->in_url,
             .accept = "application/pkcs7-mime",
+            .basic_user = s->basic_user, .basic_pass = s->basic_pass,
             .max_response_bytes = s->max_body,
             .heap = s->heap,
         };
@@ -589,6 +640,8 @@ int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
             .content_type              = "application/pkcs10",
             .content_transfer_encoding = "base64",
             .accept                    = "application/pkcs7-mime",
+            .basic_user                = s->basic_user,
+            .basic_pass                = s->basic_pass,
             .body                      = s->in_body.data,
             .body_len                  = s->in_body.len,
             .max_response_bytes        = s->max_body,
@@ -644,6 +697,8 @@ int wolfcert_est_session_get_cacerts(WolfCertEstSession* s,
 
     WolfCertHttpRequest req = { .method = "GET", .url = url,
                                 .accept = "application/pkcs7-mime",
+                                .basic_user = s->basic_user,
+                                .basic_pass = s->basic_pass,
                                 .max_response_bytes = s->max_body,
                                 .heap = s->heap };
     WolfCertHttpResponse resp = { 0 };
@@ -696,6 +751,8 @@ int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
         .content_type              = "application/pkcs10",
         .content_transfer_encoding = "base64",
         .accept                    = "application/pkcs7-mime",
+        .basic_user                = s->basic_user,
+        .basic_pass                = s->basic_pass,
         .body                      = b64.data,
         .body_len                  = b64.len,
         .max_response_bytes        = s->max_body,
@@ -744,7 +801,7 @@ int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
     memset(out_attrs_der, 0, sizeof(*out_attrs_der));
     out_attrs_der->heap = heap;
-    int trc = est_require_tls(srv, heap);
+    int trc = est_check_cfg(srv, heap);
     if (trc != WOLFCERT_OK)
         return trc;
 

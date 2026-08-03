@@ -121,13 +121,22 @@ fi
 # ---- SCEP enrollment ------------------------------------------------------
 
 echo "[2] SCEP: wolfcert-client enroll against step-ca (RSA device key)"
-# With the RSA chain in place the pkcsPKIEnvelope encrypts and step-ca issues
-# the cert, but its CertRep is signed by github.com/smallstep/scep (the
-# micromdm library), so verifying that signature hits the same wolfSSL PKCS#7
-# gap as the micromdm interop (ASN_SIG_CONFIRM_E, -229). This is a STRICT
-# assertion by design: it fails until wolfSSL PR #10928 (pkcs7_fix) reaches
-# master, then self-heals to PASS. See docs/INTEROP.md note 5.
 SCEP_URL="https://localhost:$CA_PORT/scep/SCEP"
+
+# --ca-id first: GetCACert does not verify a CertRep, so it still reports if an
+# enrollment regression takes the assertion below down. step-ca selects its
+# provisioner from the URL path rather than the message= parameter, so this
+# checks that adding the parameter does not upset the endpoint.
+"$WC_CLIENT" getcacerts --proto scep \
+    --url   "$SCEP_URL" \
+    --trust ca-root.pem \
+    --ca-id "SCEP" \
+    >stepca-ca-id.pem 2>stepca-ca-id.log \
+    || { echo "    FAIL (--ca-id getcacerts failed):"; cat stepca-ca-id.log; exit 1; }
+grep -q "BEGIN CERTIFICATE" stepca-ca-id.pem \
+    || { echo "    FAIL (--ca-id getcacerts returned no certificate)"; exit 1; }
+echo "    PASS  (--ca-id accepted on GetCACert)"
+
 "$WC_CLIENT" enroll --proto scep \
     --url  "$SCEP_URL" \
     --trust ca-root.pem \

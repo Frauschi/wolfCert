@@ -153,11 +153,92 @@ typedef struct {
     void*                  customize_ctx;
 } WolfCertCertMeta;
 
+/* SCEP transactionID derivation (WolfCertScepServerOpts.txid_mode). */
+typedef enum {
+    WOLFCERT_SCEP_TXID_RANDOM      = 0, /* random 16-byte value, hex-encoded (default) */
+    WOLFCERT_SCEP_TXID_PUBKEY_HASH = 1  /* SHA-256 of the signer public key */
+} WolfCertScepTxidMode;
+
+/* SCEP request content-encryption cipher (WolfCertScepServerOpts.content_cipher).
+ * AUTO keeps the RFC 8894 caps-driven default; the explicit values force a
+ * cipher for a known peer (e.g. a wolfSCEP deployment that requires AES-256). */
+typedef enum {
+    WOLFCERT_SCEP_CIPHER_AUTO   = 0, /* AES-128-CBC when the CA advertises AES, else 3DES */
+    WOLFCERT_SCEP_CIPHER_AES128 = 1,
+    WOLFCERT_SCEP_CIPHER_AES256 = 2,
+    WOLFCERT_SCEP_CIPHER_DES3   = 3
+} WolfCertScepContentCipher;
+
+/* Which messageType a SCEP renewal carries (WolfCertScepServerOpts.renewal_msg_type).
+ * Either way the pkiMessage is signed by the certificate being replaced; only the
+ * messageType attribute changes. RENEWAL_REQ is RFC 8894 section 3.3.1's
+ * messageType 17. PKCS_REQ sends 19 instead, which is what CAs that predate
+ * RenewalReq expect for a renewal. */
+typedef enum {
+    WOLFCERT_SCEP_RENEWAL_MSG_RENEWAL_REQ = 0, /* messageType 17 (default) */
+    WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ    = 1  /* messageType 19 */
+} WolfCertScepRenewalMsgType;
+
+/* EST-only knobs, reached through WolfCertServerCfg.proto_opts.est. */
+typedef struct {
+    /* HTTP Basic credentials (RFC 7030 section 3.2.3), optional. Sent on
+     * every one-shot request and on every request a keep-alive session
+     * issues. */
+    const char* username;
+    const char* password;
+
+    /* TLS 1.3 post-handshake authentication opt-in (RFC 8446 section 4.6.2).
+     * Read only by the keep-alive EST session API; the one-shot
+     * per-request transports don't keep a session to re-auth on. When
+     * set, client_cert / client_key are loaded on the SSL even
+     * when the initial handshake is anonymous so that wolfSSL can
+     * answer a later CertificateRequest from the server transparently. */
+    int allow_post_handshake_auth;
+
+    /* Auto-discovery of /csrattrs hints before enrolment. When
+     * non-zero, `wolfcert_client_enroll` fetches the server's
+     * /.well-known/est/csrattrs response, parses it, and applies the
+     * typed hints (preferred key type + curve / RSA bits,
+     * preferred signature hash) to a writable copy of the caller's
+     * `key_cfg` and `meta` before generating the key and building the
+     * CSR. Caller-supplied explicit values always win - this only
+     * fills fields the caller left at their zero defaults.
+     *
+     * Silently a no-op when the server responds with 204 No Content
+     * (no policy advertised). */
+    int auto_csrattrs;
+} WolfCertEstServerOpts;
+
+/* SCEP-only knobs, reached through WolfCertServerCfg.proto_opts.scep.
+ * Every field is zero-init-safe: the all-zero value of each preserves
+ * wolfCert's pre-existing behavior, so a caller only sets what it needs. */
+typedef struct {
+    /* CA identifier sent as the `message` query parameter on GetCACaps and
+     * GetCACert (RFC 8894 section 3.5.2 / 4.2), used to select a specific CA on
+     * a multi-CA responder. NULL (the default) omits the parameter. */
+    const char*               ca_id;
+
+    /* How the enrollment pkiMessage transactionID is derived. RANDOM (default)
+     * uses fresh RNG bytes; PUBKEY_HASH derives it from the signer public key
+     * (RFC 8894 section 3.2.1) so retries of the same key reuse one ID. */
+    WolfCertScepTxidMode      txid_mode;
+
+    /* Content-encryption cipher for the request EnvelopedData. AUTO (default)
+     * keeps the RFC 8894 caps-driven choice (AES-128-CBC, else 3DES); an
+     * explicit value forces that cipher for a peer that requires it. */
+    WolfCertScepContentCipher content_cipher;
+
+    /* messageType a renewal carries. The default is RFC 8894's RenewalReq;
+     * PKCS_REQ sends messageType 19 with the same existing-certificate signer,
+     * for a CA that predates RenewalReq. Read only by the renewal entry
+     * points. Check WolfCertScepCaps.renewal to see whether the CA advertises
+     * the RFC form before choosing. */
+    WolfCertScepRenewalMsgType renewal_msg_type;
+} WolfCertScepServerOpts;
+
 typedef struct {
     WolfCertProtocol protocol;
     const char*      server_url;     /* e.g. https://ca.example/.well-known/est */
-    const char*      username;       /* EST HTTP Basic user (optional) */
-    const char*      password;       /* EST HTTP Basic password (EST only) */
     const uint8_t*   trust_anchors; /* bootstrap trust for TLS; PEM or DER; optional */
     size_t           trust_anchors_len;
     int              verify_server;  /* 0 = explicit-TA bootstrap, 1 = full verify */
@@ -184,35 +265,30 @@ typedef struct {
      * typically sets this explicitly. */
     size_t           max_response_bytes;
 
-    /* TLS 1.3 post-handshake authentication opt-in (RFC 8446 section 4.6.2).
-     * Read only by the keep-alive EST session API; the one-shot
-     * per-request transports don't keep a session to re-auth on. When
-     * set, client_cert / client_key are loaded on the SSL even
-     * when the initial handshake is anonymous so that wolfSSL can
-     * answer a later CertificateRequest from the server transparently. */
-    int              allow_post_handshake_auth;
-
-    /* Auto-discovery of /csrattrs hints before enrolment. When
-     * non-zero, `wolfcert_client_enroll` fetches the server's
-     * /.well-known/est/csrattrs response, parses it, and applies the
-     * typed hints (preferred key type + curve / RSA bits,
-     * preferred signature hash) to a writable copy of the caller's
-     * `key_cfg` and `meta` before generating the key and building the
-     * CSR. Caller-supplied explicit values always win - this only
-     * fills fields the caller left at their zero defaults.
-     *
-     * EST only; wolfcert_client_enroll returns WOLFCERT_ERR_UNSUPPORTED
-     * if the protocol is SCEP. Silently a no-op when the server
-     * responds with 204 No Content (no policy advertised). */
-    int              auto_csrattrs;
-
     /* Optional pluggable transport. When connect_cb is set, wolfCert calls it
      * (instead of the built-in wolfcert_posix_connect) to open every TCP
      * connection for this server; connect_ctx is passed through untouched.
      * Lets an application own DNS/socket policy or supply a custom transport
      * while wolfCert keeps doing the HTTP and (via wolfSSL) TLS I/O. */
     WolfCertConnectFn connect_cb;
-    void*            connect_ctx;
+    void*             connect_ctx;
+
+    /* Protocol-specific options, selected by `protocol`: one connection is
+     * either EST or SCEP, never both, so the two option sets share storage.
+     * Every member is zero-init-safe - leaving the union untouched keeps the
+     * default behavior of both protocols. The arm that does not match
+     * `protocol` is never read.
+     *
+     * Because `protocol` is the discriminator, it must be set on every config
+     * handed to a protocol-specific entry point, not just to the generic
+     * wolfcert_client_* calls. A wolfcert_est_* call rejects a config whose
+     * protocol is not WOLFCERT_PROTO_EST with WOLFCERT_ERR_BAD_ARG, and the
+     * wolfcert_scep_* calls do the same for WOLFCERT_PROTO_SCEP, rather than
+     * reinterpret the other arm's storage. */
+    union {
+        WolfCertEstServerOpts  est;
+        WolfCertScepServerOpts scep;
+    } proto_opts;
 
     /* Heap hint for any library-internal allocations made while servicing
      * this request. NULL = library default. */

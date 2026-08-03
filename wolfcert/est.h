@@ -233,13 +233,18 @@ WOLFCERT_API int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
  *
  *   1. Open the session with a client cert/key (factory identity),
  *      WolfCertServerCfg.verify_server on, and
- *      wolfcert_est_session_cfg.allow_post_handshake_auth = 1.
+ *      WolfCertServerCfg.proto_opts.est.allow_post_handshake_auth = 1.
  *   2. Call wolfcert_est_session_get_cacerts - goes out on an anonymous
  *      TLS connection (server doesn't ask for the identity yet).
  *   3. Call wolfcert_est_session_simple_enroll - server requests the
  *      client cert via TLS 1.3 post-handshake auth (RFC 8446 section 4.6.2);
  *      wolfSSL answers from the pre-loaded identity without further
  *      caller involvement.
+ *
+ * HTTP Basic (RFC 7030 section 3.2.3) works just as well as a client
+ * certificate here: proto_opts.est.username / .password are copied at
+ * session open and replayed on every request the session issues, blocking
+ * and async alike.
  *
  * On a build where wolfSSL lacks WOLFSSL_POST_HANDSHAKE_AUTH the
  * session_open call fails with WOLFCERT_ERR_UNSUPPORTED when the caller
@@ -263,8 +268,9 @@ WOLFCERT_API int wolfcert_est_session_fd(const WolfCertEstSession* s);
 
 /* Async variants. The session must have been opened via a
  * WolfCertServerCfg built from a WolfCertHttpSessionCfg with
- * nonblocking=1; at that API level, pass srv->allow_post_handshake_auth
- * and/or other options plus the new wolfcert_est_session_open_async().
+ * nonblocking=1; at that API level, pass
+ * srv->proto_opts.est.allow_post_handshake_auth and/or other options plus
+ * the new wolfcert_est_session_open_async().
  *
  * Each call drives the HTTP session state machine forward and returns
  *   WOLFCERT_OK              - `out_*` populated.

@@ -255,6 +255,38 @@ static int test_oid_to_dotted(void)
     return 0;
 }
 
+/* wolfcert_hex_encode writes exactly 2 * in_len characters in the requested
+ * case and touches nothing beyond them (callers such as url_encode and the SCEP
+ * transactionID builders rely on both properties). */
+static int test_hex_encode(void)
+{
+    const uint8_t in[] = { 0x00, 0x0f, 0xa5, 0xff };
+    char out[16];
+
+    memset(out, 'x', sizeof(out));
+    wolfcert_hex_encode(in, sizeof(in), 0, out);
+    REQUIRE(memcmp(out, "000fa5ff", 8) == 0);
+    REQUIRE(out[8] == 'x');                  /* no NUL terminator, no overrun */
+
+    memset(out, 'x', sizeof(out));
+    wolfcert_hex_encode(in, sizeof(in), 1, out);
+    REQUIRE(memcmp(out, "000FA5FF", 8) == 0);
+    REQUIRE(out[8] == 'x');
+
+    /* Single-byte encoding, the shape url_encode uses per escaped byte. */
+    memset(out, 'x', sizeof(out));
+    wolfcert_hex_encode(in + 2, 1, 1, out);
+    REQUIRE(memcmp(out, "A5", 2) == 0);
+    REQUIRE(out[2] == 'x');
+
+    /* Zero length and NULL input must leave the buffer alone. */
+    wolfcert_hex_encode(in, 0, 1, out);
+    wolfcert_hex_encode(NULL, sizeof(in), 1, out);
+    REQUIRE(out[0] == 'A' && out[1] == '5' && out[2] == 'x');
+
+    return 0;
+}
+
 /* RFC 7030 mandates that an EST client authenticate the server. In this
  * transport verify_server is the only switch that turns on peer verification,
  * so any config that leaves it at its zero default must be refused - with or
@@ -318,6 +350,58 @@ static int test_est_require_server_auth(void)
     return 0;
 }
 
+/* WolfCertServerCfg.protocol discriminates the proto_opts union, so an EST
+ * entry point handed a SCEP config must refuse it rather than read the wrong
+ * arm. The overlay is actively dangerous: proto_opts.scep.txid_mode and
+ * .content_cipher share storage with proto_opts.est.password, so reading the
+ * EST arm here would hand basic_auth_header a pointer fabricated from two
+ * enum values. Every rejection happens before any network access. */
+static int test_est_rejects_scep_cfg(void)
+{
+    static const uint8_t dummy_csr[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
+    WolfCertServerCfg srv = {
+        .protocol      = WOLFCERT_PROTO_SCEP,
+        .server_url    = "https://127.0.0.1:1/scep",
+        .verify_server = 1,
+        .proto_opts.scep = {
+            .ca_id          = "RolloverCA",
+            .txid_mode      = WOLFCERT_SCEP_TXID_PUBKEY_HASH,
+            .content_cipher = WOLFCERT_SCEP_CIPHER_AES256
+        }
+    };
+    WolfCertBuffer out = { 0 };
+    WolfCertEstSession* sess = NULL;
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* rk = NULL;
+
+    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_simple_enroll(&srv, dummy_csr, sizeof(dummy_csr),
+                                       &out) == WOLFCERT_ERR_BAD_ARG);
+
+    REQUIRE(wolfcert_key_generate(&kcfg, &rk) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_simple_reenroll(&srv, dummy_csr, sizeof(dummy_csr), rk,
+                                         dummy_csr, sizeof(dummy_csr), &out)
+            == WOLFCERT_ERR_BAD_ARG);
+    wolfcert_key_free(rk);
+
+    /* Both session-open paths gate on the discriminator too, before they copy
+     * the credentials out of the union. */
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(sess == NULL);
+    REQUIRE(wolfcert_est_session_open_async(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(sess == NULL);
+
+    /* An unset discriminator is refused for the same reason: nothing says
+     * which arm of the union the caller populated. */
+    srv.protocol = (WolfCertProtocol)0;
+    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
+
+    return 0;
+}
+
 /* Drive a non-blocking session enroll to completion, poll()ing on the
  * session fd between WANT_READ / WANT_WRITE returns. */
 static int pump_simple_enroll(WolfCertEstSession* s,
@@ -355,7 +439,13 @@ int main(void)
     if (test_oid_to_dotted())
         return 1;
 
+    if (test_hex_encode())
+        return 1;
+
     if (test_est_require_server_auth())
+        return 1;
+
+    if (test_est_rejects_scep_cfg())
         return 1;
 
     uint8_t ca_der[4096];

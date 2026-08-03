@@ -111,16 +111,16 @@ int main(void)
     /* --- Positive: session with client identity + PHA opt-in. */
     {
         WolfCertServerCfg cli = {
-            .protocol                  = WOLFCERT_PROTO_EST,
-            .server_url                = url,
-            .trust_anchors             = tls_cert,
-            .trust_anchors_len         = tls_cert_len,
-            .verify_server             = 1,
-            .client_cert               = cli_cert,
-            .client_cert_len           = cli_cert_len,
-            .client_key                = cli_key,
-            .client_key_len            = cli_key_len,
-            .allow_post_handshake_auth = 1,
+            .protocol          = WOLFCERT_PROTO_EST,
+            .server_url        = url,
+            .trust_anchors     = tls_cert,
+            .trust_anchors_len = tls_cert_len,
+            .verify_server     = 1,
+            .client_cert       = cli_cert,
+            .client_cert_len   = cli_cert_len,
+            .client_key        = cli_key,
+            .client_key_len    = cli_key_len,
+            .proto_opts.est    = { .allow_post_handshake_auth = 1 },
         };
         WolfCertEstSession* s = NULL;
         REQUIRE(wolfcert_est_session_open(&cli, &s) == WOLFCERT_OK);
@@ -160,12 +160,12 @@ int main(void)
      * because the PHA prompt finds nothing to send. */
     {
         WolfCertServerCfg cli = {
-            .protocol                  = WOLFCERT_PROTO_EST,
-            .server_url                = url,
-            .trust_anchors             = tls_cert,
-            .trust_anchors_len         = tls_cert_len,
-            .verify_server             = 1,
-            .allow_post_handshake_auth = 1,
+            .protocol          = WOLFCERT_PROTO_EST,
+            .server_url        = url,
+            .trust_anchors     = tls_cert,
+            .trust_anchors_len = tls_cert_len,
+            .verify_server     = 1,
+            .proto_opts.est    = { .allow_post_handshake_auth = 1 },
         };
         WolfCertEstSession* s = NULL;
         REQUIRE(wolfcert_est_session_open(&cli, &s) == WOLFCERT_OK);
