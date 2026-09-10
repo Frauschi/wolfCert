@@ -368,6 +368,70 @@ static int keepalive_after_split_trailer(uint16_t port)
     return 0;
 }
 
+/* Set by note_sigpipe(); a server write must leave it clear. */
+static volatile sig_atomic_t g_sigpipe_raised;
+
+static void note_sigpipe(int sig)
+{
+    (void)sig;
+    g_sigpipe_raised = 1;
+}
+
+/* Queue a full request, then close the peer: the queued bytes still reach the
+ * handler's response write. Own server, so no constraint on the accept loop. */
+static int no_sigpipe_on_response(void)
+{
+    static const char http_req[] =
+        "GET /nope HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    WolfCertServerCfgSrv cfg = {
+        .protocol = WOLFCERT_PROTO_EST,
+        .bind_host = "127.0.0.1", .bind_port = 0,
+    };
+    WolfCertServer*  srv = NULL;
+    struct sigaction sa, old;
+    uint8_t*         cert = NULL;
+    uint8_t*         key = NULL;
+    size_t           cert_len = 0;
+    size_t           key_len = 0;
+    int              sv[2];
+    int              rc;
+
+    /* EST requires a TLS identity even though serve_fd() stays plaintext. */
+    REQUIRE(gen_server_identity(&cert, &cert_len, &key, &key_len) == 0);
+    cfg.tls_cert_pem     = cert;
+    cfg.tls_cert_pem_len = cert_len;
+    cfg.tls_key_pem      = key;
+    cfg.tls_key_pem_len  = key_len;
+
+    REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
+    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    REQUIRE(write(sv[1], http_req, sizeof(http_req) - 1)
+            == (ssize_t)(sizeof(http_req) - 1));
+    close(sv[1]);
+
+    /* Catch, not ignore, so "not raised" differs from "raised and
+     * swallowed"; main() ignores it for the other cases. */
+    memset(&sa, 0, sizeof(sa));
+    sa.sa_handler = note_sigpipe;
+    sigemptyset(&sa.sa_mask);
+    REQUIRE(sigaction(SIGPIPE, &sa, &old) == 0);
+    g_sigpipe_raised = 0;
+
+    rc = wolfcert_server_serve_fd(srv, sv[0]);
+
+    REQUIRE(sigaction(SIGPIPE, &old, NULL) == 0);
+    close(sv[0]);
+    wolfcert_server_free(srv);
+    free(cert);
+    free(key);
+
+    REQUIRE(g_sigpipe_raised == 0);
+    /* The 404 for GET /nope, so the handler reached its response write. */
+    REQUIRE(rc == WOLFCERT_ERR_NOT_FOUND);
+
+    return 0;
+}
+
 int main(void)
 {
     /* A truncated request makes the server respond and close while the
@@ -404,6 +468,8 @@ int main(void)
         rc = accept_multisegment_chunked_body(port);
     if (rc == 0)
         rc = keepalive_after_split_trailer(port);
+    if (rc == 0)
+        rc = no_sigpipe_on_response();
 
     wolfcert_server_stop(srv);
     pthread_join(tid, NULL);
