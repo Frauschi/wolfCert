@@ -175,6 +175,44 @@ static int subject_copy_rejects_oversized_rdn(void)
 }
 #endif
 
+#ifdef WOLFCERT_HAVE_ECC
+/* The client refuses an over-long RDN for the same reason the issuance path
+ * does: a truncated value enrols under a subject the caller did not request. */
+static int csr_build_rejects_oversized_rdn(void)
+{
+    WolfCertKeyCfg cfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+                           .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* key = NULL;
+    WolfCertCertMeta meta = { 0 };
+    WolfCertBuffer der = { 0 };
+    char dn[3 + CTC_NAME_SIZE + 8];
+
+    REQUIRE(wolfcert_key_generate(&cfg, &key) == WOLFCERT_OK);
+
+    memset(dn, 'A', sizeof(dn));
+    memcpy(dn, "CN=", 3);
+    dn[sizeof(dn) - 1] = '\0';
+    meta.subject_dn = dn;
+    REQUIRE(wolfcert_csr_build(key, &meta, &der) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(der.data == NULL && der.len == 0);
+
+    /* Exactly CTC_NAME_SIZE is refused too: the field must hold a NUL as well,
+     * and a `>` here would write that NUL over the adjacent encoding byte. */
+    dn[3 + CTC_NAME_SIZE] = '\0';
+    REQUIRE(wolfcert_csr_build(key, &meta, &der) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(der.data == NULL && der.len == 0);
+
+    /* The longest value that fits, CTC_NAME_SIZE - 1 bytes, still builds. */
+    dn[3 + CTC_NAME_SIZE - 1] = '\0';
+    REQUIRE(wolfcert_csr_build(key, &meta, &der) == WOLFCERT_OK);
+    REQUIRE(der.len > 0);
+
+    wolfcert_buffer_free(&der);
+    wolfcert_key_free(key);
+    return 0;
+}
+#endif
+
 int main(void)
 {
     REQUIRE(test_static_mem_init() == 0);
@@ -185,6 +223,8 @@ int main(void)
         return 1;
 #endif
 #ifdef WOLFCERT_HAVE_ECC
+    if (csr_build_rejects_oversized_rdn())
+        return 1;
     if (build_and_reparse(WOLFCERT_KEY_ECC, 256))
         return 1;
 #endif

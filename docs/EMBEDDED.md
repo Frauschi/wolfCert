@@ -110,9 +110,11 @@ Trade-offs:
   certificate. 1024 bytes still holds a handful of DNS / IP / URI names;
   size it to your longest realistic SAN set.
 - `WC_CTC_NAME_SIZE` bounds the length of each subject/issuer RDN value
-  (CN, O, ...). wolfCert truncates over-long values to fit
-  (`copy_name()` in `src/csr.c`), so shrinking this silently caps how long
-  a CN you can request.
+  (CN, O, ...). wolfCert rejects an over-long value with
+  `WOLFCERT_ERR_BAD_ARG` rather than truncating it - both when a client
+  builds a CSR (`assign_rdn()` in `src/csr.c`) and when the test server
+  issues from one (`wolfcert_copy_csr_subject()` in `src/ca_issue.c`) - so
+  shrinking this caps how long a CN you can request.
 - Disabling `WOLFSSL_CERT_NAME_ALL` and/or `WOLFSSL_CERT_EXT` in wolfSSL
   removes the less-common `CertName` fields entirely - but wolfCert's
   build requires both (see `CLAUDE.md` / `CMakeLists.txt`), so prefer
