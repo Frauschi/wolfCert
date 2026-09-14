@@ -36,13 +36,6 @@
  * Literal ',' or '=' inside an attribute value are not supported; callers
  * that need them should use WolfCertCertMeta::customize. */
 
-static void copy_name(char* dst, size_t dst_cap, const char* src, size_t src_len)
-{
-    size_t n = src_len < dst_cap - 1 ? src_len : dst_cap - 1;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-}
-
 /* Subject-DN attribute table. Declared `static const` so it lives in .rodata
  * rather than being rebuilt on the stack on every call; `off` is the byte
  * offset of the target field within wolfSSL's CertName, so the actual
@@ -73,6 +66,7 @@ static const struct rdn_field rdn_fields[] = {
     { "UID",              3,  offsetof(CertName, userId),     CTC_NAME_SIZE },
     { "userId",           6,  offsetof(CertName, userId),     CTC_NAME_SIZE },
     { "postalCode",       10, offsetof(CertName, postalCode), CTC_NAME_SIZE },
+    { "street",            6, offsetof(CertName, street),     CTC_NAME_SIZE },
 #ifdef WOLFSSL_CERT_EXT
     { "businessCategory", 16, offsetof(CertName, busCat),     CTC_NAME_SIZE },
 #endif
@@ -84,8 +78,14 @@ static int assign_rdn(CertName* subject, const char* key, size_t klen,
     for (size_t i = 0; i < sizeof(rdn_fields)/sizeof(rdn_fields[0]); ++i) {
         if (rdn_fields[i].key_len == klen &&
                 strncmp(rdn_fields[i].key, key, klen) == 0) {
-            copy_name((char*)subject + rdn_fields[i].off, rdn_fields[i].cap,
-                      val, vlen);
+            char* dst = (char*)subject + rdn_fields[i].off;
+            /* Truncating would request a subject the caller did not ask for. */
+            if (vlen >= rdn_fields[i].cap)
+                return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "csr",
+                    "subject %.*s is %zu bytes, limit %zu", (int)klen, key,
+                    vlen, rdn_fields[i].cap - 1);
+            memcpy(dst, val, vlen);
+            dst[vlen] = '\0';
             return WOLFCERT_OK;
         }
     }

@@ -117,7 +117,10 @@ typedef struct {
     const char*        subject_dn;         /* e.g. "CN=device-123,O=Acme".
                                             * Literal ',' and '=' in values
                                             * are NOT supported - use the
-                                            * customize callback for those. */
+                                            * customize callback for those.
+                                            * A value of CTC_NAME_SIZE bytes or
+                                            * more fails the build with
+                                            * WOLFCERT_ERR_BAD_ARG. */
     const char* const* san_dns;            /* array of length san_dns_len */
     size_t             san_dns_len;
     const char* const* san_ip;             /* textual IPv4/IPv6 */
