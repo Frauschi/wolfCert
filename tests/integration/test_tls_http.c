@@ -74,14 +74,21 @@ struct srv_ctx {
     size_t cert_pem_len;
     uint8_t* key_pem;
     size_t key_pem_len;
+    const char* version;
 };
 
 static void* srv_thread(void* arg)
 {
     struct srv_ctx* sc = (struct srv_ctx*)arg;
+    /* Single-version peer: TLS 1.2 where wolfSSL has it, TLS 1.3 otherwise. */
+#ifdef WOLFSSL_NO_TLS12
+    WOLFSSL_CTX* ctx = wolfSSL_CTX_new(wolfTLSv1_3_server_method());
+#else
     WOLFSSL_CTX* ctx = wolfSSL_CTX_new(wolfTLSv1_2_server_method());
+#endif
     if (ctx == NULL)
         return NULL;
+
     if (wolfSSL_CTX_use_certificate_buffer(ctx, sc->cert_pem,
             (long)sc->cert_pem_len, WOLFSSL_FILETYPE_PEM) != WOLFSSL_SUCCESS) return NULL;
     if (wolfSSL_CTX_use_PrivateKey_buffer(ctx, sc->key_pem,
@@ -109,6 +116,7 @@ static void* srv_thread(void* arg)
     WOLFSSL* ssl = wolfSSL_new(ctx);
     wolfSSL_set_fd(ssl, cs);
     if (wolfSSL_accept(ssl) == WOLFSSL_SUCCESS) {
+        sc->version = wolfSSL_get_version(ssl);
         char req[2048];
         int n;
         do {
@@ -159,6 +167,11 @@ int main(void)
     wolfcert_http_response_free(&resp);
 
     pthread_join(tid, NULL);
+#ifdef WOLFSSL_NO_TLS12
+    REQUIRE(sc.version != NULL && strcmp(sc.version, "TLSv1.3") == 0);
+#else
+    REQUIRE(sc.version != NULL && strcmp(sc.version, "TLSv1.2") == 0);
+#endif
     free(sc.cert_pem);
     free(sc.key_pem);
     wolfcert_cleanup();
