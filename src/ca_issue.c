@@ -721,8 +721,6 @@ WOLFCERT_TEST_VIS int wolfcert_copy_csr_subject(const DecodedCert* dc, Cert* nc)
     COPY_SUBJ_E(subjectL,      nc->subject.locality,   nc->subject.localityEnc);
     COPY_SUBJ_E(subjectStreet, nc->subject.street,     nc->subject.streetEnc);
     COPY_SUBJ_E(subjectSN,     nc->subject.sur,        nc->subject.surEnc);
-    /* wolfSSL's GetRDN() reaches subjectGN only through a table that stops
-     * short of ASN_GIVEN_NAME, so this copy has nothing to read yet. */
     COPY_SUBJ_E(subjectGN,     nc->subject.givenName,  nc->subject.givenNameEnc);
     COPY_SUBJ(subjectEmail,    nc->subject.email);
     COPY_SUBJ_E(subjectSND,    nc->subject.serialDev,  nc->subject.serialDevEnc);
