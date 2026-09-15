@@ -87,6 +87,16 @@ typedef struct {
      * CA is not replaced - rollover is the caller's decision. */
     int              scep_enable_next_ca;
 
+    /* SCEP GetCert (RFC 8894 section 3.3.4, messageType 21). Off by default:
+     * the operation hands any client that can sign a pkiMessage any
+     * certificate this CA has issued, named by serial, and RFC 8894
+     * section 7.8 prefers an HTTP certificate store or LDAP for the job.
+     * Only the 16 most recently issued certificates stay retrievable; older
+     * ones are evicted and answer badCertId.
+     * scep_require_approval and the challengePassword gate enrollment, not
+     * this. While clear, a GetCert is answered as if unimplemented. */
+    int              scep_enable_get_cert;
+
     /* EST manual-approval mode (RFC 7030 section 4.2.3). When set, the first
      * /simpleenroll or /simplereenroll POST for a given CSR returns
      * `202 Accepted` with a `Retry-After: <est_retry_after_sec>` header;

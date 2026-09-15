@@ -86,10 +86,19 @@ typedef struct {
     int      polls;   /* #GetCertInitial seen for this txid */
 } ScepPending;
 
+/* One certificate this CA has issued, kept so a GetCert can fetch it back by
+ * serial. */
+typedef struct {
+    uint8_t* cert_der;
+    size_t   cert_len;
+} ScepIssued;
+
 typedef struct {
     ScepPending* items;
     size_t       count;
     size_t       cap;
+    ScepIssued*  issued;
+    size_t       issued_count;
     /* Optional rolled-over "next" CA, generated on first GetNextCACert
      * when WolfCertServerCfgSrv::scep_enable_next_ca is set. Signed and
      * self-contained; NOT installed as the active issuing CA. */
@@ -102,6 +111,8 @@ typedef struct {
     int          fault_omit_recipient_nonce;
     int          fault_sign_with_wrong_key;
     int          fault_rng_fail;
+    int          fault_getcert_wrong_cert;
+    int          fault_getcert_no_signer;
     WolfCertCa   wrong_ca;
     int          wrong_ca_ready;
 #endif
@@ -116,6 +127,16 @@ WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
     p->fault_omit_recipient_nonce = omit_recipient_nonce;
     p->fault_sign_with_wrong_key  = sign_with_wrong_key;
     p->fault_rng_fail             = rng_fail;
+}
+
+WOLFCERT_TEST_VIS void wolfcert_scep_server_set_getcert_fault(WolfCertServer* s,
+                                                              int wrong_cert,
+                                                              int no_signer)
+{
+    ScepPriv* p = (ScepPriv*)s->priv;
+
+    p->fault_getcert_wrong_cert = wrong_cert;
+    p->fault_getcert_no_signer  = no_signer;
 }
 #endif
 
@@ -628,6 +649,72 @@ static int send_cert_rep(WolfCertServer* s, int fd,
     return WOLFCERT_OK;
 }
 
+/* ---- issued-certificate registry --------------------------------------- */
+
+#define SCEP_ISSUED_MAX 16
+
+/* Record a copy of `cert`, evicting the oldest entry once full. Only
+ * allocation can fail here; a full registry is handled by eviction. */
+static int issued_record(ScepPriv* p, void* heap,
+                         const uint8_t* cert, size_t cert_len)
+{
+    if (p->issued == NULL) {
+        p->issued = (ScepIssued*)WOLFCERT_XMALLOC(
+            sizeof(ScepIssued) * SCEP_ISSUED_MAX, heap);
+        if (p->issued == NULL)
+            return WOLFCERT_ERR_MEMORY;
+
+        memset(p->issued, 0, sizeof(ScepIssued) * SCEP_ISSUED_MAX);
+    }
+
+    uint8_t* copy = (uint8_t*)WOLFCERT_XMALLOC(cert_len, heap);
+    if (copy == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    memcpy(copy, cert, cert_len);
+
+    if (p->issued_count == SCEP_ISSUED_MAX) {
+        WOLFCERT_XFREE(p->issued[0].cert_der, heap);
+        memmove(&p->issued[0], &p->issued[1],
+                sizeof(ScepIssued) * (SCEP_ISSUED_MAX - 1));
+        /* The memmove leaves the last slot aliasing its neighbour, which would
+         * double-free at teardown if this entry were ever not written. */
+        memset(&p->issued[SCEP_ISSUED_MAX - 1], 0, sizeof(ScepIssued));
+        p->issued_count--;
+    }
+
+    p->issued[p->issued_count].cert_der = copy;
+    p->issued[p->issued_count].cert_len = cert_len;
+    p->issued_count++;
+
+    return WOLFCERT_OK;
+}
+
+static const ScepIssued* issued_find(ScepPriv* p, void* heap,
+                                     const uint8_t* serial, size_t serial_len)
+{
+    for (size_t i = 0; i < p->issued_count; ++i) {
+        const ScepIssued* e = &p->issued[i];
+        DecodedCert dc;
+        int match;
+
+        wc_InitDecodedCert(&dc, e->cert_der, (word32)e->cert_len, heap);
+        if (wc_ParseCert(&dc, CERT_TYPE, NO_VERIFY, NULL) != 0) {
+            wc_FreeDecodedCert(&dc);
+            continue;
+        }
+
+        match = dc.serialSz > 0 && (size_t)dc.serialSz == serial_len &&
+                memcmp(dc.serial, serial, serial_len) == 0;
+        wc_FreeDecodedCert(&dc);
+
+        if (match)
+            return e;
+    }
+
+    return NULL;
+}
+
 /* Issue the cert and answer with a success CertRep. */
 static int issue_and_reply(WolfCertServer* s, int fd,
                            const uint8_t* csr, size_t csr_len,
@@ -641,6 +728,14 @@ static int issue_and_reply(WolfCertServer* s, int fd,
     if (rc != WOLFCERT_OK) {
         send_text(s, fd, 400, "Bad CSR", "text/plain", "");
         return rc;
+    }
+
+    if (s->cfg.scep_enable_get_cert) {
+        int reg_rc = issued_record((ScepPriv*)s->priv, s->heap, issued,
+                                   issued_len);
+        if (reg_rc != WOLFCERT_OK)
+            WOLFCERT_LOG_DBG("scep", "GetCert registry allocation failed: %d",
+                             reg_rc);
     }
 
     rc = send_cert_rep(s, fd, issued, issued_len,
@@ -737,7 +832,7 @@ static int handle_get_cert_initial(WolfCertServer* s, int fd,
     /* Approve on first poll. A production implementation would hold
      * requests until an admin acts on a queue; for the test server a
      * single round trip through pending is enough to exercise the
-     * RFC 8894 section 3.3.2 flow end-to-end. */
+     * RFC 8894 section 3.3.3 flow end-to-end. */
     e->polls++;
     uint8_t* csr_copy = (uint8_t*)WOLFCERT_XMALLOC(e->csr_len, s->heap);
     if (csr_copy == NULL) {
@@ -766,6 +861,57 @@ static int handle_get_cert_initial(WolfCertServer* s, int fd,
     WOLFCERT_XFREE(csr_copy, s->heap);
     WOLFCERT_XFREE(tgt,      s->heap);
     return rc;
+}
+
+/* RFC 8894 section 3.3.4 GetCert: the decrypted payload is an
+ * IssuerAndSerialNumber naming a certificate this CA issued. */
+static int handle_get_cert(WolfCertServer* s, int fd, const WolfCertBuffer* ias,
+                           const uint8_t* env_target, size_t env_target_len,
+                           const uint8_t* tid, size_t tid_len,
+                           const uint8_t* snonce, size_t snonce_len)
+{
+    ScepPriv* p = (ScepPriv*)s->priv;
+    const uint8_t* issuer = NULL;
+    size_t issuer_len = 0;
+    const uint8_t* serial = NULL;
+    size_t serial_len = 0;
+    const ScepIssued* hit = NULL;
+
+    /* Unlike handle_enroll there is no falling back to the CA cert: a reply
+     * enveloped to the CA's own key is one the requester cannot decrypt. */
+    if (env_target == NULL || env_target_len == 0) {
+        s->keep_alive = 0;
+        return send_pki_failure(s, fd, tid, tid_len, snonce, snonce_len,
+                                "2" /* badRequest */);
+    }
+
+    /* Both halves must match: a serial that collides under some other CA's name
+     * is not a hit here. */
+    if (wolfcert_scep_parse_issuer_and_serial(ias->data, ias->len,
+                                              &issuer, &issuer_len,
+                                              &serial, &serial_len) == WOLFCERT_OK &&
+            wolfcert_scep_issuer_name_matches(s->ca.cert_der, s->ca.cert_der_len,
+                                              issuer, issuer_len, s->heap))
+        hit = issued_find(p, s->heap, serial, serial_len);
+
+    if (hit == NULL) {
+        return send_pki_failure(s, fd, tid, tid_len, snonce, snonce_len,
+                                "4" /* badCertId */);
+    }
+
+    const uint8_t* reply     = hit->cert_der;
+    size_t         reply_len  = hit->cert_len;
+
+#if defined(WOLFCERT_BUILD_TESTING)
+    if (p->fault_getcert_wrong_cert) {
+        reply     = s->ca.cert_der;
+        reply_len = s->ca.cert_der_len;
+    }
+#endif
+
+    return send_cert_rep(s, fd, reply, reply_len,
+                         env_target, env_target_len,
+                         tid, tid_len, snonce, snonce_len, "0", NULL);
 }
 
 static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
@@ -828,6 +974,20 @@ static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
     }
     else if (strcmp(mt, "20") == 0) {
         rc = handle_get_cert_initial(s, fd, tid, tid_len, snonce, snonce_len);
+    }
+    else if (strcmp(mt, "21") == 0 && s->cfg.scep_enable_get_cert) {
+        const uint8_t* gc_signer     = signer_cert;
+        size_t         gc_signer_len = signer_cert_len;
+#if defined(WOLFCERT_BUILD_TESTING)
+        /* Stand in for a pkiMessage that carried no signer certificate, without
+         * dropping the pointer this function still owns and frees. */
+        if (((ScepPriv*)s->priv)->fault_getcert_no_signer) {
+            gc_signer     = NULL;
+            gc_signer_len = 0;
+        }
+#endif
+        rc = handle_get_cert(s, fd, &csr, gc_signer, gc_signer_len,
+                             tid, tid_len, snonce, snonce_len);
     }
     else {
         /* Closed by the non-OK return; the flag is for the header. */
@@ -1022,6 +1182,11 @@ static void scep_free_priv(WolfCertServer* srv)
     }
 
     WOLFCERT_XFREE(p->items, srv->heap);
+
+    for (size_t i = 0; i < p->issued_count; ++i)
+        WOLFCERT_XFREE(p->issued[i].cert_der, srv->heap);
+
+    WOLFCERT_XFREE(p->issued, srv->heap);
     if (p->next_ca_ready)
         wolfcert_ca_free(&p->next_ca);
 #if defined(WOLFCERT_BUILD_TESTING)
