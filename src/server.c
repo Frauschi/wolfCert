@@ -26,6 +26,7 @@
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 
 #include <wolfcert/server.h>
 #include <wolfcert/errors.h>
@@ -42,6 +43,14 @@
 #include <unistd.h>
 
 #include <wolfssl/ssl.h>
+
+/* WOLFCERT_SEND_FLAGS suppresses SIGPIPE per send(), leaving the process
+ * signal disposition to the embedding application. */
+#ifdef MSG_NOSIGNAL
+#define WOLFCERT_SEND_FLAGS MSG_NOSIGNAL
+#else
+#define WOLFCERT_SEND_FLAGS 0
+#endif
 
 /* How often wolfcert_server_run() wakes to re-check the stopping flag while
  * idle at the listener. Bounds shutdown latency; not performance-critical. */
@@ -124,7 +133,7 @@ ssize_t wolfcert_io_send(WolfCertServer* srv, int fd, const void* buf, size_t le
     }
 
     do {
-        r = send(fd, buf, len, 0);
+        r = send(fd, buf, len, WOLFCERT_SEND_FLAGS);
     }
     while (r < 0 && srv != NULL && !WOLFSSL_ATOMIC_LOAD(srv->stopping) &&
            (errno == EINTR ||
@@ -422,6 +431,7 @@ int wolfcert_server_run(WolfCertServer* srv)
         }
 
         srv->poll_timeouts_armed = 1;
+        wolfcert_sock_nosigpipe(cs);
 
         if (srv->tls_ctx != NULL) {
             /* Terminate TLS on this accepted fd. The protocol handler sees
@@ -429,6 +439,7 @@ int wolfcert_server_run(WolfCertServer* srv)
             WOLFSSL* ssl = wolfSSL_new(srv->tls_ctx);
             if (ssl != NULL) {
                 wolfSSL_set_fd(ssl, cs);
+                wolfSSL_SetIOWriteFlags(ssl, WOLFCERT_SEND_FLAGS);
 
                 /* A stalled flight is resumable either way round: a large
                  * chain blocks on the send timeout, not the receive one. */
@@ -486,6 +497,8 @@ int wolfcert_server_serve_fd(WolfCertServer* srv, int fd)
 {
     if (srv == NULL || fd < 0)
         return WOLFCERT_ERR_BAD_ARG;
+
+    wolfcert_sock_nosigpipe(fd);
 
     return srv->ops->serve_fd(srv, fd);
 }
