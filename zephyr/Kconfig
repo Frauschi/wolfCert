@@ -1,0 +1,92 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+config ZEPHYR_WOLFCERT_MODULE
+	bool
+
+config WOLFCERT_PROMPTLESS
+	bool
+	help
+	  Hides the wolfCert menu entry. Set this from your own Kconfig when you
+	  "select WOLFCERT" there, so menuconfig shows it as always-on instead of
+	  a switch the user cannot actually turn off.
+
+menuconfig WOLFCERT
+	bool "wolfCert Support" if !WOLFCERT_PROMPTLESS
+	depends on WOLFSSL
+	select NETWORKING
+	select POSIX_API
+	imply THREAD_LOCAL_STORAGE
+	help
+	  Build wolfCert as a Zephyr module. See the top-level README.md for what
+	  the library does and zephyr/README.md for the integration.
+
+if WOLFCERT
+
+config WOLFCERT_EST
+	bool "EST (RFC 7030) support"
+	default y
+	help
+	  Enable the EST client.
+
+config WOLFCERT_SCEP
+	bool "SCEP (RFC 8894) support"
+	depends on WOLFCERT_RSA
+	help
+	  Enable the SCEP client.
+
+config WOLFCERT_BUILTIN_TRANSPORT
+	bool "Built-in BSD-socket transport"
+	default y
+	help
+	  Compile src/net_posix.c, which runs on the POSIX API layer. Hostname
+	  lookup additionally needs DNS_RESOLVER; numeric addresses work without
+	  it.
+
+comment "Key algorithms"
+
+config WOLFCERT_RSA
+	bool "RSA keys"
+	default y
+	help
+	  Required by SCEP. The wolfSSL settings file must not define NO_RSA.
+
+config WOLFCERT_ECC
+	bool "ECC keys"
+	default y
+	help
+	  The wolfSSL settings file must define HAVE_ECC.
+
+config WOLFCERT_ED25519
+	bool "Ed25519 keys"
+	help
+	  The wolfSSL settings file must define HAVE_ED25519.
+
+config WOLFCERT_ED448
+	bool "Ed448 keys"
+	help
+	  The wolfSSL settings file must define HAVE_ED448.
+
+config WOLFCERT_MLDSA
+	bool "ML-DSA keys"
+	help
+	  The wolfSSL settings file must define WOLFSSL_HAVE_MLDSA.
+
+config WOLFCERT_BUILD_TESTING
+	bool "Export internal symbols for in-tree tests"
+	help
+	  Define WOLFCERT_BUILD_TESTING. Needed only by the in-tree tests that
+	  reach internal helpers.
+
+config WOLFCERT_DEBUG
+	bool "wolfCert debug build"
+	help
+	  Compile wolfCert with -g3 -O0.
+
+config APP_LINK_WITH_WOLFCERT
+	bool "Link 'app' with wolfCert"
+	default y
+	help
+	  Give 'app' the wolfCert interface library, which carries the compile
+	  definitions the public headers expect.
+
+endif # WOLFCERT
