@@ -1427,6 +1427,8 @@ static int cmd_enroll(int argc, char** argv)
                     wrc = -1;
                 }
             }
+            if (key_pem.data != NULL)
+                wc_ForceZero(key_pem.data, (word32)key_pem.len);
             wolfcert_buffer_free(&key_pem);
         }
 
@@ -1552,7 +1554,7 @@ static int cmd_reenroll(int argc, char** argv)
     if (current_key != NULL)
         wolfcert_key_free(current_key);
     free(cert_pem);
-    free(key_pem);
+    free_secret(key_pem, key_len);
     free(trust_hold);
     free(mt_cert);
     free(mt_key);
