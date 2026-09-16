@@ -83,14 +83,30 @@ static int der_put_len(byte* out, size_t cap, size_t n)
         return 3;
     }
 
-    if (cap < 4)
+    if (n <= 0xFFFFFF) {
+        if (cap < 4)
+            return -1;
+
+        out[0] = 0x83;
+        out[1] = (byte)(n>>16);
+        out[2] = (byte)(n>>8);
+        out[3] = (byte)n;
+        return 4;
+    }
+
+    /* Two 16-bit shifts, so a 32-bit size_t does not shift by its own width. */
+    if ((n >> 16) >> 16)
         return -1;
 
-    out[0] = 0x83;
-    out[1] = (byte)(n>>16);
-    out[2] = (byte)(n>>8);
-    out[3] = (byte)n;
-    return 4;
+    if (cap < 5)
+        return -1;
+
+    out[0] = 0x84;
+    out[1] = (byte)(n>>24);
+    out[2] = (byte)(n>>16);
+    out[3] = (byte)(n>>8);
+    out[4] = (byte)n;
+    return 5;
 }
 
 /* Emit the raw AttributeValue - a bare PrintableString or OCTET STRING
