@@ -54,7 +54,6 @@
 
 #include "tls_test_util.h"
 
-#include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/wc_port.h>
 
 #include <arpa/inet.h>

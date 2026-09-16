@@ -39,7 +39,6 @@
 #  error "examples/enroll_cryptocb.c needs wolfCert built with EST enabled"
 #endif
 
-#include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/cryptocb.h>
 #include <wolfssl/wolfcrypt/error-crypt.h>
 

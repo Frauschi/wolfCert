@@ -32,7 +32,6 @@
 #include <wolfcert/errors.h>
 #include "../internal.h"
 
-#include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
 #include <wolfssl/wolfcrypt/sha256.h>
 #include <wolfssl/wolfcrypt/memory.h>

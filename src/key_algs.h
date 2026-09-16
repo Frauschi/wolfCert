@@ -33,7 +33,6 @@
 
 #include <wolfcert/types.h>
 
-#include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/types.h>
 
 struct WolfCertKey;

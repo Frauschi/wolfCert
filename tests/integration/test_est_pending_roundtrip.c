@@ -42,7 +42,6 @@
 #include <wolfcert/est.h>
 #include <wolfcert/server.h>
 
-#include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 

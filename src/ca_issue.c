@@ -30,7 +30,6 @@
 #include "key_algs.h"
 #include <wolfcert/errors.h>
 
-#include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/ecc.h>

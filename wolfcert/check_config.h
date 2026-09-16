@@ -32,14 +32,29 @@
  *
  * Two tiers:
  *   1. wolfCert's own constraints, from the WOLFCERT_HAVE_* macros.
- *   2. The wolfSSL feature set wolfCert depends on, from <wolfssl/options.h>.
- *      Define WOLFCERT_NO_WOLFSSL_FEATURE_CHECK to skip tier 2 - needed only
- *      when wolfSSL itself is configured through its own user_settings.h, where
- *      <wolfssl/options.h> does not reflect the real feature set.
+ *   2. The wolfSSL feature set wolfCert depends on, read through
+ *      <wolfssl/wolfcrypt/settings.h> so it also sees a wolfSSL configured by
+ *      its own user_settings.h. Define WOLFCERT_NO_WOLFSSL_FEATURE_CHECK to
+ *      skip the tier-2 checks.
  */
 
 #ifndef WOLFCERT_CHECK_CONFIG_H
 #define WOLFCERT_CHECK_CONFIG_H
+
+#if !defined(WOLFSSL_USER_SETTINGS) && !defined(WOLFSSL_USE_OPTIONS_H) && \
+    !defined(WOLFSSL_NO_OPTIONS_H) && !defined(WOLFSSL_CUSTOM_CONFIG) && \
+    !defined(ARDUINO) && !defined(PLATFORMIO) && \
+    !defined(USE_HAL_DRIVER) && !defined(NUCLEUS_PLUS_2_3) && \
+    !defined(WOLFSSL_MX2_CONF_INCLUDE)
+    #define WOLFSSL_USE_OPTIONS_H
+#endif
+#include <wolfssl/wolfcrypt/settings.h>
+
+#if defined(WOLFSSL_USE_OPTIONS_H) && !defined(WOLFSSL_OPTIONS_H) && \
+    !defined(WOLFSSL_NO_OPTIONS_H)
+#define WOLFCERT_WOLFSSL_CONFIG_UNRESOLVED
+#error "A wolfSSL header was included before wolfCert's, so <wolfssl/options.h> was never read and wolfSSL's feature set is at its defaults. Include <wolfcert/wolfcert.h> first; or, if wolfSSL takes its configuration another way, define WOLFSSL_USE_OPTIONS_H, WOLFSSL_CUSTOM_CONFIG or WOLFSSL_NO_OPTIONS_H before the wolfSSL header."
+#endif
 
 /* ---- Tier 1: wolfCert feature constraints ---- */
 
@@ -67,9 +82,8 @@
 
 /* ---- Tier 2: required wolfSSL feature set ---- */
 
-#ifndef WOLFCERT_NO_WOLFSSL_FEATURE_CHECK
-
-#include <wolfssl/options.h>
+#if !defined(WOLFCERT_NO_WOLFSSL_FEATURE_CHECK) && \
+    !defined(WOLFCERT_WOLFSSL_CONFIG_UNRESOLVED)
 
 /* Mandatory wolfSSL features. Rebuild wolfSSL with:
  *   ./configure --enable-pkcs7 --enable-certgen --enable-certreq \
@@ -141,6 +155,6 @@
 #error "wolfSSL provides neither TLS 1.2 nor TLS 1.3; wolfCert needs at least one for its HTTPS transport."
 #endif
 
-#endif /* WOLFCERT_NO_WOLFSSL_FEATURE_CHECK */
+#endif /* tier 2 */
 
 #endif /* WOLFCERT_CHECK_CONFIG_H */

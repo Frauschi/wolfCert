@@ -47,16 +47,9 @@ trap 'rm -rf "$STAGE"' EXIT
 mkdir -p "$STAGE/inc" "$STAGE/obj"
 
 # Never a configured tree's own options.h: it describes that build, not the set
-# pinned here. The stub replacing it is what --enable-usersettings generates,
-# which check_config.h and memory.h need to resolve <wolfssl/options.h>.
+# pinned here.
 cp -R "$WOLFSSL_SRC/wolfssl" "$STAGE/inc/wolfssl"
 rm -f "$STAGE/inc/wolfssl/options.h"
-cat > "$STAGE/inc/wolfssl/options.h" <<'EOF'
-#ifndef WOLFSSL_OPTIONS_H
-#define WOLFSSL_OPTIONS_H
-#include <user_settings.h>
-#endif
-EOF
 
 cp "$HERE/freestanding-user_settings.h" "$STAGE/inc/user_settings.h"
 

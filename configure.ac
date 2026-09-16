@@ -173,10 +173,19 @@ PKG_CHECK_MODULES([WOLFSSL], [wolfssl >= 5.9.2],
       WOLFSSL_ALT_NAMES, WOLFSSL_CERT_NAME_ALL.])])
 AM_CONDITIONAL([HAVE_WOLFSSL], [test "x$have_wolfssl" = "xyes"])
 
+# Probe wolfSSL's feature set the way wolfcert/check_config.h resolves it, so
+# configure and the headers agree.
+m4_define([WOLFCERT_WOLFSSL_PROLOGUE], [[
+#if !defined(WOLFSSL_USER_SETTINGS) && !defined(WOLFSSL_USE_OPTIONS_H) && !defined(WOLFSSL_NO_OPTIONS_H) && !defined(WOLFSSL_CUSTOM_CONFIG) && !defined(ARDUINO) && !defined(PLATFORMIO) && !defined(USE_HAL_DRIVER) && !defined(NUCLEUS_PLUS_2_3) && !defined(WOLFSSL_MX2_CONF_INCLUDE)
+#define WOLFSSL_USE_OPTIONS_H
+#endif
+#include <wolfssl/wolfcrypt/settings.h>
+]])
+
 AC_DEFUN([WOLFCERT_REJECT_NEG],
 [AC_MSG_CHECKING([that wolfSSL does not define $1])
  AC_COMPILE_IFELSE(
-   [AC_LANG_PROGRAM([[#include <wolfssl/options.h>]],
+   [AC_LANG_PROGRAM(WOLFCERT_WOLFSSL_PROLOGUE,
     [[#ifdef $1
       #error disabled
       #endif]])],
@@ -212,7 +221,7 @@ AC_CHECK_DECLS([HAVE_PKCS7, WOLFSSL_CERT_GEN, WOLFSSL_CERT_REQ, WOLFSSL_CERT_EXT
       --enable-certgen --enable-certreq --enable-certext --enable-keygen
       --enable-base64encode --enable-opensslextra
       CPPFLAGS="-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL".])],
-    [[#include <wolfssl/options.h>]])
+    WOLFCERT_WOLFSSL_PROLOGUE)
 
 # wolfSSL default-on features that wolfCert requires unconditionally: AES,
 # SHA-256. Each must NOT be marked disabled by a NO_* macro.
@@ -224,7 +233,7 @@ WOLFCERT_REJECT_NEG([NO_SHA256],       [SHA-256])
 # WOLFCERT_HAVE_RSA gates the RSA key algorithm.
 AC_MSG_CHECKING([whether wolfSSL provides RSA])
 AC_COMPILE_IFELSE(
-  [AC_LANG_PROGRAM([[#include <wolfssl/options.h>]],
+  [AC_LANG_PROGRAM(WOLFCERT_WOLFSSL_PROLOGUE,
    [[#ifdef NO_RSA
      #error disabled
      #endif]])],
@@ -242,14 +251,14 @@ AM_CONDITIONAL([WOLFCERT_HAVE_RSA], [test "x$have_rsa" = "xyes"])
 # their floor to whichever lower version is available.
 AC_MSG_CHECKING([whether wolfSSL provides TLS 1.2])
 AC_COMPILE_IFELSE(
-  [AC_LANG_PROGRAM([[#include <wolfssl/options.h>]],
+  [AC_LANG_PROGRAM(WOLFCERT_WOLFSSL_PROLOGUE,
    [[#ifdef WOLFSSL_NO_TLS12
      #error notls12
      #endif]])],
   [AC_MSG_RESULT([yes]); have_tls12=yes], [AC_MSG_RESULT([no]); have_tls12=no])
 AC_MSG_CHECKING([whether wolfSSL provides TLS 1.3])
 AC_COMPILE_IFELSE(
-  [AC_LANG_PROGRAM([[#include <wolfssl/options.h>]],
+  [AC_LANG_PROGRAM(WOLFCERT_WOLFSSL_PROLOGUE,
    [[#ifndef WOLFSSL_TLS13
      #error notls13
      #endif]])],
@@ -263,22 +272,22 @@ AS_IF([test "x$have_tls12" = "xno" && test "x$have_tls13" = "xno"],
 AC_CHECK_DECL([HAVE_ECC], [have_ecc=yes],
     [have_ecc=no; AC_MSG_WARN([wolfSSL was built without HAVE_ECC; ECC key
       types will return WOLFCERT_ERR_UNSUPPORTED. Rebuild with --enable-ecc.])],
-    [[#include <wolfssl/options.h>]])
+    WOLFCERT_WOLFSSL_PROLOGUE)
 AC_CHECK_DECL([HAVE_ED25519], [have_ed25519=yes],
     [have_ed25519=no; AC_MSG_WARN([wolfSSL was built without HAVE_ED25519;
       Ed25519 key types will return WOLFCERT_ERR_UNSUPPORTED. Rebuild with
       --enable-ed25519.])],
-    [[#include <wolfssl/options.h>]])
+    WOLFCERT_WOLFSSL_PROLOGUE)
 AC_CHECK_DECL([HAVE_ED448], [have_ed448=yes],
     [have_ed448=no; AC_MSG_WARN([wolfSSL was built without HAVE_ED448; Ed448
       key types will return WOLFCERT_ERR_UNSUPPORTED. Rebuild with
       --enable-ed448.])],
-    [[#include <wolfssl/options.h>]])
+    WOLFCERT_WOLFSSL_PROLOGUE)
 AC_CHECK_DECL([WOLFSSL_HAVE_MLDSA], [have_mldsa=yes],
     [have_mldsa=no; AC_MSG_WARN([wolfSSL was built without WOLFSSL_HAVE_MLDSA;
       mldsa:44/65/87 will return WOLFCERT_ERR_UNSUPPORTED. Rebuild with
       --enable-mldsa.])],
-    [[#include <wolfssl/options.h>]])
+    WOLFCERT_WOLFSSL_PROLOGUE)
 CPPFLAGS="$save_CPPFLAGS"
 
 # Require at least one key algorithm.

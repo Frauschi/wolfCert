@@ -30,8 +30,8 @@
 #include <wolfcert/errors.h>
 #include <wolfcert/status.h>
 #include <wolfcert/log.h>
-#include <wolfcert/memory.h>
 #include <wolfcert/types.h>
+#include <wolfcert/memory.h>
 #include <wolfcert/keygen.h>
 #include <wolfcert/csr.h>
 #include <wolfcert/store.h>

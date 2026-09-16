@@ -28,12 +28,10 @@
  * interpret any way it likes (wolfSSL static memory uses it to select a
  * bucket; host builds ignore it).
  *
- * By default (`WOLFCERT_USE_WOLFSSL_HEAP` set at build time, which is the
- * case for every supported wolfSSL build) the macros expand to wolfSSL's
- * own XMALLOC/XFREE so wolfCert shares exactly the pool that the rest of
- * the application's wolfSSL code uses. When wolfSSL's static-memory option
- * is enabled the pool is hard-capped; wolfCert will honour that limit
- * instead of silently reaching past it with raw libc malloc.
+ * By default the macros expand to wolfSSL's own XMALLOC/XFREE so wolfCert
+ * shares exactly the pool that the rest of the application's wolfSSL code
+ * uses. When wolfSSL's static-memory option is enabled the pool is
+ * hard-capped; wolfCert will honour that limit.
  *
  * Callers that want to pin wolfCert's allocations to a specific heap
  * register the hint through wolfcert_set_default_heap(); individual APIs
@@ -47,6 +45,7 @@
 #include <stddef.h>
 
 #include <wolfcert/api.h>
+#include <wolfcert/types.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -54,12 +53,11 @@ extern "C" {
 
 /* Pluggable allocator. If the application doesn't override it, we use
  * wolfSSL's XMALLOC family which in turn respects WOLFSSL_STATIC_MEMORY.
- * Embedded integrators that build wolfCert with WOLFCERT_NO_MALLOC can
- * replace the macros at compile time. */
+ * Embedded integrators that define WOLFCERT_CUSTOM_ALLOC supply the three
+ * macros themselves. */
 #if defined(WOLFCERT_CUSTOM_ALLOC)
   /* Project defines these macros externally. */
 #else
-#  include <wolfssl/options.h>
 #  include <wolfssl/wolfcrypt/types.h>
 #  define WOLFCERT_XMALLOC(sz, heap)        XMALLOC((sz),  (heap), DYNAMIC_TYPE_TMP_BUFFER)
 #  define WOLFCERT_XREALLOC(p, sz, heap)    XREALLOC((p), (sz), (heap), DYNAMIC_TYPE_TMP_BUFFER)

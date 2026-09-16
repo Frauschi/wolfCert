@@ -239,7 +239,7 @@ jobs:
           ctest --test-dir build -j "$(nproc)" --output-on-failure
 
   no-posix-arm:
-    name: freestanding ARM compile (no POSIX)
+    name: header hygiene (freestanding ARM + config resolution)
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -257,6 +257,10 @@ jobs:
       - name: Compile every portable source for Cortex-M4
         run: |
           scripts/ci/compile-freestanding.sh \
+            --wolfssl-src "$RUNNER_TEMP/wolfssl"
+      - name: Assert both entry headers resolve wolfSSL's config identically
+        run: |
+          scripts/ci/check-config-resolution.sh \
             --wolfssl-src "$RUNNER_TEMP/wolfssl"
 
   negative-config:

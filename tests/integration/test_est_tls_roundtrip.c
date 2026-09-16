@@ -37,7 +37,6 @@
 #include <wolfcert/est.h>
 #include <wolfcert/server.h>
 
-#include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/random.h>

@@ -28,13 +28,14 @@
  * their own build. wolfcert/check_config.h validates the result at compile
  * time, so a contradictory or incomplete config fails with a clear #error.
  *
- * The "user_settings.h" name is shared with wolfSSL's own WOLFSSL_USER_SETTINGS
- * header on purpose. The macro namespaces are disjoint (wolfCert reads only
- * WOLFCERT_HAVE_*; wolfSSL reads HAVE_* / NO_* / WOLFSSL_*), so a single
- * user_settings.h can carry both libraries' config - the recommended setup.
- * Keep only one file by this name on your include path: both wolfSSL and
- * wolfCert include it unqualified, so the first one found serves both. See
- * docs/EMBEDDED.md.
+ * This template carries wolfCert's half of the config only. The
+ * "user_settings.h" name is shared with wolfSSL's own WOLFSSL_USER_SETTINGS
+ * header on purpose, and the macro namespaces are disjoint (wolfCert reads only
+ * WOLFCERT_HAVE_*; wolfSSL reads HAVE_* / NO_* / WOLFSSL_*), so one file can
+ * carry both. Building wolfSSL that way means adding its macros here too - the
+ * flag list at the end of this comment names them. Keep only one file by this
+ * name on your include path: both wolfSSL and wolfCert include it unqualified,
+ * so the first one found serves both. See docs/EMBEDDED.md.
  *
  * RULES
  *   - To ENABLE a feature, leave its #define uncommented.

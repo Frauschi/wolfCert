@@ -23,7 +23,6 @@
 #include "../test_static_mem.h"
 #include "../integration/tls_test_util.h"
 
-#include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn.h>
 
 #include <stdio.h>

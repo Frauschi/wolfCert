@@ -29,7 +29,6 @@
 #include <wolfcert/errors.h>
 #include "../internal.h"
 
-#include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/pkcs7.h>
 #include <wolfssl/wolfcrypt/random.h>
