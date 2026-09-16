@@ -439,6 +439,59 @@ static int cfg_tr_disconnect(void* ctx, void* c)
     return WOLFCERT_OK;
 }
 
+static int est_result_defined(const char* what, int rc, const WolfCertEstResult* r)
+{
+    if (rc != WOLFCERT_ERR_BAD_ARG) {
+        fprintf(stderr, "FAIL %s: expected BAD_ARG, got %d\n", what, rc);
+        return 1;
+    }
+    if (r->status != WOLFCERT_EST_STATUS_UNSET || r->cert_pem.data != NULL ||
+            r->cert_pem.len != 0 || r->retry_after_sec != 0 || r->heap != NULL) {
+        fprintf(stderr, "FAIL %s: result left indeterminate\n", what);
+        return 1;
+    }
+    return 0;
+}
+
+/* wolfcert/est.h: an entry point defines *out before any other argument check,
+ * so a rejected call still hands back something safe to free. */
+static int test_est_result_defined_on_early_return(void)
+{
+    WolfCertEstResult r;
+    uint8_t           blob[4] = { 1, 2, 3, 4 };
+    WolfCertKey*      key = NULL;
+#ifdef WOLFCERT_HAVE_RSA
+    WolfCertKeyCfg    kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                               .dev_id = WOLFCERT_DEVID_SOFTWARE };
+#else
+    WolfCertKeyCfg    kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+                               .dev_id = WOLFCERT_DEVID_SOFTWARE };
+#endif
+
+    REQUIRE(wolfcert_key_generate(&kcfg, &key) == WOLFCERT_OK);
+
+    /* A NULL srv trips the check that now follows the out handling. */
+    memset(&r, 0xA5, sizeof(r));
+    if (est_result_defined("simple_enroll_ex",
+            wolfcert_est_simple_enroll_ex(NULL, blob, sizeof(blob), &r), &r)) {
+        wolfcert_key_free(key);
+        return 1;
+    }
+    wolfcert_est_result_free(&r);
+
+    memset(&r, 0xA5, sizeof(r));
+    if (est_result_defined("simple_reenroll_ex",
+            wolfcert_est_simple_reenroll_ex(NULL, blob, sizeof(blob), key,
+                                            blob, sizeof(blob), &r), &r)) {
+        wolfcert_key_free(key);
+        return 1;
+    }
+    wolfcert_est_result_free(&r);
+
+    wolfcert_key_free(key);
+    return 0;
+}
+
 static int test_est_uses_cfg_transport(void)
 {
     WolfCertTransport tr = { cfg_tr_connect, cfg_tr_read,
@@ -504,6 +557,9 @@ int main(void)
         return 1;
 
     if (test_est_uses_cfg_transport())
+        return 1;
+
+    if (test_est_result_defined_on_early_return())
         return 1;
 
     uint8_t ca_der[4096];
