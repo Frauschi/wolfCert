@@ -1033,8 +1033,9 @@ int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
     memset(out, 0, sizeof(*out));
     out->fail_info = -1;
 
-    if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
-        new_key == NULL || csr_der == NULL)
+    if (srv == NULL || ra_cert == NULL || ra_cert_len == 0 ||
+        ca_bundle == NULL || ca_bundle_len == 0 || new_key == NULL ||
+        csr_der == NULL || csr_der_len == 0)
         return WOLFCERT_ERR_BAD_ARG;
 
     if (new_key->type != WOLFCERT_KEY_RSA)
@@ -1125,8 +1126,10 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
     memset(out, 0, sizeof(*out));
     out->fail_info = -1;
 
-    if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
-            current_cert == NULL || current_key == NULL || csr_der == NULL)
+    if (srv == NULL || ra_cert == NULL || ra_cert_len == 0 ||
+            ca_bundle == NULL || ca_bundle_len == 0 ||
+            current_cert == NULL || current_cert_len == 0 ||
+            current_key == NULL || csr_der == NULL || csr_der_len == 0)
         return WOLFCERT_ERR_BAD_ARG;
 
     if (current_key->type != WOLFCERT_KEY_RSA)
@@ -1215,8 +1218,10 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
     memset(out, 0, sizeof(*out));
     out->fail_info = -1;
 
-    if (srv == NULL || ra_cert == NULL || ca_bundle == NULL ||
-            signer_key == NULL || csr_der == NULL ||
+    if (srv == NULL || ra_cert == NULL || ra_cert_len == 0 ||
+            ca_bundle == NULL || ca_bundle_len == 0 ||
+            (signer_cert != NULL && signer_cert_len == 0) ||
+            signer_key == NULL || csr_der == NULL || csr_der_len == 0 ||
             transaction_id == NULL || transaction_id_len == 0)
         return WOLFCERT_ERR_BAD_ARG;
 

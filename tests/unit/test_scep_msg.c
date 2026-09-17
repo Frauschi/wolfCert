@@ -873,6 +873,83 @@ static int test_pem_has_cert(void)
     return 0;
 }
 
+static int test_zero_length_args_rejected(void)
+{
+    WolfCertScepResult r;
+    WolfCertScepCaps   caps = { 0 };
+    WolfCertServerCfg  srv  = { .protocol = WOLFCERT_PROTO_SCEP,
+                                .server_url = "http://127.0.0.1:1/scep" };
+    uint8_t            blob[4] = { 1, 2, 3, 4 };
+    WolfCertKey*       key = NULL;
+    WolfCertKeyCfg     kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                                .dev_id = WOLFCERT_DEVID_SOFTWARE };
+
+    REQUIRE(wolfcert_key_generate(&kcfg, &key) == WOLFCERT_OK);
+
+#define REJECTS(what, call)                                \
+    do {                                                   \
+        if ((call) != WOLFCERT_ERR_BAD_ARG) {              \
+            printf("FAIL %s: zero length accepted\n", what); \
+            wolfcert_key_free(key);                        \
+            return 1;                                      \
+        }                                                  \
+        wolfcert_scep_result_free(&r);                     \
+    } while (0)
+
+    REJECTS("pkcs_req_ex ra_cert_len",
+        wolfcert_scep_pkcs_req_ex(&srv, &caps, blob, 0,
+                                  blob, sizeof(blob), key, blob, sizeof(blob), &r));
+    REJECTS("pkcs_req_ex ca_bundle_len",
+        wolfcert_scep_pkcs_req_ex(&srv, &caps, blob, sizeof(blob),
+                                  blob, 0, key, blob, sizeof(blob), &r));
+    REJECTS("pkcs_req_ex csr_der_len",
+        wolfcert_scep_pkcs_req_ex(&srv, &caps, blob, sizeof(blob),
+                                  blob, sizeof(blob), key, blob, 0, &r));
+
+    REJECTS("renewal_req_ex ra_cert_len",
+        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, 0,
+                                     blob, sizeof(blob), blob, sizeof(blob),
+                                     key, blob, sizeof(blob), &r));
+    REJECTS("renewal_req_ex ca_bundle_len",
+        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, sizeof(blob),
+                                     blob, 0, blob, sizeof(blob),
+                                     key, blob, sizeof(blob), &r));
+    REJECTS("renewal_req_ex current_cert_len",
+        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, sizeof(blob),
+                                     blob, sizeof(blob), blob, 0,
+                                     key, blob, sizeof(blob), &r));
+    REJECTS("renewal_req_ex csr_der_len",
+        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, sizeof(blob),
+                                     blob, sizeof(blob), blob, sizeof(blob),
+                                     key, blob, 0, &r));
+
+    REJECTS("get_cert_initial ra_cert_len",
+        wolfcert_scep_get_cert_initial(&srv, &caps, blob, 0,
+                                       blob, sizeof(blob), blob, sizeof(blob),
+                                       key, blob, sizeof(blob),
+                                       blob, sizeof(blob), &r));
+    REJECTS("get_cert_initial ca_bundle_len",
+        wolfcert_scep_get_cert_initial(&srv, &caps, blob, sizeof(blob),
+                                       blob, 0, blob, sizeof(blob),
+                                       key, blob, sizeof(blob),
+                                       blob, sizeof(blob), &r));
+    REJECTS("get_cert_initial csr_der_len",
+        wolfcert_scep_get_cert_initial(&srv, &caps, blob, sizeof(blob),
+                                       blob, sizeof(blob), blob, sizeof(blob),
+                                       key, blob, 0,
+                                       blob, sizeof(blob), &r));
+    /* signer_cert stays optional, but a non-NULL one must carry bytes. */
+    REJECTS("get_cert_initial signer_cert_len",
+        wolfcert_scep_get_cert_initial(&srv, &caps, blob, sizeof(blob),
+                                       blob, sizeof(blob), blob, 0,
+                                       key, blob, sizeof(blob),
+                                       blob, sizeof(blob), &r));
+#undef REJECTS
+
+    wolfcert_key_free(key);
+    return 0;
+}
+
 static int test_result_defined_on_early_return(void)
 {
     WolfCertScepResult r;
@@ -2187,6 +2264,8 @@ int main(void)
     if (test_pem_has_cert())
         return 1;
     if (test_result_defined_on_early_return())
+        return 1;
+    if (test_zero_length_args_rejected())
         return 1;
     if (test_cert_rep_signer_trust())
         return 1;
