@@ -1244,7 +1244,7 @@ static int test_cert_rep_txid_and_type(void)
     return 0;
 }
 
-/* RFC 8894 section 4.6.1: the GetNextCACert response must be a SignedData
+/* RFC 8894 section 4.7.1: the GetNextCACert response must be a SignedData
  * signed by the current CA, not an unsigned degenerate certs-only bundle. A
  * signed message verifies through the pkiMessage parser (which rejects
  * degenerate SignedData); the signed content must in turn yield the next CA
@@ -1294,7 +1294,7 @@ static int test_next_ca_response_is_signed(void)
     return 0;
 }
 
-/* RFC 8894 section 4.6.1: the client must bind the GetNextCACert response to
+/* RFC 8894 section 4.7.1: the client must bind the GetNextCACert response to
  * the current CA it already trusts. A response validated against a different
  * (attacker) CA must be rejected, while the genuine current CA is accepted. */
 static int test_next_ca_response_signer_trust(void)

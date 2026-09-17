@@ -340,7 +340,7 @@ static void handle_get_ca_cert(WolfCertServer* s, int fd)
 }
 
 /* Materialize the rolled-over CA on first request and return it wrapped in a
- * SignedData signed by the current CA, per RFC 8894 section 4.6.1, so the
+ * SignedData signed by the current CA, per RFC 8894 section 4.7.1, so the
  * client can bind the rollover certificate to the CA it already trusts. */
 static void handle_get_next_ca_cert(WolfCertServer* s, int fd)
 {

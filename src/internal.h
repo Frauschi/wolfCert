@@ -478,7 +478,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     char** out_pki_status, uint8_t** out_signer_cert, size_t* out_signer_cert_len,
     char** out_fail_info, void* heap);
 
-/* Build the GetNextCACert response (RFC 8894 section 4.6.1): wrap the next CA
+/* Build the GetNextCACert response (RFC 8894 section 4.7.1): wrap the next CA
  * certificate in a degenerate certs-only SignedData and sign that with the
  * current CA key, so the client can bind the rollover certificate to trust it
  * already holds. */
@@ -508,7 +508,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
     const uint8_t* rx_tid, size_t rx_tid_len,
     const uint8_t* sent_tid, size_t sent_tid_len);
 
-/* Validate a GetNextCACert response (RFC 8894 section 4.6.1): verify it is a
+/* Validate a GetNextCACert response (RFC 8894 section 4.7.1): verify it is a
  * SignedData, bind its signer to a certificate in the trusted current-CA
  * bundle (current_ca_der is one or more concatenated DER certs; required), and
  * extract the enclosed rollover certificate(s) as PEM. Rejects an unsigned

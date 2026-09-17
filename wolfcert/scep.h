@@ -250,7 +250,7 @@ WOLFCERT_API int wolfcert_scep_get_cert(const WolfCertServerCfg* srv,
                                         const uint8_t* serial, size_t serial_len,
                                         WolfCertScepResult* out);
 
-/* GetNextCACert (RFC 8894 section 4.6.1): retrieve the roll-over CA cert ahead
+/* GetNextCACert (RFC 8894 section 4.7): retrieve the roll-over CA cert ahead
  * of the current CA's expiry, so the device can install the new trust
  * anchor before the old one stops being honored. Returns
  * WOLFCERT_ERR_NOT_FOUND when the server has no roll-over configured

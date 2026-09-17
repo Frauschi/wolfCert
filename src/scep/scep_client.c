@@ -1454,7 +1454,7 @@ int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
         return WOLFCERT_ERR_HTTP;
     }
 
-    /* RFC 8894 section 4.6.1: the body is a SignedData signed by the current
+    /* RFC 8894 section 4.7.1: the body is a SignedData signed by the current
      * CA whose content is a degenerate certs-only bundle carrying the next CA
      * certificate. Verify the signature, bind it to the trusted current CA,
      * then extract the certs from the signed content rather than the outer

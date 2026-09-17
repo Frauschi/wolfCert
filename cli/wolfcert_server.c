@@ -75,7 +75,7 @@ static void print_usage(FILE* out)
         "  --tls-client-ca PEMFILE  Require mutual TLS; verify clients against this CA\n"
         "  --scep-require-approval  Defer SCEP PKCSReq/RenewalReq (pkiStatus=PENDING); issue\n"
         "                           on first GetCertInitial with the same transactionID\n"
-        "  --scep-enable-next-ca    Advertise + answer GetNextCACert (RFC 8894 section 4.6.1),\n"
+        "  --scep-enable-next-ca    Advertise + answer GetNextCACert (RFC 8894 section 4.7),\n"
         "                           generating a roll-over CA on first request\n"
         "  --scep-enable-get-cert   Answer GetCert (RFC 8894 section 3.3.4), returning a\n"
         "                           previously issued certificate by serial. Off by default;\n"

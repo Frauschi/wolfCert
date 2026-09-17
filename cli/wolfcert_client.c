@@ -84,7 +84,7 @@ static void print_usage(FILE* out)
         "\n"
         "Commands:\n"
         "  getcacerts     Retrieve the CA chain and write it as PEM.\n"
-        "  getnextca      SCEP GetNextCACert: fetch the roll-over CA (RFC 8894 section 4.6.1).\n"
+        "  getnextca      SCEP GetNextCACert: fetch the roll-over CA (RFC 8894 section 4.7).\n"
         "  getcert        SCEP GetCert: fetch an issued certificate by serial (RFC 8894 section 3.3.4).\n"
         "  enroll         Generate a key + CSR and enroll a new certificate.\n"
         "  reenroll       Re-enroll an existing certificate (EST).\n"
@@ -1864,7 +1864,7 @@ static int cmd_getnextca(int argc, char** argv)
             if (pin.len > 0 && rc == WOLFCERT_ERR_AUTH) {
                 fprintf(stderr, "getnextca: the roll-over signer could not be "
                         "bound to the pinned certificate. The current CA signs "
-                        "it (RFC 8894 section 4.6.1), not the RA that signs a "
+                        "it (RFC 8894 section 4.7.1), not the RA that signs a "
                         "CertRep\n");
             }
             ret = 2;
