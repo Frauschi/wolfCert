@@ -45,14 +45,16 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
-/* Content-encryption cipher the CertRep EnvelopedData carries. Mirrors the
- * client's AUTO choice: RFC 8894 section 3.5.2's "AES" capability names
- * AES-128-CBC and nothing else, with the mandatory-to-implement triple DES-CBC
- * as the fallback for a wolfSSL that cannot do AES-128. */
+/* Content-encryption cipher for the CertRep and its GetCACaps tokens. RFC 8894
+ * section 3.5.2: "AES" names AES128-CBC, and "SCEPStandard" implies "AES". */
 #if defined(WOLFSSL_AES_128) && defined(HAVE_AES_CBC)
-    #define SCEP_SRV_ENC_OID AES128CBCb
+    #define SCEP_SRV_ENC_OID    AES128CBCb
+    #define SCEP_SRV_CIPHER_CAP "AES\r\n"
+    #define SCEP_SRV_STD_CAP    "SCEPStandard\r\n"
 #elif !defined(NO_DES3)
-    #define SCEP_SRV_ENC_OID DES3b
+    #define SCEP_SRV_ENC_OID    DES3b
+    #define SCEP_SRV_CIPHER_CAP "DES3\r\n"
+    #define SCEP_SRV_STD_CAP    ""
 #else
     #error "wolfCert's SCEP test server needs AES-128-CBC or 3DES-CBC; rebuild wolfSSL with one of them, or configure without the test server"
 #endif
@@ -304,12 +306,13 @@ static void handle_get_ca_caps(WolfCertServer* s, int fd)
 {
     if (s->cfg.scep_enable_next_ca) {
         send_text(s, fd, 200, "OK", "text/plain",
-                  "POSTPKIOperation\r\nSHA-256\r\nAES\r\nRenewal\r\n"
-                  "SCEPStandard\r\nGetNextCACert\r\n");
+                  "POSTPKIOperation\r\nSHA-256\r\n" SCEP_SRV_CIPHER_CAP
+                  "Renewal\r\n" SCEP_SRV_STD_CAP "GetNextCACert\r\n");
     }
     else {
         send_text(s, fd, 200, "OK", "text/plain",
-                  "POSTPKIOperation\r\nSHA-256\r\nAES\r\nRenewal\r\nSCEPStandard\r\n");
+                  "POSTPKIOperation\r\nSHA-256\r\n" SCEP_SRV_CIPHER_CAP
+                  "Renewal\r\n" SCEP_SRV_STD_CAP);
     }
 }
 

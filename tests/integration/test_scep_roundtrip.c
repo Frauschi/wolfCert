@@ -1135,6 +1135,15 @@ int main(void)
     REQUIRE(caps.post_pki_operation);
     REQUIRE(caps.sha256);
 
+#if defined(WOLFSSL_AES_128) && defined(HAVE_AES_CBC)
+    REQUIRE(caps.aes == 1);
+    REQUIRE(caps.scep_standard == 1);
+#else
+    REQUIRE(caps.aes == 0);
+    REQUIRE(caps.scep_standard == 0);
+#endif
+    REQUIRE(caps.renewal);
+
     WolfCertBuffer ca_pem = { 0 };
     REQUIRE(wolfcert_scep_get_ca_cert(&cli, &ca_pem) == WOLFCERT_OK);
     DerBuffer* ca_der = NULL;
