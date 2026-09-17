@@ -75,6 +75,27 @@ static void* server_thread(void* arg)
     return NULL;
 }
 
+/* wolfcert/scep.h: an entry point defines *out before any other argument check,
+ * so a rejected call still hands back something safe to free. */
+static int result_is_defined(const WolfCertScepResult* r)
+{
+    return r->status == WOLFCERT_SCEP_STATUS_UNSET &&
+           r->cert_pem.data == NULL && r->cert_pem.len == 0 &&
+           r->transaction_id == NULL && r->transaction_id_len == 0 &&
+           r->fail_info == -1 && r->heap == NULL;
+}
+
+/* Assert a poisoned result was both rejected and cleared. An undefined *r still
+ * holds the poison, so zero it before failing: cleanup must not free that. */
+static int poisoned_call_rejected(int rc, WolfCertScepResult* r)
+{
+    if (!result_is_defined(r)) {
+        memset(r, 0, sizeof(*r));
+        return 0;
+    }
+    return rc == WOLFCERT_ERR_BAD_ARG;
+}
+
 /* Generous poll ceiling so a legitimately slow WANT_READ/WANT_WRITE wait on a
  * loaded CI host is not mistaken for a hang. */
 #define SCEP_ASYNC_POLL_TIMEOUT_MS 30000
@@ -505,20 +526,45 @@ static int async_guard_path(WolfCertServer* s)
 
     /* out-pointer guard: resuming the in-flight PKCSReq (same operation) with a
      * different WolfCertScepResult* than the one captured at begin is rejected,
-     * rather than writing the eventual result to the wrong object. */
-    REQUIRE_CLEAN(wolfcert_scep_session_pkcs_req_nb(asess, &caps,
+     * rather than writing the eventual result to the wrong object. The rejected
+     * object must still come back defined - wolfcert/scep.h promises a caller
+     * can free the result on any outcome - so poison it first. */
+    memset(&r2, 0xA5, sizeof(r2));
+    REQUIRE_CLEAN(poisoned_call_rejected(
+                wolfcert_scep_session_pkcs_req_nb(asess, &caps,
                 ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
-                dk, csr.data, csr.len, &r2) == WOLFCERT_ERR_BAD_ARG);
+                dk, csr.data, csr.len, &r2), &r2));
 
     /* in_op guard: a different operation while one is in flight is rejected. */
-    REQUIRE_CLEAN(wolfcert_scep_session_renewal_req_nb(asess, &caps,
+    memset(&r2, 0xA5, sizeof(r2));
+    REQUIRE_CLEAN(poisoned_call_rejected(
+                wolfcert_scep_session_renewal_req_nb(asess, &caps,
                 ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
-                ca_der->buffer, ca_der->length, dk, csr.data, csr.len, &r2)
-            == WOLFCERT_ERR_BAD_ARG);
-    REQUIRE_CLEAN(wolfcert_scep_session_get_cert_initial_nb(asess, &caps,
+                ca_der->buffer, ca_der->length, dk, csr.data, csr.len, &r2),
+            &r2));
+
+    memset(&r2, 0xA5, sizeof(r2));
+    REQUIRE_CLEAN(poisoned_call_rejected(
+                wolfcert_scep_session_get_cert_initial_nb(asess, &caps,
                 ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
-                NULL, 0, dk, csr.data, csr.len, csr.data, csr.len, &r2)
-            == WOLFCERT_ERR_BAD_ARG);
+                NULL, 0, dk, csr.data, csr.len, csr.data, csr.len, &r2),
+            &r2));
+
+    /* The complement: a resume on the session's own result must not clear it.
+     * Nothing reaches *out before the reply, so sentinel what a clear resets. */
+    r1.fail_info = 42;
+    rc = wolfcert_scep_session_pkcs_req_nb(asess, &caps,
+                ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
+                dk, csr.data, csr.len, &r1);
+    REQUIRE_CLEAN(rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);
+    REQUIRE_CLEAN(r1.fail_info == 42);
+
+    /* Same rule on the blocking wrappers: an _ex call rejected on an async
+     * session must leave the in-flight result alone, not clear it. */
+    REQUIRE_CLEAN(wolfcert_scep_session_pkcs_req_ex(asess, &caps,
+                ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
+                dk, csr.data, csr.len, &r1) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE_CLEAN(r1.fail_info == 42);
 
     ret = 0;
 cleanup:

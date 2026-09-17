@@ -773,7 +773,404 @@ static int check_issuer_and_subject(const uint8_t* ra_der, size_t ra_len,
     return rc;
 }
 
-/* RFC 8894 section 3.3.2: the IssuerAndSubject issuer Name identifies the CA
+/* Every SCEP entry point taking a WolfCertScepResult must leave it defined once
+ * it has accepted the pointer, so "call, then free on any outcome" is safe. */
+static int check_result_defined(const char* what, int rc, const WolfCertScepResult* r)
+{
+    if (rc != WOLFCERT_ERR_BAD_ARG) {
+        fprintf(stderr, "FAIL %s: expected BAD_ARG, got %d\n", what, rc);
+        return 1;
+    }
+    if (r->status != WOLFCERT_SCEP_STATUS_UNSET || r->cert_pem.data != NULL ||
+            r->cert_pem.len != 0 || r->transaction_id != NULL ||
+            r->transaction_id_len != 0 || r->fail_info != -1 || r->heap != NULL) {
+        fprintf(stderr, "FAIL %s: result left indeterminate\n", what);
+        return 1;
+    }
+    return 0;
+}
+
+/* The GetCert response check walks a PEM bundle: a certificate that will not
+ * parse is skipped, so one ahead of the target cannot hide it. */
+static int test_pem_has_cert(void)
+{
+    uint8_t* ca_der     = NULL;
+    size_t   ca_len     = 0;
+    uint8_t* ca_key_der = NULL;
+    size_t   ca_key_len = 0;
+    uint8_t* leaf_der   = NULL;
+    size_t   leaf_len   = 0;
+    static const char JUNK[] =
+        "-----BEGIN CERTIFICATE-----\nZZZZ not base64 at all\n"
+        "-----END CERTIFICATE-----\n";
+    static char pem[8192];
+    static char bundle[16384];
+    int n;
+
+    REQUIRE(make_ca(&ca_der, &ca_len, &ca_key_der, &ca_key_len) == 0);
+    REQUIRE(make_signed_cert(ca_der, ca_len, ca_key_der, ca_key_len,
+                             "leaf-pem-has-cert", 0, 1, &leaf_der, &leaf_len) == 0);
+
+    DecodedCert lc;
+    wc_InitDecodedCert(&lc, leaf_der, (word32)leaf_len, NULL);
+    REQUIRE(wc_ParseCert(&lc, CERT_TYPE, NO_VERIFY, NULL) == 0);
+    REQUIRE(lc.serialSz > 0 && lc.issuerRawLen > 0);
+
+    n = wc_DerToPem(leaf_der, (word32)leaf_len, (byte*)pem, sizeof(pem), CERT_TYPE);
+    REQUIRE(n > 0);
+
+    REQUIRE(wolfcert_scep_pem_has_cert((const uint8_t*)pem, (size_t)n,
+                                       lc.issuerRaw, (size_t)lc.issuerRawLen,
+                                       lc.serial, (size_t)lc.serialSz, NULL) == 1);
+
+    /* Behind an unparseable entry it must still be found. */
+    REQUIRE((size_t)n + sizeof(JUNK) < sizeof(bundle));
+    memcpy(bundle, JUNK, sizeof(JUNK) - 1);
+    memcpy(bundle + sizeof(JUNK) - 1, pem, (size_t)n);
+    REQUIRE(wolfcert_scep_pem_has_cert((const uint8_t*)bundle,
+                                       sizeof(JUNK) - 1 + (size_t)n,
+                                       lc.issuerRaw, (size_t)lc.issuerRawLen,
+                                       lc.serial, (size_t)lc.serialSz, NULL) == 1);
+
+    /* Both halves are load-bearing: neither a wrong serial nor a wrong issuer
+     * may match the certificate that is there. */
+    {
+        uint8_t bad_serial[32];
+        uint8_t bad_issuer[512];
+
+        REQUIRE((size_t)lc.serialSz <= sizeof(bad_serial));
+        memcpy(bad_serial, lc.serial, (size_t)lc.serialSz);
+        bad_serial[lc.serialSz - 1] ^= 0xFF;
+        REQUIRE(wolfcert_scep_pem_has_cert((const uint8_t*)pem, (size_t)n,
+                                           lc.issuerRaw, (size_t)lc.issuerRawLen,
+                                           bad_serial, (size_t)lc.serialSz,
+                                           NULL) == 0);
+
+        REQUIRE((size_t)lc.issuerRawLen <= sizeof(bad_issuer));
+        memcpy(bad_issuer, lc.issuerRaw, (size_t)lc.issuerRawLen);
+        bad_issuer[lc.issuerRawLen - 1] ^= 0xFF;
+        REQUIRE(wolfcert_scep_pem_has_cert((const uint8_t*)pem, (size_t)n,
+                                           bad_issuer, (size_t)lc.issuerRawLen,
+                                           lc.serial, (size_t)lc.serialSz,
+                                           NULL) == 0);
+    }
+
+    /* Degenerate inputs are refused without forming a pointer past the end. */
+    REQUIRE(wolfcert_scep_pem_has_cert(NULL, 0, lc.issuerRaw,
+                                       (size_t)lc.issuerRawLen, lc.serial,
+                                       (size_t)lc.serialSz, NULL) == 0);
+    REQUIRE(wolfcert_scep_pem_has_cert((const uint8_t*)pem, 4, lc.issuerRaw,
+                                       (size_t)lc.issuerRawLen, lc.serial,
+                                       (size_t)lc.serialSz, NULL) == 0);
+    REQUIRE(wolfcert_scep_pem_has_cert((const uint8_t*)pem, (size_t)n, NULL, 0,
+                                       lc.serial, (size_t)lc.serialSz,
+                                       NULL) == 0);
+
+    wc_FreeDecodedCert(&lc);
+    free(ca_der);
+    free(ca_key_der);
+    free(leaf_der);
+    return 0;
+}
+
+static int test_zero_length_args_rejected(void)
+{
+    WolfCertScepResult r;
+    WolfCertScepCaps   caps = { 0 };
+    WolfCertServerCfg  srv  = { .protocol = WOLFCERT_PROTO_SCEP,
+                                .server_url = "http://127.0.0.1:1/scep" };
+    uint8_t            blob[4] = { 1, 2, 3, 4 };
+    WolfCertKey*       key = NULL;
+    WolfCertKeyCfg     kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                                .dev_id = WOLFCERT_DEVID_SOFTWARE };
+
+    REQUIRE(wolfcert_key_generate(&kcfg, &key) == WOLFCERT_OK);
+
+#define REJECTS(what, call)                                \
+    do {                                                   \
+        if ((call) != WOLFCERT_ERR_BAD_ARG) {              \
+            printf("FAIL %s: zero length accepted\n", what); \
+            wolfcert_key_free(key);                        \
+            return 1;                                      \
+        }                                                  \
+        wolfcert_scep_result_free(&r);                     \
+    } while (0)
+
+    REJECTS("pkcs_req_ex ra_cert_len",
+        wolfcert_scep_pkcs_req_ex(&srv, &caps, blob, 0,
+                                  blob, sizeof(blob), key, blob, sizeof(blob), &r));
+    REJECTS("pkcs_req_ex ca_bundle_len",
+        wolfcert_scep_pkcs_req_ex(&srv, &caps, blob, sizeof(blob),
+                                  blob, 0, key, blob, sizeof(blob), &r));
+    REJECTS("pkcs_req_ex csr_der_len",
+        wolfcert_scep_pkcs_req_ex(&srv, &caps, blob, sizeof(blob),
+                                  blob, sizeof(blob), key, blob, 0, &r));
+
+    REJECTS("renewal_req_ex ra_cert_len",
+        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, 0,
+                                     blob, sizeof(blob), blob, sizeof(blob),
+                                     key, blob, sizeof(blob), &r));
+    REJECTS("renewal_req_ex ca_bundle_len",
+        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, sizeof(blob),
+                                     blob, 0, blob, sizeof(blob),
+                                     key, blob, sizeof(blob), &r));
+    REJECTS("renewal_req_ex current_cert_len",
+        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, sizeof(blob),
+                                     blob, sizeof(blob), blob, 0,
+                                     key, blob, sizeof(blob), &r));
+    REJECTS("renewal_req_ex csr_der_len",
+        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, sizeof(blob),
+                                     blob, sizeof(blob), blob, sizeof(blob),
+                                     key, blob, 0, &r));
+
+    REJECTS("get_cert_initial ra_cert_len",
+        wolfcert_scep_get_cert_initial(&srv, &caps, blob, 0,
+                                       blob, sizeof(blob), blob, sizeof(blob),
+                                       key, blob, sizeof(blob),
+                                       blob, sizeof(blob), &r));
+    REJECTS("get_cert_initial ca_bundle_len",
+        wolfcert_scep_get_cert_initial(&srv, &caps, blob, sizeof(blob),
+                                       blob, 0, blob, sizeof(blob),
+                                       key, blob, sizeof(blob),
+                                       blob, sizeof(blob), &r));
+    REJECTS("get_cert_initial csr_der_len",
+        wolfcert_scep_get_cert_initial(&srv, &caps, blob, sizeof(blob),
+                                       blob, sizeof(blob), blob, sizeof(blob),
+                                       key, blob, 0,
+                                       blob, sizeof(blob), &r));
+    /* signer_cert stays optional, but a non-NULL one must carry bytes. */
+    REJECTS("get_cert_initial signer_cert_len",
+        wolfcert_scep_get_cert_initial(&srv, &caps, blob, sizeof(blob),
+                                       blob, sizeof(blob), blob, 0,
+                                       key, blob, sizeof(blob),
+                                       blob, sizeof(blob), &r));
+#undef REJECTS
+
+    wolfcert_key_free(key);
+    return 0;
+}
+
+static int test_result_defined_on_early_return(void)
+{
+    WolfCertScepResult r;
+    WolfCertScepCaps   caps = { 0 };
+    uint8_t            blob[4] = { 1, 2, 3, 4 };
+    WolfCertKey*       key = NULL;
+    WolfCertKeyCfg     kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                                .dev_id = WOLFCERT_DEVID_SOFTWARE };
+
+    REQUIRE(wolfcert_key_generate(&kcfg, &key) == WOLFCERT_OK);
+
+#define POISON_AND_CALL(what, call)                        \
+    do {                                                   \
+        memset(&r, 0xA5, sizeof(r));                       \
+        if (check_result_defined(what, (call), &r)) {      \
+            wolfcert_key_free(key);                        \
+            return 1;                                      \
+        }                                                  \
+        wolfcert_scep_result_free(&r);                     \
+    } while (0)
+
+    /* One-shot: a NULL srv trips the check that follows the out handling. */
+    POISON_AND_CALL("pkcs_req_ex",
+        wolfcert_scep_pkcs_req_ex(NULL, &caps, blob, sizeof(blob),
+                                  blob, sizeof(blob), key, blob, sizeof(blob), &r));
+    POISON_AND_CALL("renewal_req_ex",
+        wolfcert_scep_renewal_req_ex(NULL, &caps, blob, sizeof(blob),
+                                     blob, sizeof(blob), blob, sizeof(blob),
+                                     key, blob, sizeof(blob), &r));
+    POISON_AND_CALL("get_cert_initial",
+        wolfcert_scep_get_cert_initial(NULL, &caps, blob, sizeof(blob),
+                                       blob, sizeof(blob), blob, sizeof(blob),
+                                       key, blob, sizeof(blob),
+                                       blob, sizeof(blob), &r));
+    POISON_AND_CALL("get_cert",
+        wolfcert_scep_get_cert(NULL, &caps, blob, sizeof(blob),
+                               blob, sizeof(blob), blob, sizeof(blob),
+                               key, blob, sizeof(blob), &r));
+
+    /* Session: a NULL session trips the check that follows the out handling. */
+    POISON_AND_CALL("session_pkcs_req_ex",
+        wolfcert_scep_session_pkcs_req_ex(NULL, &caps, blob, sizeof(blob),
+                                          blob, sizeof(blob), key,
+                                          blob, sizeof(blob), &r));
+    POISON_AND_CALL("session_pkcs_req_nb",
+        wolfcert_scep_session_pkcs_req_nb(NULL, &caps, blob, sizeof(blob),
+                                          blob, sizeof(blob), key,
+                                          blob, sizeof(blob), &r));
+    POISON_AND_CALL("session_renewal_req_ex",
+        wolfcert_scep_session_renewal_req_ex(NULL, &caps, blob, sizeof(blob),
+                                             blob, sizeof(blob), blob, sizeof(blob),
+                                             key, blob, sizeof(blob), &r));
+    POISON_AND_CALL("session_renewal_req_nb",
+        wolfcert_scep_session_renewal_req_nb(NULL, &caps, blob, sizeof(blob),
+                                             blob, sizeof(blob), blob, sizeof(blob),
+                                             key, blob, sizeof(blob), &r));
+    POISON_AND_CALL("session_get_cert_initial_ex",
+        wolfcert_scep_session_get_cert_initial_ex(NULL, &caps, blob, sizeof(blob),
+                                                  blob, sizeof(blob), blob, sizeof(blob),
+                                                  key, blob, sizeof(blob),
+                                                  blob, sizeof(blob), &r));
+    POISON_AND_CALL("session_get_cert_initial_nb",
+        wolfcert_scep_session_get_cert_initial_nb(NULL, &caps, blob, sizeof(blob),
+                                                  blob, sizeof(blob), blob, sizeof(blob),
+                                                  key, blob, sizeof(blob),
+                                                  blob, sizeof(blob), &r));
+#undef POISON_AND_CALL
+
+    /* A NULL result is still rejected without a dereference. */
+    REQUIRE(wolfcert_scep_get_cert(NULL, &caps, blob, sizeof(blob),
+                                   blob, sizeof(blob), blob, sizeof(blob),
+                                   key, blob, sizeof(blob),
+                                   NULL) == WOLFCERT_ERR_BAD_ARG);
+
+    wolfcert_key_free(key);
+    return 0;
+}
+
+/* RFC 8894 section 3.3.4 carries an RFC 5652 IssuerAndSerialNumber: the issuer
+ * Name is picked as for IssuerAndSubject, and the parser finds the serial again. */
+static int test_issuer_and_serial(void)
+{
+    uint8_t* ca_der     = NULL;
+    size_t   ca_len     = 0;
+    uint8_t* ca_key_der = NULL;
+    size_t   ca_key_len = 0;
+    uint8_t* leaf_der   = NULL;
+    size_t   leaf_len   = 0;
+    uint8_t* other_der  = NULL;
+    size_t   other_len  = 0;
+
+    REQUIRE(make_ca(&ca_der, &ca_len, &ca_key_der, &ca_key_len) == 0);
+    /* make_ca gives every CA the same DN, so a distinct name needs its own CN. */
+    REQUIRE(make_signed_cert(ca_der, ca_len, ca_key_der, ca_key_len,
+                             "unrelated-ca", 1, 1, &other_der, &other_len) == 0);
+    REQUIRE(make_signed_cert(ca_der, ca_len, ca_key_der, ca_key_len,
+                             "leaf-getcert", 0, 1, &leaf_der, &leaf_len) == 0);
+
+    DecodedCert lc;
+    wc_InitDecodedCert(&lc, leaf_der, (word32)leaf_len, NULL);
+    REQUIRE(wc_ParseCert(&lc, CERT_TYPE, NO_VERIFY, NULL) == 0);
+    REQUIRE(lc.serialSz > 0);
+
+    DecodedCert cc;
+    wc_InitDecodedCert(&cc, ca_der, (word32)ca_len, NULL);
+    REQUIRE(wc_ParseCert(&cc, CERT_TYPE, NO_VERIFY, NULL) == 0);
+
+    WolfCertBuffer ias = { 0 };
+    REQUIRE(wolfcert_scep_issuer_and_serial(ca_der, ca_len,
+                                            lc.serial, (size_t)lc.serialSz,
+                                            &ias, NULL) == WOLFCERT_OK);
+
+    /* SEQUENCE { issuer Name, serialNumber }, nothing before or after. */
+    size_t outer_len = 0;
+    size_t total     = 0;
+    const uint8_t* outer = seq_content(ias.data, ias.len, &outer_len, &total);
+    REQUIRE(outer != NULL);
+    REQUIRE(total == ias.len);
+
+    size_t dn_len = 0;
+    const uint8_t* dn = seq_content(outer, outer_len, &dn_len, &total);
+    REQUIRE(dn != NULL);
+    REQUIRE(dn_len == (size_t)cc.subjectRawLen);
+    REQUIRE(memcmp(dn, cc.subjectRaw, dn_len) == 0);
+
+    /* The serial follows as a DER INTEGER, padded when bit 8 of its first byte
+     * would otherwise read as a sign, and spans the rest. */
+    size_t pad = (lc.serial[0] & 0x80) ? 1 : 0;
+    REQUIRE(outer[total] == 0x02);
+    REQUIRE(outer[total + 1] == (uint8_t)((size_t)lc.serialSz + pad));
+    if (pad)
+        REQUIRE(outer[total + 2] == 0x00);
+    REQUIRE(memcmp(outer + total + 2 + pad, lc.serial, (size_t)lc.serialSz) == 0);
+    REQUIRE(total + 2 + pad + (size_t)lc.serialSz == outer_len);
+
+    const uint8_t* got = NULL;
+    size_t got_len = 0;
+    const uint8_t* got_iss = NULL;
+    size_t got_iss_len = 0;
+    REQUIRE(wolfcert_scep_parse_issuer_and_serial(ias.data, ias.len,
+                                                  &got_iss, &got_iss_len,
+                                                  &got, &got_len) == WOLFCERT_OK);
+    REQUIRE(got_len == (size_t)lc.serialSz);
+    REQUIRE(memcmp(got, lc.serial, got_len) == 0);
+
+    /* The issuer Name comes back too, and is the CA's own. */
+    REQUIRE(got_iss_len == (size_t)cc.subjectRawLen);
+    REQUIRE(memcmp(got_iss, cc.subjectRaw, got_iss_len) == 0);
+    REQUIRE(wolfcert_scep_issuer_name_matches(ca_der, ca_len, got_iss,
+                                              got_iss_len, NULL));
+    /* The leaf names its own issuer, so it resolves to the same CA; only an
+     * unrelated CA is a genuine mismatch. */
+    REQUIRE(wolfcert_scep_issuer_name_matches(leaf_der, leaf_len, got_iss,
+                                              got_iss_len, NULL));
+    REQUIRE(!wolfcert_scep_issuer_name_matches(other_der, other_len, got_iss,
+                                               got_iss_len, NULL));
+
+    /* A truncated encoding is rejected rather than read past the end. */
+    REQUIRE(wolfcert_scep_parse_issuer_and_serial(ias.data, ias.len - 1,
+                                                  &got_iss, &got_iss_len,
+                                                  &got, &got_len) != WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_issuer_and_serial(ca_der, ca_len, lc.serial, 0,
+                                            &ias, NULL) == WOLFCERT_ERR_BAD_ARG);
+
+    /* wolfSSL hands back DecodedCert.serial with any DER sign pad stripped, and
+     * its own generator clears bit 8, so a high-bit serial only arrives from a
+     * third-party CA. It must re-encode as 02 04 00 8A 01 02, not as the
+     * negative 02 03 8A 01 02. */
+    static const uint8_t high_bit[3] = { 0x8A, 0x01, 0x02 };
+    WolfCertBuffer hb = { 0 };
+    REQUIRE(wolfcert_scep_issuer_and_serial(ca_der, ca_len, high_bit,
+                                            sizeof(high_bit), &hb,
+                                            NULL) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_parse_issuer_and_serial(hb.data, hb.len,
+                                                  &got_iss, &got_iss_len,
+                                                  &got, &got_len) == WOLFCERT_OK);
+    REQUIRE(got_len == sizeof(high_bit));
+    REQUIRE(memcmp(got, high_bit, got_len) == 0);
+    REQUIRE(got[-1] == 0x00);
+    REQUIRE(got[-2] == (uint8_t)(sizeof(high_bit) + 1));
+
+    /* Anything after the serialNumber means this is not an IssuerAndSerial. */
+    uint8_t* trailing = (uint8_t*)malloc(hb.len + 2);
+    REQUIRE(trailing != NULL);
+    memcpy(trailing, hb.data, hb.len);
+    trailing[hb.len]     = 0x05;   /* a NULL element the structure has no room for */
+    trailing[hb.len + 1] = 0x00;
+    trailing[1] = (uint8_t)(trailing[1] + 2);   /* widen the outer SEQUENCE */
+    REQUIRE(wolfcert_scep_parse_issuer_and_serial(trailing, hb.len + 2,
+                                                  &got_iss, &got_iss_len,
+                                                  &got, &got_len) != WOLFCERT_OK);
+    /* And so are bytes past the end the outer SEQUENCE's own length names. */
+    trailing[1] = (uint8_t)(trailing[1] - 2);
+    REQUIRE(wolfcert_scep_parse_issuer_and_serial(trailing, hb.len + 2,
+                                                  &got_iss, &got_iss_len,
+                                                  &got, &got_len) != WOLFCERT_OK);
+    free(trailing);
+
+    /* A caller who passes the padded wire form instead of the magnitude gets
+     * the same encoding, so the two conventions cannot drift apart. */
+    static const uint8_t padded[4] = { 0x00, 0x8A, 0x01, 0x02 };
+    WolfCertBuffer pb = { 0 };
+    REQUIRE(wolfcert_scep_issuer_and_serial(ca_der, ca_len, padded,
+                                            sizeof(padded), &pb,
+                                            NULL) == WOLFCERT_OK);
+    REQUIRE(pb.len == hb.len);
+    REQUIRE(memcmp(pb.data, hb.data, pb.len) == 0);
+    wolfcert_buffer_free(&pb);
+    wolfcert_buffer_free(&hb);
+
+    wolfcert_buffer_free(&ias);
+    wc_FreeDecodedCert(&lc);
+    wc_FreeDecodedCert(&cc);
+    free(ca_der);
+    free(ca_key_der);
+    free(leaf_der);
+    free(other_der);
+    return 0;
+}
+
+/* RFC 8894 section 3.3.3: the IssuerAndSubject issuer Name identifies the CA
  * that issues the requested cert - an RA contributes its issuer's name, a CA
  * (including a sub-CA under an offline root) its own subject. */
 static int test_issuer_and_subject_issuer_name(void)
@@ -924,7 +1321,7 @@ static int test_cert_rep_txid_and_type(void)
     return 0;
 }
 
-/* RFC 8894 section 4.6.1: the GetNextCACert response must be a SignedData
+/* RFC 8894 section 4.7.1: the GetNextCACert response must be a SignedData
  * signed by the current CA, not an unsigned degenerate certs-only bundle. A
  * signed message verifies through the pkiMessage parser (which rejects
  * degenerate SignedData); the signed content must in turn yield the next CA
@@ -974,7 +1371,7 @@ static int test_next_ca_response_is_signed(void)
     return 0;
 }
 
-/* RFC 8894 section 4.6.1: the client must bind the GetNextCACert response to
+/* RFC 8894 section 4.7.1: the client must bind the GetNextCACert response to
  * the current CA it already trusts. A response validated against a different
  * (attacker) CA must be rejected, while the genuine current CA is accepted. */
 static int test_next_ca_response_signer_trust(void)
@@ -1861,6 +2258,14 @@ int main(void)
     if (test_signer_key_usage())
         return 1;
     if (test_issuer_and_subject_issuer_name())
+        return 1;
+    if (test_issuer_and_serial())
+        return 1;
+    if (test_pem_has_cert())
+        return 1;
+    if (test_result_defined_on_early_return())
+        return 1;
+    if (test_zero_length_args_rejected())
         return 1;
     if (test_cert_rep_signer_trust())
         return 1;

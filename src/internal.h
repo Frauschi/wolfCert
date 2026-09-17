@@ -243,6 +243,13 @@ WOLFCERT_API const WolfCertServerOps* wolfcert_scep_server_ops(void);
  * the CA key, and/or force the CertRep senderNonce RNG draw to fail. Used to
  * drive the client-side rejection and server error paths. Call after
  * wolfcert_server_start and before the client request. */
+/* GetCert faults: answer with the CA cert instead of the match, so the client's
+ * requested-serial check has something to reject; or drop the signer cert, so
+ * the handler sees what a pkiMessage carrying none would leave it. */
+WOLFCERT_TEST_VIS void wolfcert_scep_server_set_getcert_fault(WolfCertServer* s,
+                                                              int wrong_cert,
+                                                              int no_signer);
+
 WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
     int omit_recipient_nonce, int sign_with_wrong_key, int rng_fail);
 #endif
@@ -389,13 +396,50 @@ typedef struct {
     const char*    fail_info;
 } WolfCertScepAttrs;
 
-/* Build the GetCertInitial IssuerAndSubject (RFC 8894 section 3.3.2) from an
- * envelope-target cert and a CSR. A CA target names itself; an RA names its
- * issuer, which assumes that is the CA issuing the requested cert. */
+/* Build the GetCertInitial IssuerAndSubject (RFC 8894 section 3.3.3, messageType
+ * 20) from an envelope-target cert and a CSR. A CA target names itself; an RA
+ * names its issuer, which assumes that is the CA issuing the requested cert. */
 WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_subject(
                                      const uint8_t* ra_cert_der, size_t ra_cert_len,
                                      const uint8_t* csr_der,     size_t csr_len,
                                      WolfCertBuffer* out_der, void* heap);
+
+/* Build the GetCert IssuerAndSerialNumber (RFC 8894 section 3.3.4, messageType
+ * 21) from an envelope-target cert and the serial of the certificate being
+ * fetched. The issuer Name is chosen as for wolfcert_scep_issuer_and_subject. */
+WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_serial(
+                                     const uint8_t* ra_cert_der, size_t ra_cert_len,
+                                     const uint8_t* serial, size_t serial_len,
+                                     WolfCertBuffer* out_der, void* heap);
+
+/* Narrow a serial to its unsigned magnitude: leading zero bytes dropped, never
+ * below one byte. Both directions of a serial exchange normalize through this,
+ * so an encoder's DER sign pad and wolfSSL's stripped DecodedCert.serial agree. */
+WOLFCERT_TEST_VIS void wolfcert_scep_int_magnitude(const uint8_t** v, size_t* vl);
+
+/* Split an IssuerAndSerialNumber into the issuer Name's contents and the serial
+ * magnitude; both point into `der`. */
+WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_serial(
+                                     const uint8_t* der, size_t der_len,
+                                     const uint8_t** out_issuer,
+                                     size_t* out_issuer_len,
+                                     const uint8_t** out_serial,
+                                     size_t* out_serial_len);
+
+/* Does any certificate in `pem` carry `issuer` and `serial`? A CertRep is only
+ * checked for signer and nonce, so without this a CA could answer a GetCert with
+ * some other certificate and the caller would write it out as the one it named.
+ * An entry that will not parse is skipped, not treated as the end of the list. */
+WOLFCERT_TEST_VIS int wolfcert_scep_pem_has_cert(const uint8_t* pem, size_t pem_len,
+                                     const uint8_t* issuer, size_t issuer_len,
+                                     const uint8_t* serial, size_t serial_len,
+                                     void* heap);
+
+/* Does `name` match the Name the CA in `cert_der` issues under? */
+WOLFCERT_TEST_VIS int wolfcert_scep_issuer_name_matches(
+                                     const uint8_t* cert_der, size_t cert_len,
+                                     const uint8_t* name, size_t name_len,
+                                     void* heap);
 
 WOLFCERT_TEST_VIS int wolfcert_scep_envelop(const uint8_t* ra_cert_der,
     size_t ra_cert_len, const uint8_t* payload, size_t payload_len, int enc_oid,
@@ -434,7 +478,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     char** out_pki_status, uint8_t** out_signer_cert, size_t* out_signer_cert_len,
     char** out_fail_info, void* heap);
 
-/* Build the GetNextCACert response (RFC 8894 section 4.6.1): wrap the next CA
+/* Build the GetNextCACert response (RFC 8894 section 4.7.1): wrap the next CA
  * certificate in a degenerate certs-only SignedData and sign that with the
  * current CA key, so the client can bind the rollover certificate to trust it
  * already holds. */
@@ -464,7 +508,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
     const uint8_t* rx_tid, size_t rx_tid_len,
     const uint8_t* sent_tid, size_t sent_tid_len);
 
-/* Validate a GetNextCACert response (RFC 8894 section 4.6.1): verify it is a
+/* Validate a GetNextCACert response (RFC 8894 section 4.7.1): verify it is a
  * SignedData, bind its signer to a certificate in the trusted current-CA
  * bundle (current_ca_der is one or more concatenated DER certs; required), and
  * extract the enclosed rollover certificate(s) as PEM. Rejects an unsigned

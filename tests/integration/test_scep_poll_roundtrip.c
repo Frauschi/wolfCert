@@ -19,7 +19,7 @@
 
 /*
  * End-to-end coverage for RFC 8894 polling (PKCSReq -> pkiStatus=PENDING
- * -> GetCertInitial -> pkiStatus=SUCCESS) and GetNextCACert (section 4.6.1).
+ * -> GetCertInitial -> pkiStatus=SUCCESS) and GetNextCACert (section 4.7).
  *
  * The test server is configured with scep_require_approval=1 so the
  * first PKCSReq is parked in the pending queue; GetCertInitial for the

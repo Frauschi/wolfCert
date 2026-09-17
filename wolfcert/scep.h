@@ -124,6 +124,13 @@ typedef struct {
     void*              heap;
 } WolfCertScepResult;
 
+/* Every wolfcert_scep_* entry point taking a WolfCertScepResult* defines *out
+ * before any other argument check, so a caller that frees the result on every
+ * outcome is safe even on an early WOLFCERT_ERR_BAD_ARG; unless out is NULL.
+ * The converse follows: *out is not carried across calls, so free a populated
+ * result before passing it again - except a session's own in-flight result,
+ * which the session owns until the request completes and every resume must
+ * pass back unfreed. */
 WOLFCERT_API void wolfcert_scep_result_free(WolfCertScepResult* r);
 
 /* PKCSReq: enroll a new certificate. The RFC 8894 section 2.9 challengePassword
@@ -183,7 +190,7 @@ WOLFCERT_API int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
                                            const uint8_t* csr_der, size_t csr_der_len,
                                            WolfCertBuffer* out_cert_pem);
 
-/* GetCertInitial (RFC 8894 section 3.3.2, messageType 20): poll for a
+/* GetCertInitial (RFC 8894 section 3.3.3, messageType 20): poll for a
  * previously-submitted PKCSReq/RenewalReq that returned PENDING.
  *
  * For a pending PKCSReq, pass signer_cert=NULL; the function will
@@ -207,7 +214,43 @@ WOLFCERT_API int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
                                                 size_t transaction_id_len,
                                                 WolfCertScepResult* out);
 
-/* GetNextCACert (RFC 8894 section 4.6.1): retrieve the roll-over CA cert ahead
+/* GetCert (RFC 8894 section 3.3.4, messageType 21): retrieve a certificate the
+ * CA has already issued, named by the serial it carries. Use it to recover a
+ * certificate whose local copy was lost when the private key survived.
+ *
+ * RFC 8894 calls GetCert optional and discourages it -- such messages "apply
+ * unnecessary cryptography and messaging overhead" -- so a CA may answer
+ * FAILURE/badCertId or nothing at all; prefer an HTTP certificate store where
+ * one exists.
+ *
+ * `signer_cert` / `signer_key` are an existing certificate and its key, which
+ * sign the pkiMessage; unlike wolfcert_scep_get_cert_initial there is no
+ * transient self-signed fallback. `serial` is the serial of the certificate
+ * being fetched, as the INTEGER content it carries -- DecodedCert.serial and
+ * .serialSz after wc_ParseCert, or the equivalent from your own records.
+ * `ra_cert` is the envelope target; `ca_bundle` is the trusted GetCACert bundle
+ * the response signer is checked against (see wolfcert_scep_pkcs_req_ex).
+ *
+ * On a hit the certificate lands in out->cert_pem with status SUCCESS. A round
+ * trip that verifies but answers with no certificate carrying the requested
+ * issuer and serial is the one outcome that is neither: it returns
+ * WOLFCERT_ERR_PROTOCOL and leaves out->status UNSET, so a substituted bundle
+ * is never mistaken for the certificate that was asked for.
+ *
+ * Despite the name, wolfcert_scep_get_cert_initial is not an "initial" variant
+ * of this call: it is messageType 20, polling a pending enrollment. There is no
+ * session variant of GetCert, a one-off recovery rather than part of the
+ * enrollment loop the session API exists for. */
+WOLFCERT_API int wolfcert_scep_get_cert(const WolfCertServerCfg* srv,
+                                        const WolfCertScepCaps* caps,
+                                        const uint8_t* ra_cert, size_t ra_cert_len,
+                                        const uint8_t* ca_bundle, size_t ca_bundle_len,
+                                        const uint8_t* signer_cert, size_t signer_cert_len,
+                                        const WolfCertKey* signer_key,
+                                        const uint8_t* serial, size_t serial_len,
+                                        WolfCertScepResult* out);
+
+/* GetNextCACert (RFC 8894 section 4.7): retrieve the roll-over CA cert ahead
  * of the current CA's expiry, so the device can install the new trust
  * anchor before the old one stops being honored. Returns
  * WOLFCERT_ERR_NOT_FOUND when the server has no roll-over configured

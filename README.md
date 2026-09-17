@@ -152,7 +152,7 @@ fine against a test server and not fine anywhere else. A CA that answers
 `GetCACert` with a separate registration authority needs that RA's
 fingerprint for `enroll`, since the RA is what signs the reply.
 `getnextca` wants the CA's own fingerprint instead - RFC 8894 section
-4.6.1 has the current CA sign the roll-over. `getcacerts` prints one line
+4.7.1 has the current CA sign the roll-over. `getcacerts` prints one line
 per served certificate, so both values come out of one trusted read.
 
 The pin covers `GetCACert` alone. `GetCACaps` travels the same
@@ -194,7 +194,7 @@ All `WolfCertBuffer` outputs remember which heap they came from, so the same
 - **EST endpoints:** `/cacerts`, `/simpleenroll`, `/simplereenroll`,
   `/csrattrs`.
 - **SCEP operations:** `GetCACaps`, `GetCACert`, `GetNextCACert`, `PKCSReq`,
-  `RenewalReq`, plus `pkiStatus=PENDING` + `GetCertInitial` polling.
+  `RenewalReq`, `GetCert`, plus `pkiStatus=PENDING` + `GetCertInitial` polling.
 - **Transport:** HTTP/1.1 over wolfSSL TLS 1.3/1.2 (trust anchors, SNI,
   mutual TLS), keep-alive sessions, TLS 1.3 post-handshake auth, and an
   optional non-blocking mode for `poll`/`epoll`/`kqueue` event loops. Every

@@ -768,8 +768,9 @@ static int check_session_opts_capture(const WolfCertScepCaps* caps,
     return 0;
 }
 
-/* RFC 8894 section 4.6.1: GetNextCACert takes the CA identifier too, so a
- * multi-CA responder can be told which rollover certificate is wanted. */
+/* RFC 8894 section 4.1 puts a message field on every GET, so GetNextCACert
+ * carries the CA identifier too and a multi-CA responder can be told which
+ * rollover certificate is wanted. */
 static int check_getnextca_ca_id(const uint8_t* ca_der_buf, size_t ca_der_len)
 {
     struct msgtype_ctx mc = { .listen_fd = -1 };
@@ -1234,7 +1235,7 @@ int main(void)
                                        issued_der->buffer, issued_der->length,
                                        dk, csr.data, csr.len) == 0);
 
-    /* The CA identifier belongs on GetNextCACert as well (RFC 8894 4.6.1). */
+    /* The CA identifier belongs on GetNextCACert as well (RFC 8894 4.1). */
     REQUIRE(check_getnextca_ca_id(ca_der->buffer, ca_der->length) == 0);
 
     /* One-shot SCEP over https:// must refuse to run unverified, the same rule

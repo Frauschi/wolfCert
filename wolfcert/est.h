@@ -185,6 +185,11 @@ typedef struct {
     void*             heap;
 } WolfCertEstResult;
 
+/* Every wolfcert_est_* entry point taking a WolfCertEstResult* defines *out
+ * before any other argument check, so a caller that frees the result on every
+ * outcome is safe even on an early WOLFCERT_ERR_BAD_ARG; unless out is NULL.
+ * The converse follows: *out is not carried across calls, so free a populated
+ * result before passing it again. */
 WOLFCERT_API void wolfcert_est_result_free(WolfCertEstResult* r);
 
 /* POST /.well-known/est/simpleenroll.

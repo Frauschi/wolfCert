@@ -278,7 +278,12 @@ int wolfcert_est_simple_enroll_ex(const WolfCertServerCfg* srv,
                                   const uint8_t* csr_der, size_t csr_der_len,
                                   WolfCertEstResult* out)
 {
-    if (srv == NULL || csr_der == NULL || csr_der_len == 0 || out == NULL)
+    if (out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    memset(out, 0, sizeof(*out));
+
+    if (srv == NULL || csr_der == NULL || csr_der_len == 0)
         return WOLFCERT_ERR_BAD_ARG;
 
     return post_enroll_ex(srv, "simpleenroll", csr_der, csr_der_len,
@@ -291,8 +296,13 @@ int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
                                     const uint8_t* csr_der, size_t csr_der_len,
                                     WolfCertEstResult* out)
 {
+    if (out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    memset(out, 0, sizeof(*out));
+
     if (srv == NULL || current_cert == NULL || current_key == NULL ||
-        csr_der == NULL || out == NULL)
+        csr_der == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     WolfCertBuffer key_pem = { 0 };
