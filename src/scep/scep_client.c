@@ -370,10 +370,14 @@ static int pick_hash_oid(const WolfCertScepCaps* caps)
 {
     if (caps == NULL)
         return SHA256h;
+#ifdef WOLFSSL_SHA512
     if (caps->sha512)
         return SHA512h;
+#endif
+#ifdef WOLFSSL_SHA384
     if (caps->sha384)
         return SHA384h;
+#endif
 
     return SHA256h;
 }
