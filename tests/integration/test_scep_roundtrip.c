@@ -602,6 +602,27 @@ static int check_getca_media_type(const uint8_t* ca_der_buf, size_t ca_der_len)
     return 0;
 }
 
+static int get_ca_cert_empty(WolfCertEncoding enc)
+{
+    WolfCertBuffer ca = { 0 };
+    int rc;
+    int empty;
+
+    rc = fetch_ca("text/plain", NULL, 0, enc, &ca);
+    empty = (ca.data == NULL && ca.len == 0);
+    wolfcert_buffer_free(&ca);
+    REQUIRE(rc == WOLFCERT_ERR_HTTP);
+    REQUIRE(empty);
+    return 0;
+}
+
+static int test_get_ca_cert_empty_body(void)
+{
+    REQUIRE(get_ca_cert_empty(WOLFCERT_ENCODING_DER) == 0);
+    REQUIRE(get_ca_cert_empty(WOLFCERT_ENCODING_PEM) == 0);
+    return 0;
+}
+
 /* Captures one POSTed pkiMessage and reports the messageType it carried. The
  * in-tree server routes 19 and 17 through the same handler, so only a look at
  * the wire can tell the two renewal shapes apart.
@@ -1194,6 +1215,8 @@ int main(void)
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
     if (test_caps_token_matching())
+        return 1;
+    if (test_get_ca_cert_empty_body())
         return 1;
 
     WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,

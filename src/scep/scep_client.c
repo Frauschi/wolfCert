@@ -249,6 +249,12 @@ int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv, WolfCertEncoding
         return WOLFCERT_ERR_HTTP;
     }
 
+    if (resp.body_len == 0) {
+        wolfcert_http_response_free(&resp);
+        return WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "scep",
+            "GetCACert: 200 response carried no certificate");
+    }
+
     /* Media types compare case-insensitively; parameters after ';' are ignored. */
     static const char ca_ra_type[] = "application/x-x509-ca-ra-cert";
     int is_p7 = 0;
