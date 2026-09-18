@@ -34,7 +34,6 @@
 
 #include <sys/types.h>   /* pid_t, referenced by wolfssl/wolfcrypt/random.h */
 
-#include <wolfssl/options.h>
 #include <wolfssl/ssl.h>
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/asn_public.h>

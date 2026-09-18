@@ -24,7 +24,6 @@
 #include "internal.h"
 #include "../test_static_mem.h"
 
-#include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 

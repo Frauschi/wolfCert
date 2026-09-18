@@ -31,8 +31,6 @@
 
 #include <wolfcert/wolfcert.h>
 
-#include <wolfssl/options.h>
-
 #if defined(WOLFSSL_STATIC_MEMORY) && defined(WOLFSSL_NO_MALLOC)
 
 #include <wolfssl/wolfcrypt/memory.h>

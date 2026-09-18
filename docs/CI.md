@@ -10,7 +10,7 @@ build entirely.
 
 | Workflow | Trigger | What it does |
 |----------|---------|--------------|
-| `pr.yml` | PR + push | Merge gate: CMake (`-Werror`) + autoconf + ASan/UBSan on the canonical config, plus per-PR feature/config gating — EST-only, SCEP-only, server-off, the key-alg variants (NO_RSA, ECC-only, RSA-only, no-3DES), TLS 1.3-only, the three ML-DSA per-level builds, the static-memory and no-malloc constrained builds, the platform-pieces-off build (`cmake-no-builtin-transport`), the freestanding ARM compile (`no-posix-arm`), the header-only (`WOLFCERT_USER_SETTINGS`) build, a macOS build, and the two cheapest configure-must-fail assertions. |
+| `pr.yml` | PR + push | Merge gate: CMake (`-Werror`) + autoconf + ASan/UBSan on the canonical config, plus per-PR feature/config gating — EST-only, SCEP-only, server-off, the key-alg variants (NO_RSA, ECC-only, RSA-only, no-3DES), TLS 1.3-only, the three ML-DSA per-level builds, the static-memory and no-malloc constrained builds, the platform-pieces-off build (`cmake-no-builtin-transport`), the freestanding ARM compile and config-resolution check (`no-posix-arm`), the header-only (`WOLFCERT_USER_SETTINGS`) build, a macOS build, and the two cheapest configure-must-fail assertions. |
 | `lint.yml` | PR + push | GPL license-header check and CMake↔autoconf parity of both the library and test source lists (`scripts/ci/check-buildsystem-parity.sh`). No wolfSSL build — fails in seconds. |
 | `nightly.yml` | schedule + dispatch | Re-runs the wolfSSL-variant build matrix against fresh wolfSSL `master`, the macOS extras, and the full negative-config set. Also **reseeds the wolfSSL prefix caches** so the next day's PRs restore instead of build. The feature/config gating itself now runs per-PR (see `pr.yml`). |
 | `sanitizers.yml` | schedule + dispatch | ASan+UBSan over the full test suite, ThreadSanitizer over the threaded integration roundtrips (against a TSAN-instrumented wolfSSL), and valgrind over a representative subset. |
@@ -76,3 +76,17 @@ scripts/ci/compile-freestanding.sh --wolfssl-src /tmp/wolfssl-src
 
 Its companion is the `cmake-no-builtin-transport` row: the ARM job proves the
 code is header-clean, that row proves the gated build links and passes tests.
+
+The same job then runs `scripts/ci/check-config-resolution.sh`, which preprocesses
+one `<wolfcert/est.h>` translation unit and one `<wolfcert/wolfcert.h>` one and
+requires the two to resolve the same wolfSSL feature set, since `memory.h` and
+`check_config.h` reach that config separately. Each case stages an
+`<wolfssl/options.h>` that disagrees with `user_settings.h`; an absent or
+forwarding one would let the two agree for the wrong reason. The cases cover
+both provenances - `user_settings.h` winning under `WOLFSSL_USER_SETTINGS`, and
+`options.h` winning without it. It uses the host `cc` and takes seconds.
+
+```sh
+scripts/ci/check-config-resolution.sh --wolfssl-src /tmp/wolfssl-src
+scripts/ci/check-config-resolution.sh --wolfssl-src /tmp/wolfssl-src optionsh-decoy
+```

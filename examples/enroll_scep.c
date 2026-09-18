@@ -33,7 +33,6 @@
 #endif
 #include <wolfcert/scep.h>
 
-#include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 
 #include <stdio.h>

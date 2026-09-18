@@ -109,13 +109,21 @@ if(TARGET PkgConfig::WOLFSSL)
 elseif(TARGET wolfssl::wolfssl)
     get_target_property(_wolfssl_cflags wolfssl::wolfssl INTERFACE_INCLUDE_DIRECTORIES)
 endif()
+# Probe wolfSSL's feature set the way wolfcert/check_config.h resolves it, so
+# configure and the headers agree.
+set(_wc_wolfssl_prologue "
+#if !defined(WOLFSSL_USER_SETTINGS) && !defined(WOLFSSL_USE_OPTIONS_H) && !defined(WOLFSSL_NO_OPTIONS_H) && !defined(WOLFSSL_CUSTOM_CONFIG) && !defined(ARDUINO) && !defined(PLATFORMIO) && !defined(USE_HAL_DRIVER) && !defined(NUCLEUS_PLUS_2_3) && !defined(WOLFSSL_MX2_CONF_INCLUDE)
+#define WOLFSSL_USE_OPTIONS_H
+#endif
+#include <wolfssl/wolfcrypt/settings.h>
+")
+
 set(CMAKE_REQUIRED_INCLUDES ${_wolfssl_cflags})
 foreach(sym IN ITEMS HAVE_PKCS7 WOLFSSL_CERT_GEN WOLFSSL_CERT_REQ WOLFSSL_CERT_EXT
                      WOLFSSL_KEY_GEN WOLF_CRYPTO_CB WOLFSSL_BASE64_ENCODE
                      OPENSSL_EXTRA WOLFSSL_ALT_NAMES WOLFSSL_CERT_NAME_ALL)
     unset(_have_${sym} CACHE)
-    check_c_source_compiles("
-        #include <wolfssl/options.h>
+    check_c_source_compiles("${_wc_wolfssl_prologue}
         #ifndef ${sym}
         #error missing
         #endif
@@ -140,8 +148,7 @@ foreach(entry IN ITEMS "NO_AES;AES;--enable-aes"
     list(GET entry 1 _name)
     list(GET entry 2 _flag)
     unset(_off_${_neg} CACHE)
-    check_c_source_compiles("
-        #include <wolfssl/options.h>
+    check_c_source_compiles("${_wc_wolfssl_prologue}
         #ifdef ${_neg}
         #error disabled
         #endif
@@ -159,8 +166,7 @@ endforeach()
 # optional for an EST-only build (ECC / Ed25519 / Ed448 / ML-DSA). The
 # WOLFCERT_HAVE_RSA definition gates the RSA key algorithm.
 unset(_off_NO_RSA CACHE)
-check_c_source_compiles("
-    #include <wolfssl/options.h>
+check_c_source_compiles("${_wc_wolfssl_prologue}
     #ifdef NO_RSA
     #error disabled
     #endif
@@ -183,16 +189,14 @@ endif()
 # TLS: the HTTPS transport needs at least TLS 1.2 or TLS 1.3; the endpoints pin
 # their floor to whichever lower version is available.
 unset(_have_tls12 CACHE)
-check_c_source_compiles("
-    #include <wolfssl/options.h>
+check_c_source_compiles("${_wc_wolfssl_prologue}
     #ifdef WOLFSSL_NO_TLS12
     #error notls12
     #endif
     int main(void) { return 0; }
 " _have_tls12)
 unset(_have_tls13 CACHE)
-check_c_source_compiles("
-    #include <wolfssl/options.h>
+check_c_source_compiles("${_wc_wolfssl_prologue}
     #ifndef WOLFSSL_TLS13
     #error notls13
     #endif
@@ -214,8 +218,7 @@ foreach(entry IN ITEMS "HAVE_ECC;ECC;--enable-ecc"
     list(GET entry 1 _short)
     list(GET entry 2 _flag)
     unset(_have_${_sym} CACHE)
-    check_c_source_compiles("
-        #include <wolfssl/options.h>
+    check_c_source_compiles("${_wc_wolfssl_prologue}
         #ifndef ${_sym}
         #error missing
         #endif

@@ -21,8 +21,7 @@ as a header, exactly like wolfSSL's `WOLFSSL_USER_SETTINGS` / `user_settings.h`:
    to `user_settings.h` somewhere on your include path and edit which
    `WOLFCERT_HAVE_*` macros are defined.
 2. Compile wolfCert (and your application) with `-DWOLFCERT_USER_SETTINGS`.
-   `wolfcert/types.h` then pulls your `user_settings.h` in place of the
-   generated `options.h`.
+   `wolfcert/types.h` then reads it instead.
 
 The macro set is small and closed - three protocol switches
 (`WOLFCERT_HAVE_EST` / `_SCEP` / `_SERVER`) and five key algorithms
@@ -37,10 +36,35 @@ rules the configure step does: at least one key algorithm, SCEP requires RSA
 (RFC 8894), and the wolfSSL feature set wolfCert depends on (PKCS#7, cert
 gen/req/ext, key gen, CryptoCb, base64 encode, OpenSSL-extra, alt names,
 `WOLFSSL_CERT_NAME_ALL`, AES, SHA-256, and TLS 1.2 or 1.3). The header you copy
-documents the matching wolfSSL configure flags. If wolfSSL itself is configured
-through *its own* `user_settings.h` (so `<wolfssl/options.h>` does not reflect
-its real feature set), define `WOLFCERT_NO_WOLFSSL_FEATURE_CHECK` to skip just
-the wolfSSL half of the validation.
+documents the matching wolfSSL configure flags.
+
+wolfCert reads that feature set through `<wolfssl/wolfcrypt/settings.h>`, so a
+wolfSSL configured by its own `user_settings.h` is validated correctly and needs
+nothing extra. Define `WOLFCERT_NO_WOLFSSL_FEATURE_CHECK` to skip the wolfSSL
+half of the validation. wolfCert reaches for `<wolfssl/options.h>` only when
+none of `WOLFSSL_USER_SETTINGS`, `WOLFSSL_NO_OPTIONS_H`,
+`WOLFSSL_CUSTOM_CONFIG`, `ARDUINO`, `PLATFORMIO`, `USE_HAL_DRIVER`,
+`NUCLEUS_PLUS_2_3` or `WOLFSSL_MX2_CONF_INCLUDE` is defined - the platform names
+among those because `settings.h` picks a config for them itself, past the point
+it would read `options.h`.
+
+STM32CubeMX2 needs one extra step on wolfSSL 5.9.2, where `settings.h` locates
+`mx_wolfSSL_conf.h` by probing with `__has_include` and so sets
+`WOLFSSL_MX2_CONF_INCLUDE` too late for the test above to see. Those builds need
+`WOLFSSL_CUSTOM_CONFIG` *and* an explicit `#include "mx_wolfSSL_conf.h"`, since
+the probe is itself switched off by `WOLFSSL_CUSTOM_CONFIG`, as it is by
+`WOLFSSL_NO_OPTIONS_H`. Later wolfSSL drops the probe and takes
+`WOLFSSL_MX2_CONF_INCLUDE` from the pack's generated `Pre_Include_Global.h`,
+which the test above does see, so nothing extra is needed there.
+
+This makes include order matter for a build that takes its feature set from
+`<wolfssl/options.h>` - the ordinary autoconf or CMake wolfSSL. `settings.h` is
+header-guarded, so a wolfSSL header reaching it before any wolfCert header
+leaves `options.h` unread, and wolfCert fails the build rather than compile
+against wolfSSL's defaults. Include `<wolfcert/wolfcert.h>` first, or define
+`WOLFSSL_USE_OPTIONS_H` before the wolfSSL header. A `WOLFSSL_USER_SETTINGS`
+build is unaffected, since `settings.h` reads `user_settings.h` whichever
+header reaches it first.
 
 When you build wolfCert's own tree this way, the `WOLFCERT_ENABLE_EST` /
 `_SCEP` / `_SERVER` options (CMake `-DWOLFCERT_USER_SETTINGS=ON

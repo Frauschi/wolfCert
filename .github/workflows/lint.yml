@@ -39,7 +39,8 @@ jobs:
             fi
           done < <(git ls-files 'src/*.c' 'src/**/*.c' 'wolfcert/*.h' \
                      'cli/*.c' 'tests/*.c' 'tests/*.h' \
-                     'tests/**/*.c' 'tests/**/*.h')
+                     'tests/**/*.c' 'tests/**/*.h' \
+                     'scripts/ci/*.c' 'scripts/ci/*.h')
           if [ "$missing" -ne 0 ]; then
             echo "One or more sources lack the GPL copyright block (copy it"
             echo "verbatim from any existing .c/.h)."

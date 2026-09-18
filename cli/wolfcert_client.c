@@ -32,7 +32,6 @@
 #  include <wolfcert/scep.h>
 #endif
 
-#include <wolfssl/options.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/hash.h>
 

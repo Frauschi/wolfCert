@@ -20,8 +20,6 @@
 #include <wolfcert/wolfcert.h>
 #include "../test_static_mem.h"
 
-#include <wolfssl/options.h>   /* WOLFSSL_NO_ML_DSA_{44,65,87} for per-level gating */
-
 #include <stdio.h>
 #include <string.h>
 
