@@ -249,8 +249,17 @@ int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv, WolfCertEncoding
         return WOLFCERT_ERR_HTTP;
     }
 
-    int is_p7 = resp.content_type != NULL &&
-                strstr(resp.content_type, "x-x509-ca-ra-cert") != NULL;
+    /* Media types compare case-insensitively; parameters after ';' are ignored. */
+    static const char ca_ra_type[] = "application/x-x509-ca-ra-cert";
+    int is_p7 = 0;
+    if (resp.content_type != NULL &&
+            wolfcert_ascii_ncasecmp(resp.content_type, ca_ra_type,
+                                    sizeof(ca_ra_type) - 1) == 0) {
+        const char* p = resp.content_type + sizeof(ca_ra_type) - 1;
+        while (*p == ' ' || *p == '\t')
+            ++p;
+        is_p7 = (*p == '\0' || *p == ';');
+    }
     if (is_p7) {
         if (enc == WOLFCERT_ENCODING_DER) {
             rc = wolfcert_pkcs7_certs_to_der(resp.body, resp.body_len, out_ca, heap);

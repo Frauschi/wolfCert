@@ -427,10 +427,13 @@ static int check_content_cipher(const WolfCertServerCfg* cli,
 }
 #endif /* WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE */
 
-/* Minimal single-shot HTTP responder that answers any request with a
- * caller-supplied GetCACaps body, so a test can drive capability parsing
- * with a body the real server would never emit. */
-struct caps_ctx { int listen_fd; const char* body; };
+/* The listener canned_srv_thread() accepts on and the response it sends. */
+struct canned_ctx {
+    int            listen_fd;
+    const char*    content_type;
+    const uint8_t* body;
+    size_t         body_len;
+};
 
 /* Bind a loopback listener and report the ephemeral port it landed on.
  * Callers run this before spawning the responder thread, so the port never
@@ -461,9 +464,11 @@ static int listen_loopback(int* port)
     return ls;
 }
 
-static void* caps_srv_thread(void* arg)
+/* Single-shot HTTP responder: answers one request with canned_ctx's
+ * Content-Type and body, a response the in-tree SCEP server never sends. */
+static void* canned_srv_thread(void* arg)
 {
-    struct caps_ctx* cc = (struct caps_ctx*)arg;
+    struct canned_ctx* cc = (struct canned_ctx*)arg;
     int cs = accept(cc->listen_fd, NULL, NULL);
     close(cc->listen_fd);
     if (cs < 0)
@@ -481,15 +486,16 @@ static void* caps_srv_thread(void* arg)
             break;
     }
 
-    char resp[512];
-    int rn = snprintf(resp, sizeof(resp),
+    char head[256];
+    int hn = snprintf(head, sizeof(head),
         "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain\r\n"
+        "Content-Type: %s\r\n"
         "Content-Length: %zu\r\n"
-        "Connection: close\r\n\r\n%s",
-        strlen(cc->body), cc->body);
-    if (rn > 0)
-        send(cs, resp, (size_t)rn, 0);
+        "Connection: close\r\n\r\n",
+        cc->content_type, cc->body_len);
+    if (hn > 0 && (size_t)hn < sizeof(head) &&
+            write_all_fd(cs, (const uint8_t*)head, (size_t)hn) == 0)
+        (void)write_all_fd(cs, cc->body, cc->body_len);
     shutdown(cs, SHUT_WR);
     close(cs);
     return NULL;
@@ -504,12 +510,14 @@ static int test_caps_token_matching(void)
         "POSTPKIOperation\r\n"
         "Renewal-Extra\r\n"
         "AESGCM\r\n";
-    struct caps_ctx cc = { .listen_fd = -1, .body = caps_body };
+    struct canned_ctx cc = { .listen_fd = -1, .content_type = "text/plain",
+                             .body = (const uint8_t*)caps_body,
+                             .body_len = strlen(caps_body) };
     pthread_t tid;
     int port = 0;
     cc.listen_fd = listen_loopback(&port);
     REQUIRE(cc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, caps_srv_thread, &cc) == 0);
+    REQUIRE(pthread_create(&tid, NULL, canned_srv_thread, &cc) == 0);
 
     char url[128];
     snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
@@ -522,6 +530,75 @@ static int test_caps_token_matching(void)
     REQUIRE(caps.post_pki_operation == 1);
     REQUIRE(caps.renewal == 0);
     REQUIRE(caps.aes == 0);
+    return 0;
+}
+
+/* Serve `body` once under `content_type` and fetch it with GetCACert. */
+static int fetch_ca(const char* content_type, const uint8_t* body,
+                    size_t body_len, WolfCertEncoding enc, WolfCertBuffer* out)
+{
+    struct canned_ctx cc = { .listen_fd = -1, .content_type = content_type,
+                             .body = body, .body_len = body_len };
+    pthread_t tid;
+    int port = 0;
+    cc.listen_fd = listen_loopback(&port);
+    REQUIRE(cc.listen_fd >= 0);
+    REQUIRE(pthread_create(&tid, NULL, canned_srv_thread, &cc) == 0);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
+    int rc = wolfcert_scep_get_ca_cert_enc(&cli, enc, out);
+    pthread_join(tid, NULL);
+    return rc;
+}
+
+/* RFC 8894 section 4.2.1.2 sends a CA certificate chain as
+ * application/x-x509-ca-ra-cert; RFC 9110 section 8.3.1 makes the type and
+ * subtype case-insensitive and allows parameters after them. */
+static int check_getca_media_type(const uint8_t* ca_der_buf, size_t ca_der_len)
+{
+    const uint8_t* certs[1] = { ca_der_buf };
+    size_t lens[1] = { ca_der_len };
+    WolfCertBuffer p7 = { 0 };
+    REQUIRE(wolfcert_pkcs7_build_certs_only(certs, lens, 1, &p7, NULL)
+            == WOLFCERT_OK);
+
+    /* Mixed case and whitespace before ';' still name the bundle type. */
+    WolfCertBuffer pem = { 0 };
+    REQUIRE(fetch_ca("Application/X-X509-CA-RA-Cert ; charset=binary",
+                     p7.data, p7.len, WOLFCERT_ENCODING_PEM, &pem)
+            == WOLFCERT_OK);
+    DerBuffer* pem_der = NULL;
+    REQUIRE(wc_PemToDer(pem.data, (long)pem.len, CERT_TYPE,
+                        &pem_der, NULL, NULL, NULL) == 0);
+    REQUIRE(pem_der->length == ca_der_len);
+    REQUIRE(memcmp(pem_der->buffer, ca_der_buf, ca_der_len) == 0);
+    wc_FreeDer(&pem_der);
+    wolfcert_buffer_free(&pem);
+
+    WolfCertBuffer der = { 0 };
+    REQUIRE(fetch_ca("application/x-x509-ca-ra-cert", p7.data, p7.len,
+                     WOLFCERT_ENCODING_DER, &der) == WOLFCERT_OK);
+    REQUIRE(der.len == ca_der_len);
+    REQUIRE(memcmp(der.data, ca_der_buf, ca_der_len) == 0);
+    wolfcert_buffer_free(&der);
+
+    /* A longer subtype is a different type: the bare cert comes back as is. */
+    REQUIRE(fetch_ca("application/x-x509-ca-ra-certs", ca_der_buf, ca_der_len,
+                     WOLFCERT_ENCODING_DER, &der) == WOLFCERT_OK);
+    REQUIRE(der.len == ca_der_len);
+    REQUIRE(memcmp(der.data, ca_der_buf, ca_der_len) == 0);
+    wolfcert_buffer_free(&der);
+
+    /* So is a different top-level type carrying the same subtype. */
+    REQUIRE(fetch_ca("text/x-x509-ca-ra-cert", ca_der_buf, ca_der_len,
+                     WOLFCERT_ENCODING_DER, &der) == WOLFCERT_OK);
+    REQUIRE(der.len == ca_der_len);
+    REQUIRE(memcmp(der.data, ca_der_buf, ca_der_len) == 0);
+    wolfcert_buffer_free(&der);
+
+    wolfcert_buffer_free(&p7);
     return 0;
 }
 
@@ -1140,6 +1217,9 @@ int main(void)
     DerBuffer* ca_der = NULL;
     REQUIRE(wc_PemToDer(ca_pem.data, (long)ca_pem.len, CERT_TYPE,
                         &ca_der, NULL, NULL, NULL) == 0);
+
+    /* A CA/RA bundle is recognised whatever the media type's case. */
+    REQUIRE(check_getca_media_type(ca_der->buffer, ca_der->length) == 0);
 
     WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
