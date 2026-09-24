@@ -1194,6 +1194,24 @@ int main(void)
         fprintf(stderr, "SCEP rsa:4096 rc=%d (%s)\n", rc, wolfcert_strerror(rc));
     REQUIRE(rc == WOLFCERT_OK);
 
+    /* ---- Caps-driven signing hash. A CA that advertises SHA-512 or SHA-384
+     * must not push the client past the digests wolfSSL was built with. */
+    WolfCertScepCaps caps_hash = caps;
+    WolfCertBuffer   issued_hash = { 0 };
+
+    caps_hash.sha512 = 1;
+    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps_hash, ca_der->buffer,
+                                   ca_der->length, dk, csr.data, csr.len,
+                                   &issued_hash) == WOLFCERT_OK);
+    wolfcert_buffer_free(&issued_hash);
+
+    caps_hash.sha512 = 0;
+    caps_hash.sha384 = 1;
+    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps_hash, ca_der->buffer,
+                                   ca_der->length, dk, csr.data, csr.len,
+                                   &issued_hash) == WOLFCERT_OK);
+    wolfcert_buffer_free(&issued_hash);
+
     /* ---- Content-cipher override: explicit AES-256 and AES-128 both enroll.
      * Each half needs the cipher wolfSSL was actually built with; scep_prepare
      * returns WOLFCERT_ERR_UNSUPPORTED for one the library cannot do. */
