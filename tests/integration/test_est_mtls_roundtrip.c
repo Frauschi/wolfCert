@@ -24,11 +24,13 @@
  * then runs wolfcert-client through wolfcert_est_simple_enroll with
  *   client_cert / client_key set on WolfCertServerCfg.
  *
- * Two assertions:
+ * Three assertions:
  *   1. mTLS works: a client that does NOT present a certificate is
  *      rejected by the TLS handshake.
  *   2. mTLS works: a client that DOES present a cert signed by the
  *      configured trust anchor enrolls successfully.
+ *   3. /simplereenroll presents the cert being renewed even when
+ *      client_cert names a different, untrusted identity.
  *
  * Exercises the TLS 1.3 negotiation path (wolfTLS_client_method /
  * wolfTLS_server_method) and the new client_cert plumbing on
@@ -68,6 +70,66 @@
 /* Build a self-signed RSA identity suitable for TLS usage. */
 
 static void* server_thread(void* arg) { wolfcert_server_run((WolfCertServer*)arg); return NULL; }
+
+/* Re-enroll the trusted cli_cert while cfg carries an identity the server
+ * does not trust; the handshake must present the cert being renewed. */
+static int test_reenroll_ignores_cfg_identity(const char* url,
+                                              const uint8_t* tls_cert, size_t tls_cert_len,
+                                              const uint8_t* cli_cert, size_t cli_cert_len,
+                                              const uint8_t* cli_key, size_t cli_key_len)
+{
+    uint8_t* stale_cert = NULL;
+    size_t stale_cert_len = 0;
+    uint8_t* stale_key = NULL;
+    size_t stale_key_len = 0;
+    WolfCertKey* cur_key = NULL;
+    WolfCertKey* dk = NULL;
+    WolfCertBuffer csr = { 0 };
+    WolfCertBuffer issued = { 0 };
+    WolfCertBuffer ca_pem = { 0 };
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertCertMeta meta = { .subject_dn = "CN=factory-bootstrap" };
+    WolfCertServerCfg cli = {
+        .protocol          = WOLFCERT_PROTO_EST,
+        .server_url        = url,
+        .trust_anchors     = tls_cert,
+        .trust_anchors_len = tls_cert_len,
+        .verify_server     = 1,
+    };
+    int rc;
+
+    REQUIRE(mint_self_id("stale-identity", 1, &stale_cert, &stale_cert_len,
+                         &stale_key, &stale_key_len) == 0);
+    cli.client_cert     = stale_cert;
+    cli.client_cert_len = stale_cert_len;
+    cli.client_key      = stale_key;
+    cli.client_key_len  = stale_key_len;
+
+    /* The server refuses the stale identity on its own */
+    rc = wolfcert_est_get_cacerts(&cli, &ca_pem);
+    wolfcert_buffer_free(&ca_pem);
+    REQUIRE(rc != WOLFCERT_OK);
+
+    REQUIRE(wolfcert_key_from_pem(cli_key, cli_key_len, NULL, &cur_key) == WOLFCERT_OK);
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
+    REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
+
+    rc = wolfcert_est_simple_reenroll(&cli, cli_cert, cli_cert_len, cur_key,
+                                      csr.data, csr.len, &issued);
+    if (rc != WOLFCERT_OK)
+        fprintf(stderr, "mtls reenroll rc=%d (%s)\n", rc, wolfcert_strerror(rc));
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) != NULL);
+
+    wolfcert_buffer_free(&issued);
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(dk);
+    wolfcert_key_free(cur_key);
+    free(stale_cert);
+    free(stale_key);
+    return 0;
+}
 
 int main(void)
 {
@@ -162,6 +224,11 @@ int main(void)
         wolfcert_buffer_free(&issued);
         wolfcert_key_free(dk);
     }
+
+    /* --- Case 3: reenroll presents the cert being renewed, not cfg's. */
+    REQUIRE(test_reenroll_ignores_cfg_identity(url, tls_cert, tls_cert_len,
+                                               cli_cert, cli_cert_len,
+                                               cli_key, cli_key_len) == 0);
 
     wolfcert_server_stop(srv);
     pthread_join(tid, NULL);

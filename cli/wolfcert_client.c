@@ -153,6 +153,8 @@ static void print_usage(FILE* out)
         "  --cert FILE                     Current certificate (PEM)\n"
         "  --key  FILE                     Current private key (PEM)\n"
         "  plus the enroll options above to describe the renewed cert.\n"
+        "  --cert/--key also authenticate the TLS connection, so\n"
+        "  --client-cert/--client-key are rejected.\n"
         "\n"
         "getcert options (SCEP only):\n"
         "  --cert FILE                     Certificate signing the request (PEM)\n"
@@ -1450,8 +1452,6 @@ static int cmd_reenroll(int argc, char** argv)
 {
     Opts opts;
     uint8_t* trust_hold = NULL;
-    uint8_t* mt_cert = NULL;
-    uint8_t* mt_key = NULL;
     uint8_t* cert_pem = NULL;
     uint8_t* key_pem = NULL;
     WolfCertKey* current_key = NULL;
@@ -1475,6 +1475,13 @@ static int cmd_reenroll(int argc, char** argv)
     if (ret == 0 && p != WOLFCERT_PROTO_EST) {
         fprintf(stderr, "reenroll: only EST is supported in the CLI today\n");
         ret = 2;
+    }
+
+    if (ret == 0 &&
+        (opts.client_cert_file != NULL || opts.client_key_file != NULL)) {
+        fprintf(stderr, "reenroll: --client-cert/--client-key are not used; "
+                        "/simplereenroll authenticates TLS with --cert/--key\n");
+        ret = 1;
     }
 
     if (ret == 0 &&
@@ -1519,8 +1526,6 @@ static int cmd_reenroll(int argc, char** argv)
         fill_basic_auth(&opts, &srv);
         if (fill_scep_opts(&opts, &srv) != 0)
             ret = 1;
-        if (ret == 0 && fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
-            ret = 1;
     }
 
     if (ret == 0) {
@@ -1555,8 +1560,6 @@ static int cmd_reenroll(int argc, char** argv)
     free(cert_pem);
     free_secret(key_pem, key_len);
     free(trust_hold);
-    free(mt_cert);
-    free(mt_key);
     opts_free(&opts);
     return ret;
 }
