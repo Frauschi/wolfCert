@@ -50,7 +50,8 @@ WOLFCERT_API int wolfcert_scep_get_ca_cert(const WolfCertServerCfg* srv,
 /* Like wolfcert_scep_get_ca_cert but returns the CA/RA certificate(s) in the
  * requested encoding. WOLFCERT_ENCODING_DER yields the whole GetCACert bundle
  * as concatenated DER, suitable as the ca_bundle trust set for the enroll and
- * GetNextCACert calls. */
+ * GetNextCACert calls. Only an application/x-x509-ca-ra-cert response is
+ * read as a bundle. */
 WOLFCERT_API int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv,
                                                WolfCertEncoding enc,
                                                WolfCertBuffer* out_ca);

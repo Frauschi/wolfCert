@@ -316,6 +316,9 @@ WOLFCERT_TEST_VIS void wolfcert_http_url_free (WolfCertUrl* u);
 WOLFCERT_TEST_VIS int  wolfcert_http_url_origin(const WolfCertUrl* u, void* heap,
                                                 char** out_origin);
 
+/* strncasecmp() with ASCII-only case folding */
+int wolfcert_ascii_ncasecmp(const char* a, const char* b, size_t n);
+
 /* Base64 helpers. `_encode` is single-line (no newlines) - the right
  * default for HTTP header values and for wolfCert's own server-side
  * decode path. `_encode_mime` wraps the output at 64 chars per

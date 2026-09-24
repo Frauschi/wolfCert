@@ -70,7 +70,7 @@ static int ci_cmp(const char* a, const char* b)
     return ci_lower((unsigned char)*a) - ci_lower((unsigned char)*b);
 }
 
-static int ci_ncmp(const char* a, const char* b, size_t n)
+int wolfcert_ascii_ncasecmp(const char* a, const char* b, size_t n)
 {
     size_t i;
 
@@ -608,7 +608,7 @@ static char* find_header(const char* headers, const char* name, void* heap)
     const char* p = headers;
 
     while (*p) {
-        if (ci_ncmp(p, name, nlen) == 0 && p[nlen] == ':') {
+        if (wolfcert_ascii_ncasecmp(p, name, nlen) == 0 && p[nlen] == ':') {
             const char* v = p + nlen + 1;
             while (*v == ' ' || *v == '\t') {
                 ++v;
