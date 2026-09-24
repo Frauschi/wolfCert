@@ -217,6 +217,9 @@ struct WolfCertServer {
      * has no shutdown flag driving it, so retrying there would spin. */
     int                     poll_timeouts_armed;
     void*                   heap;
+    /* Time at which the accept loop drops the connection it is serving;
+     * 0 when none is armed. */
+    long                    deadline_ms;
 };
 
 /* Transparent read/write for protocol handlers: dispatch to wolfSSL_read /
@@ -230,6 +233,8 @@ ssize_t wolfcert_io_send(WolfCertServer* srv, int fd, const void* buf, size_t le
  * cannot raise SIGPIPE in the embedding application. A no-op where the platform
  * has no such option, and on an fd that is not a socket. */
 WOLFCERT_TEST_VIS void wolfcert_sock_nosigpipe(int fd);
+
+long wolfcert_mono_ms(void);
 
 /* Factories supplied by est/est_server.c and scep/scep_server.c. */
 WOLFCERT_API const WolfCertServerOps* wolfcert_est_server_ops(void);

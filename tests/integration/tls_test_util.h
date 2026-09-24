@@ -340,6 +340,7 @@ static inline int test_tls_connect_partial(TestTlsConn* c, uint16_t port,
                                            size_t ca_pem_len, int timeout_ms)
 {
     struct pollfd pfd;
+    char peek;
     int flags;
     int ret;
 
@@ -357,7 +358,9 @@ static inline int test_tls_connect_partial(TestTlsConn* c, uint16_t port,
 
     pfd.fd     = c->fd;
     pfd.events = POLLIN;
-    if (poll(&pfd, 1, timeout_ms) != 1 || (pfd.revents & POLLIN) == 0)
+    /* POLLIN also reports a closed peer, so require a byte of the flight. */
+    if (poll(&pfd, 1, timeout_ms) != 1 || (pfd.revents & POLLIN) == 0 ||
+            recv(c->fd, &peek, 1, MSG_PEEK) != 1)
         goto fail;
 
     return 0;

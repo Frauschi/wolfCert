@@ -42,6 +42,10 @@
  * A fifth case covers the other entry point: wolfcert_server_serve_fd()
  * runs on a caller-supplied fd that the accept loop never armed, so a
  * would-block read there must fail instead of retrying forever.
+ *
+ * Cases six to eight cover availability: a peer that stalls mid-handshake,
+ * after its handshake, or before its plaintext request line must not keep the
+ * next client from being served.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -80,6 +84,10 @@
  * granularity the test polls at. */
 #define STOP_DEADLINE_MS 5000
 #define POLL_STEP_MS     10
+
+/* How long a client queued behind a stalled peer waits for the server to
+ * answer. Must exceed WOLFCERT_SERVER_REQUEST_TIMEOUT_MS. */
+#define STALL_WAIT_MS    20000
 
 /* The accept loop is what these cases exercise, so any compiled-in protocol
  * will do for the TLS listener; SCEP is absent from any NO_RSA build. */
@@ -132,7 +140,7 @@ static int connect_loopback(uint16_t port)
 
 /* Drive one plaintext GetCACaps to completion, so the reply proves the handler
  * ran and the keep-alive loop is now parked reading the next request. */
-static int connect_after_getcacaps(uint16_t port)
+static int connect_after_getcacaps(uint16_t port, int timeout_ms)
 {
     static const char req[] =
         "GET /?operation=GetCACaps HTTP/1.1\r\n"
@@ -146,8 +154,8 @@ static int connect_after_getcacaps(uint16_t port)
     if (fd < 0)
         return -1;
 
-    to.tv_sec  = STOP_DEADLINE_MS / 1000;
-    to.tv_usec = 0;
+    to.tv_sec  = timeout_ms / 1000;
+    to.tv_usec = (timeout_ms % 1000) * 1000;
     if (setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &to, sizeof(to)) != 0 ||
             send(fd, req, sizeof(req) - 1, 0) != (ssize_t)(sizeof(req) - 1) ||
             recv(fd, buf, sizeof(buf), 0) <= 0) {
@@ -258,12 +266,14 @@ int main(void)
     ServerCtx ctx;
     pthread_t tid;
     TestTlsConn conn;
+    TestTlsConn stalled;
     int stop_rc;
 #ifdef WOLFCERT_HAVE_SCEP
     ServeFdCtx serve_ctx;
     TrickleCtx trickle;
     pthread_t ttid;
     int fd;
+    int stalled_fd;
     int sp[2];
     int waited;
 #endif
@@ -331,7 +341,8 @@ int main(void)
     REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
     REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
 
-    fd = connect_after_getcacaps(wolfcert_server_port(ctx.srv));
+    fd = connect_after_getcacaps(wolfcert_server_port(ctx.srv),
+                                 STOP_DEADLINE_MS);
     REQUIRE(fd >= 0);
 
     stop_rc = stop_and_wait(&ctx);
@@ -349,7 +360,8 @@ int main(void)
     REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
     REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
 
-    fd = connect_after_getcacaps(wolfcert_server_port(ctx.srv));
+    fd = connect_after_getcacaps(wolfcert_server_port(ctx.srv),
+                                 STOP_DEADLINE_MS);
     REQUIRE(fd >= 0);
 
     memset(&trickle, 0, sizeof(trickle));
@@ -393,6 +405,84 @@ int main(void)
     REQUIRE(pthread_join(tid, NULL) == 0);
     close(sp[0]);
     close(sp[1]);
+    wolfcert_server_free(ctx.srv);
+#endif
+
+    /* 6. A peer parked mid-handshake: the next client must still be served. */
+    cfg.protocol         = TLS_LISTENER_PROTO;
+    cfg.tls_cert_pem     = tls_cert;
+    cfg.tls_cert_pem_len = tls_cert_len;
+    cfg.tls_key_pem      = tls_key;
+    cfg.tls_key_pem_len  = tls_key_len;
+
+    memset(&ctx, 0, sizeof(ctx));
+    REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
+    REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
+
+    REQUIRE(test_tls_connect_partial(&stalled, wolfcert_server_port(ctx.srv),
+                                     tls_cert, tls_cert_len,
+                                     STOP_DEADLINE_MS) == 0);
+    REQUIRE(test_tls_connect_partial(&conn, wolfcert_server_port(ctx.srv),
+                                     tls_cert, tls_cert_len,
+                                     STALL_WAIT_MS) == 0);
+
+    stop_rc = stop_and_wait(&ctx);
+    if (stop_rc != 0)
+        return fail_stop("after a stalled handshake", stop_rc);
+
+    REQUIRE(pthread_join(tid, NULL) == 0);
+    REQUIRE(ctx.run_rc == WOLFCERT_OK);
+    test_tls_close(&conn);
+    test_tls_close(&stalled);
+    wolfcert_server_free(ctx.srv);
+
+    /* 7. A peer silent after its handshake: the next client must still be
+     *    served. */
+    memset(&ctx, 0, sizeof(ctx));
+    REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
+    REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
+
+    REQUIRE(test_tls_connect(&stalled, wolfcert_server_port(ctx.srv),
+                             tls_cert, tls_cert_len) == 0);
+    REQUIRE(test_tls_connect_partial(&conn, wolfcert_server_port(ctx.srv),
+                                     tls_cert, tls_cert_len,
+                                     STALL_WAIT_MS) == 0);
+
+    stop_rc = stop_and_wait(&ctx);
+    if (stop_rc != 0)
+        return fail_stop("after a silent TLS peer", stop_rc);
+
+    REQUIRE(pthread_join(tid, NULL) == 0);
+    REQUIRE(ctx.run_rc == WOLFCERT_OK);
+    test_tls_close(&conn);
+    test_tls_close(&stalled);
+    wolfcert_server_free(ctx.srv);
+
+#ifdef WOLFCERT_HAVE_SCEP
+    /* 8. A plaintext peer that never sends a request line: the next client
+     *    must still be served. */
+    memset(&cfg, 0, sizeof(cfg));
+    cfg.protocol  = WOLFCERT_PROTO_SCEP;
+    cfg.bind_host = "127.0.0.1";
+    cfg.bind_port = 0;
+
+    memset(&ctx, 0, sizeof(ctx));
+    REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
+    REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
+
+    stalled_fd = connect_loopback(wolfcert_server_port(ctx.srv));
+    REQUIRE(stalled_fd >= 0);
+    fd = connect_after_getcacaps(wolfcert_server_port(ctx.srv), STALL_WAIT_MS);
+    REQUIRE(fd >= 0);
+
+    stop_rc = stop_and_wait(&ctx);
+    if (stop_rc != 0)
+        return fail_stop("after a silent plaintext peer", stop_rc);
+
+    REQUIRE(pthread_join(tid, NULL) == 0);
+    REQUIRE(ctx.run_rc == WOLFCERT_OK);
+    close(fd);
+    close(stalled_fd);
     wolfcert_server_free(ctx.srv);
 #endif
 
