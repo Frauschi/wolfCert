@@ -57,9 +57,7 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
     req->max_response_bytes= srv->max_response_bytes;
     req->heap              = srv->heap;
 
-    /* mTLS identity, if the caller supplied one. fill_common runs before
-     * the per-endpoint overrides in post_enroll, so simplereenroll can
-     * still fall back to the cert-being-renewed when cfg is silent. */
+    /* mTLS identity, if the caller supplied one */
     req->client_cert       = srv->client_cert;
     req->client_cert_len   = srv->client_cert_len;
     req->client_key        = srv->client_key;
@@ -168,8 +166,8 @@ int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv, WolfCertEncoding 
 static int post_enroll_ex(const WolfCertServerCfg* srv,
                           const char* suffix,
                           const uint8_t* csr_der, size_t csr_der_len,
-                          const uint8_t* fallback_cert_pem, size_t fallback_cert_len,
-                          const uint8_t* fallback_key_pem,  size_t fallback_key_len,
+                          const uint8_t* renew_cert_pem, size_t renew_cert_len,
+                          const uint8_t* renew_key_pem,  size_t renew_key_len,
                           WolfCertEstResult* out)
 {
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
@@ -209,14 +207,12 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
     };
     fill_common(srv, &req);
 
-    /* Fallback: if the caller passed an endpoint-specific identity
-     * (simplereenroll supplies the cert being renewed) and cfg itself is
-     * silent on mTLS, use that. Explicit cfg identity takes precedence. */
-    if (req.client_cert == NULL && fallback_cert_pem != NULL) {
-        req.client_cert     = fallback_cert_pem;
-        req.client_cert_len = fallback_cert_len;
-        req.client_key      = fallback_key_pem;
-        req.client_key_len  = fallback_key_len;
+    /* simplereenroll authenticates TLS with the cert being renewed */
+    if (renew_cert_pem != NULL) {
+        req.client_cert     = renew_cert_pem;
+        req.client_cert_len = renew_cert_len;
+        req.client_key      = renew_key_pem;
+        req.client_key_len  = renew_key_len;
     }
 
     WolfCertHttpResponse resp = { 0 };
