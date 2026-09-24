@@ -228,21 +228,19 @@ static int tls_setup(WolfCertServer* s, const WolfCertServerCfgSrv* cfg)
 
         wolfSSL_CTX_set_verify(ctx, verify, NULL);
     }
-#ifdef WOLFSSL_POST_HANDSHAKE_AUTH
-    if (cfg->tls_post_handshake_auth) {
-        /* On a server CTX this returns 0 (SIDE_ERROR): "allowing" PHA is a
-         * client-side opt-in, while the server drives it per-session via the
-         * mid-handshake certificate request. The call is a harmless no-op
-         * here, so its return value is intentionally ignored - do NOT treat
-         * the 0 as a failure. */
-        (void)wolfSSL_CTX_set_post_handshake_auth(ctx, 1);
-    }
-#else
+#ifndef WOLFSSL_POST_HANDSHAKE_AUTH
     if (cfg->tls_post_handshake_auth) {
         wolfSSL_CTX_free(ctx);
         return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "server",
             "wolfSSL was built without WOLFSSL_POST_HANDSHAKE_AUTH; "
             "rebuild with --enable-postauth");
+    }
+#elif !defined(KEEP_PEER_CERT)
+    if (cfg->tls_post_handshake_auth) {
+        wolfSSL_CTX_free(ctx);
+        return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "server",
+            "post-handshake auth needs wolfSSL built with KEEP_PEER_CERT; "
+            "rebuild with CPPFLAGS=\"-DKEEP_PEER_CERT\"");
     }
 #endif
 

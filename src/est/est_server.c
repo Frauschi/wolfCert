@@ -661,7 +661,7 @@ static int handler_cacerts(WolfCertServer* s, int fd)
  * TLS-layer failure (including the client declining to send a cert). */
 static int ensure_post_handshake_auth(WolfCertServer* s)
 {
-#ifdef WOLFSSL_POST_HANDSHAKE_AUTH
+#if defined(WOLFSSL_POST_HANDSHAKE_AUTH) && defined(KEEP_PEER_CERT)
     if (!s->cfg.tls_post_handshake_auth || s->tls_current == NULL)
         return WOLFCERT_OK;
 
