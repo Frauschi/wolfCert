@@ -142,7 +142,17 @@ int main(void)
         .tls_post_handshake_auth = 1,
     };
     WolfCertServer* srv = NULL;
-    REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
+    int start_rc = wolfcert_server_start(&cfg, &srv);
+    if (start_rc == WOLFCERT_ERR_UNSUPPORTED) {
+        printf("SKIP: %s\n", wolfcert_last_error_message());
+        free(tls_cert);
+        free(tls_key);
+        free(cli_cert);
+        free(cli_key);
+        wolfcert_cleanup();
+        return 77;
+    }
+    REQUIRE(start_rc == WOLFCERT_OK);
     pthread_t tid;
     REQUIRE(pthread_create(&tid, NULL, server_thread, srv) == 0);
 

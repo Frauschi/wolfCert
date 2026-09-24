@@ -125,7 +125,8 @@ typedef struct {
      * set on the CTX (the initial handshake has no client cert), and
      * the accept loop keeps the TLS connection open across requests
      * so the anon /cacerts -> authenticated /simpleenroll pattern
-     * lands on one connection. */
+     * lands on one connection. Needs wolfSSL built with KEEP_PEER_CERT;
+     * without it wolfcert_server_start() returns WOLFCERT_ERR_UNSUPPORTED. */
     int              tls_post_handshake_auth;
 
     /* EST /csrattrs body. When set, the EST server returns this

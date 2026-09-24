@@ -1048,7 +1048,7 @@ static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
         /* Enabling PHA on the CTX lets the handshake negotiate the
          * post_handshake_auth extension (RFC 8446 section 4.6.2). Without it a
          * mid-session CertificateRequest is rejected. */
-        (void)wolfSSL_CTX_set_post_handshake_auth(ctx, 1);
+        (void)wolfSSL_CTX_allow_post_handshake_auth(ctx);
     }
 #else
     if (dials->allow_post_handshake_auth) {

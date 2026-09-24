@@ -588,15 +588,22 @@ time `#error`s. See [`EMBEDDED.md`](EMBEDDED.md#configuring-wolfcert-without-its
 **Required wolfSSL features** (build hard-fails with a "rebuild wolfSSL with
 --enable-X" diagnostic if missing): `HAVE_PKCS7`, `WOLFSSL_CERT_GEN`,
 `WOLFSSL_CERT_REQ`, `WOLFSSL_CERT_EXT`, `WOLFSSL_KEY_GEN`, `WOLF_CRYPTO_CB`,
-`WOLFSSL_BASE64_ENCODE`, `OPENSSL_EXTRA`, `WOLFSSL_ALT_NAMES`,
-`WOLFSSL_CERT_NAME_ALL`. A `NO_RSA` build hard-fails unless SCEP is disabled.
+`WOLFSSL_BASE64_ENCODE`, `WOLFSSL_ALT_NAMES`, `WOLFSSL_CERT_NAME_ALL`. A
+`NO_RSA` build hard-fails unless SCEP is disabled. CMake and autoconf also
+link-probe the `WOLFSSL_ASN_API` helpers wolfCert calls (`wc_SetDNSEntry`,
+`wc_SetAltNamesFromList`, `FreeAltNames`, `SetLength`); a shared libwolfssl
+exports them only under one of `WOLFSSL_PUBLIC_ASN` / `OPENSSL_EXTRA` /
+`OPENSSL_EXTRA_X509_SMALL` / `WOLFSSL_TEST_CERT`, a static one always links
+them. `check_config.h` cannot test a link, so a header-only build that misses
+them fails at link time with the symbol name.
 
 **Optional wolfSSL features** (absent → a warning; that key type returns
 `WOLFCERT_ERR_UNSUPPORTED` at runtime): the key algorithms — RSA (`NO_RSA`
 absent), ECC (`HAVE_ECC`), `HAVE_ED25519`, `HAVE_ED448`, and
 `WOLFSSL_HAVE_MLDSA` (FIPS 204 ML-DSA-44/65/87) — plus
-`WOLFSSL_POST_HANDSHAKE_AUTH` (probed at runtime for the PHA opt-in). At least
-one key algorithm must be present.
+`WOLFSSL_POST_HANDSHAKE_AUTH` (probed at runtime for the PHA opt-in). The test
+server's PHA mode also needs `KEEP_PEER_CERT`, to read the client's
+certificate. At least one key algorithm must be present.
 
 ## 7. Further reading
 

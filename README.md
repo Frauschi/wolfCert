@@ -67,9 +67,9 @@ optional key types wolfCert picks up when available:
     --enable-pkcs7 --enable-certgen --enable-certreq --enable-certext \
     --enable-keygen --enable-ecc --enable-cryptocb --enable-base64encode \
     --enable-ed25519 --enable-ed448 --enable-mldsa \
-    --enable-postauth --enable-opensslextra --enable-ip-alt-name \
-    --enable-des3 --enable-sni \
-    CPPFLAGS="-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL"
+    --enable-postauth --enable-ip-alt-name --enable-des3 --enable-sni \
+    CPPFLAGS="-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL -DKEEP_PEER_CERT \
+              -DWOLFSSL_PUBLIC_ASN"
 ```
 
 ### Header-based configuration (no build system)
