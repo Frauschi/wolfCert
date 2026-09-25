@@ -36,9 +36,9 @@ It also link-probes the `WOLFSSL_ASN_API` helpers it calls, which a shared
 libwolfssl exports only under one of `WOLFSSL_PUBLIC_ASN` (the lean choice),
 `OPENSSL_EXTRA`, `OPENSSL_EXTRA_X509_SMALL` or `WOLFSSL_TEST_CERT`; a static
 one links them regardless. The test server's post-handshake-auth mode
-additionally needs `KEEP_PEER_CERT`; without it it returns
-`WOLFCERT_ERR_UNSUPPORTED`. The OpenSSL compatibility layer itself is not
-required. With ML-DSA enabled it additionally needs
+additionally needs `KEEP_PEER_CERT` and `WOLFSSL_HAVE_TLS_UNIQUE`; without
+them it returns `WOLFCERT_ERR_UNSUPPORTED`. The OpenSSL compatibility layer
+itself is not required. With ML-DSA enabled it additionally needs
 `WOLFSSL_MLDSA_CHECK_KEY` (`wc_MlDsaKey_CheckKey()`), which reloading an
 ML-DSA CA from a store calls -- checked when `src/key_algs.c` compiles,
 since only `dilithium.h` resolves that macro. `--enable-mldsa` gives it by
@@ -80,7 +80,8 @@ wolfSSL configure:
     --enable-mldsa --enable-postauth --enable-ip-alt-name \
     --enable-des3 --enable-sni \
     CPPFLAGS="-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL \
-              -DKEEP_PEER_CERT -DWOLFSSL_PUBLIC_ASN"
+              -DKEEP_PEER_CERT -DWOLFSSL_PUBLIC_ASN \
+              -DWOLFSSL_HAVE_TLS_UNIQUE"
 ```
 
 CMake options live at the top of `CMakeLists.txt`; the matching autoconf

@@ -1073,34 +1073,29 @@ static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
     wolfSSL_CTX_set_verify(ctx,
         dials->verify_server ? WOLFSSL_VERIFY_PEER : WOLFSSL_VERIFY_NONE, NULL);
 
+    if (dials->client_cert != NULL && dials->client_key != NULL) {
+        /* Load the identity on the CTX so a PHA request can still use it. */
+        int rc = wolfSSL_CTX_use_certificate_buffer(ctx, dials->client_cert,
+                (long)dials->client_cert_len,
+                buf_filetype(dials->client_cert, dials->client_cert_len));
+        if (rc != WOLFSSL_SUCCESS) {
+            wolfSSL_CTX_free(ctx);
+            return WOLFCERT_ERR_TLS;
+        }
+
+        rc = wolfSSL_CTX_use_PrivateKey_buffer(ctx, dials->client_key,
+                (long)dials->client_key_len,
+                buf_filetype(dials->client_key, dials->client_key_len));
+        if (rc != WOLFSSL_SUCCESS) {
+            wolfSSL_CTX_free(ctx);
+            return WOLFCERT_ERR_TLS;
+        }
+    }
+
     WOLFSSL* ssl = wolfSSL_new(ctx);
     if (ssl == NULL) {
         wolfSSL_CTX_free(ctx);
         return WOLFCERT_ERR_TLS;
-    }
-
-    if (dials->client_cert != NULL && dials->client_key != NULL) {
-        /* Load the client identity even when the initial handshake is
-         * anonymous, so that a later TLS 1.3 CertificateRequest (PHA)
-         * can be answered without further caller involvement. */
-        int rc = 0;
-        rc = wolfSSL_use_certificate_buffer(ssl, dials->client_cert,
-                (long)dials->client_cert_len,
-                buf_filetype(dials->client_cert, dials->client_cert_len));
-        if (rc != WOLFSSL_SUCCESS) {
-            wolfSSL_free(ssl);
-            wolfSSL_CTX_free(ctx);
-            return WOLFCERT_ERR_TLS;
-        }
-
-        rc = wolfSSL_use_PrivateKey_buffer(ssl, dials->client_key,
-                (long)dials->client_key_len,
-                buf_filetype(dials->client_key, dials->client_key_len));
-        if (rc != WOLFSSL_SUCCESS) {
-            wolfSSL_free(ssl);
-            wolfSSL_CTX_free(ctx);
-            return WOLFCERT_ERR_TLS;
-        }
     }
 
     if (sni_host != NULL) {

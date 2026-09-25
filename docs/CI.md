@@ -32,9 +32,11 @@ scripts/ci/build-wolfssl.sh full --prefix /tmp/ws  # build + install to /tmp/ws
 
 Config names include `full` (all algorithms), `full-tsan`, `full-opensslextra`
 (the old canonical line with `--enable-opensslextra`, kept verbatim so existing
-setups stay covered), `est-only-nonrsa` (NO_RSA), `rsa-min`, `ecc-only-est`,
-`no-des3`, `tls13-only`, `mldsa-{44,65,87}off`, `static-mem`, `no-malloc`, and
-the `neg-*` configs used by the negative-config gate.
+setups stay covered), `full-all` (`full` plus `--enable-all`, which brings
+`OPENSSL_ALL` and its compatible defaults), `est-only-nonrsa` (NO_RSA),
+`rsa-min`, `ecc-only-est`, `no-des3`, `tls13-only`, `mldsa-{44,65,87}off`,
+`static-mem`, `no-malloc`, and the `neg-*` configs used by the negative-config
+gate.
 
 ## Reproducing a CI job locally
 

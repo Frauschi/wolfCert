@@ -42,9 +42,14 @@ A **shared** libwolfssl must also export the ASN helpers wolfCert calls, which
 takes `WOLFSSL_PUBLIC_ASN` (the lean choice) or the OpenSSL compatibility layer;
 a static wolfSSL links them without it. `check_config.h` cannot test that, so a
 missing export surfaces as an undefined `wc_SetDNSEntry` / `SetLength` at link
-time. The EST test server's post-handshake-auth mode also needs
-`KEEP_PEER_CERT` and `WOLFSSL_HAVE_TLS_UNIQUE`; without them it returns
-`WOLFCERT_ERR_UNSUPPORTED`.
+time. For what the EST test server's post-handshake-auth mode needs from
+wolfSSL, see "Test server PHA mode" in `docs/ARCHITECTURE.md`.
+
+An EST client using post-handshake auth cannot run on a wolfSSL built with
+`WOLFSSL_BLIND_PRIVATE_KEY` and without `OPENSSL_EXTRA` or
+`WOLFSSL_WPAS_SMALL`: wolfSSL then frees the connection's masked key copy
+after the handshake, so the client cannot sign the post-handshake
+CertificateVerify (`NO_PRIVATE_KEY`) and the server refuses the enrollment.
 
 wolfCert reads that feature set through `<wolfssl/wolfcrypt/settings.h>`, so a
 wolfSSL configured by its own `user_settings.h` is validated correctly and needs
