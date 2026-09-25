@@ -159,6 +159,24 @@ what enables the post-handshake-auth bootstrap below.
    caller involvement. Requires a wolfSSL built with
    `WOLFSSL_POST_HANDSHAKE_AUTH`.
 
+**Test server PHA mode.** `WolfCertServerCfgSrv.tls_post_handshake_auth`
+turns the in-tree server into the other end of shape 3. With
+`tls_client_ca_pem` set, the CTX gets `WOLFSSL_VERIFY_POST_HANDSHAKE` and not
+`FAIL_IF_NO_PEER_CERT`, so a TLS 1.3 handshake stays anonymous and a TLS 1.2
+client can still fetch `/cacerts`. A TLS 1.2 client is asked for its cert
+during the handshake, since TLS 1.2 has no PHA. On the first `/simpleenroll`
+or `/simplereenroll` without a peer cert, the server calls
+`wolfSSL_request_certificate()` and waits (5 s, capped at the per-request
+deadline) for the client's post-handshake Finished. Any TLS error, app data
+first, or an empty Certificate gets a 401; if the request deadline ends the
+wait first, the connection is dropped like any request that misses it. The
+accept loop keeps the connection open across requests, so the anonymous
+`/cacerts` and the authenticated enroll land on one connection. The mode
+needs wolfSSL built with `KEEP_PEER_CERT` and `WOLFSSL_HAVE_TLS_UNIQUE`;
+without either, `wolfcert_server_start()` returns `WOLFCERT_ERR_UNSUPPORTED`.
+A client that holds a cert but does not opt into PHA is refused, since the
+server no longer asks for it during a TLS 1.3 handshake.
+
 **Manual approval.** A server may park an enrollment with `202 Accepted` +
 `Retry-After` (RFC 7030 §4.2.3), symmetrical to SCEP's PENDING. The
 `wolfcert_est_simple_enroll_ex` / `_simple_reenroll_ex` variants surface this
@@ -602,8 +620,9 @@ them fails at link time with the symbol name.
 absent), ECC (`HAVE_ECC`), `HAVE_ED25519`, `HAVE_ED448`, and
 `WOLFSSL_HAVE_MLDSA` (FIPS 204 ML-DSA-44/65/87) — plus
 `WOLFSSL_POST_HANDSHAKE_AUTH` (probed at runtime for the PHA opt-in). The test
-server's PHA mode also needs `KEEP_PEER_CERT`, to read the client's
-certificate. At least one key algorithm must be present.
+server's PHA mode also needs `KEEP_PEER_CERT` and `WOLFSSL_HAVE_TLS_UNIQUE`, to
+read the client's certificate and to tell when its post-handshake Finished has
+arrived. At least one key algorithm must be present.
 
 ## 7. Further reading
 

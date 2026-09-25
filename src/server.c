@@ -218,13 +218,16 @@ static int tls_setup(WolfCertServer* s, const WolfCertServerCfgSrv* cfg)
                                 "TLS: load_verify_buffer (client CA) failed");
         }
 
-        /* With PHA the initial handshake is anonymous; the CTX verifies
-         * any peer cert the client sends later (post-handshake) against
-         * the same trust anchor bundle. Without PHA we keep the
-         * original "must present a cert up front" behaviour. */
+        /* PHA mode must still accept an anonymous TLS 1.2 handshake. */
         int verify = WOLFSSL_VERIFY_PEER;
-        if (!cfg->tls_post_handshake_auth)
+        if (cfg->tls_post_handshake_auth) {
+            verify |= WOLFSSL_VERIFY_POST_HANDSHAKE;
+            /* Grouped messages would hold back the PHA CertificateRequest. */
+            (void)wolfSSL_CTX_clear_group_messages(ctx);
+        }
+        else {
             verify |= WOLFSSL_VERIFY_FAIL_IF_NO_PEER_CERT;
+        }
 
         wolfSSL_CTX_set_verify(ctx, verify, NULL);
     }
@@ -235,12 +238,13 @@ static int tls_setup(WolfCertServer* s, const WolfCertServerCfgSrv* cfg)
             "wolfSSL was built without WOLFSSL_POST_HANDSHAKE_AUTH; "
             "rebuild with --enable-postauth");
     }
-#elif !defined(KEEP_PEER_CERT)
+#elif !defined(WOLFSSL_HAVE_TLS_UNIQUE) || !defined(KEEP_PEER_CERT)
     if (cfg->tls_post_handshake_auth) {
         wolfSSL_CTX_free(ctx);
         return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "server",
-            "post-handshake auth needs wolfSSL built with KEEP_PEER_CERT; "
-            "rebuild with CPPFLAGS=\"-DKEEP_PEER_CERT\"");
+            "post-handshake auth needs wolfSSL built with "
+            "WOLFSSL_HAVE_TLS_UNIQUE and KEEP_PEER_CERT; rebuild with "
+            "CPPFLAGS=\"-DWOLFSSL_HAVE_TLS_UNIQUE -DKEEP_PEER_CERT\"");
     }
 #endif
 

@@ -69,8 +69,13 @@ optional key types wolfCert picks up when available:
     --enable-ed25519 --enable-ed448 --enable-mldsa \
     --enable-postauth --enable-ip-alt-name --enable-des3 --enable-sni \
     CPPFLAGS="-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL -DKEEP_PEER_CERT \
-              -DWOLFSSL_PUBLIC_ASN"
+              -DWOLFSSL_PUBLIC_ASN -DWOLFSSL_HAVE_TLS_UNIQUE"
 ```
+
+`-DKEEP_PEER_CERT -DWOLFSSL_HAVE_TLS_UNIQUE` only serve the test server's TLS
+1.3 post-handshake-auth mode. The older line with `--enable-opensslextra` still
+builds wolfCert, but it lacks `WOLFSSL_HAVE_TLS_UNIQUE`, so on that wolfSSL the
+PHA mode returns `WOLFCERT_ERR_UNSUPPORTED` and its tests skip.
 
 ### Header-based configuration (no build system)
 
