@@ -232,6 +232,7 @@ caveats apply to SCEP and to some servers:
   flows, and the MCU / CryptoCb integration guide.
 - [`docs/EMBEDDED.md`](docs/EMBEDDED.md) — tuning wolfCert's RAM footprint for
   constrained targets.
+- [`zephyr/README.md`](zephyr/README.md) — using wolfCert as a Zephyr module.
 - [`docs/CI.md`](docs/CI.md) — the GitHub Actions pipeline, the shared
   `scripts/ci/build-wolfssl.sh` helper, and how to reproduce a CI config
   locally.

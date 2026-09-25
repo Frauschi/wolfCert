@@ -155,6 +155,26 @@
 #error "wolfSSL provides neither TLS 1.2 nor TLS 1.3; wolfCert needs at least one for its HTTPS transport."
 #endif
 
+/* Zephyr takes these algorithms from Kconfig, separately from the wolfSSL
+ * settings file, so the two can disagree. */
+#ifdef __ZEPHYR__
+#if defined(WOLFCERT_HAVE_RSA) && defined(NO_RSA)
+#error "CONFIG_WOLFCERT_RSA is set but the wolfSSL settings file defines NO_RSA; remove NO_RSA or disable CONFIG_WOLFCERT_RSA."
+#endif
+#if defined(WOLFCERT_HAVE_ECC) && !defined(HAVE_ECC)
+#error "CONFIG_WOLFCERT_ECC is set but the wolfSSL settings file lacks HAVE_ECC; define it or disable CONFIG_WOLFCERT_ECC."
+#endif
+#if defined(WOLFCERT_HAVE_ED25519) && !defined(HAVE_ED25519)
+#error "CONFIG_WOLFCERT_ED25519 is set but the wolfSSL settings file lacks HAVE_ED25519; define it or disable CONFIG_WOLFCERT_ED25519."
+#endif
+#if defined(WOLFCERT_HAVE_ED448) && !defined(HAVE_ED448)
+#error "CONFIG_WOLFCERT_ED448 is set but the wolfSSL settings file lacks HAVE_ED448; define it or disable CONFIG_WOLFCERT_ED448."
+#endif
+#if defined(WOLFCERT_HAVE_MLDSA) && !defined(WOLFSSL_HAVE_MLDSA)
+#error "CONFIG_WOLFCERT_MLDSA is set but the wolfSSL settings file lacks WOLFSSL_HAVE_MLDSA; define it or disable CONFIG_WOLFCERT_MLDSA."
+#endif
+#endif /* __ZEPHYR__ */
+
 #endif /* tier 2 */
 
 #endif /* WOLFCERT_CHECK_CONFIG_H */

@@ -60,6 +60,7 @@ tests/**/*.trs
 *.dll
 *.dSYM/
 *.exe
+__pycache__/
 wolfcert/options.h
 
 # Autoconf-generated CMake package-config files (from cmake/*.in)

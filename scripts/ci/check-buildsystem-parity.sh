@@ -3,11 +3,13 @@
 #
 # Guard the "CMake is primary, autoconf is kept at parity" invariant. A source
 # added to one build system but not the other is a common and easy-to-miss
-# drift; this fails CI when it happens. Two independent sets are compared:
+# drift; this fails CI when it happens. Three independent sets are compared:
 #
 #   1. Library sources (src/*.c): CMakeLists.txt vs Makefile.am.
 #   2. Test sources (tests/{unit,integration}/*.c): tests/CMakeLists.txt vs
 #      Makefile.am -- so `make check` and CTest register the same test set.
+#   3. Library sources: CMakeLists.txt vs zephyr/CMakeLists.txt, less the test
+#      server's, which the Zephyr module does not build.
 
 set -euo pipefail
 
@@ -61,6 +63,18 @@ am_srcs="$(extract_lib "$ROOT/Makefile.am")"
 compare "library sources" \
     "$cmake_srcs" CMakeLists.txt "$am_srcs" Makefile.am
 
+# The Zephyr module builds the client only; these are the test server's.
+zephyr_omits="src/ca_issue.c
+src/est/est_server.c
+src/scep/scep_server.c
+src/server.c"
+zephyr_expected="$(comm -23 <(printf '%s\n' "$cmake_srcs") \
+                            <(printf '%s\n' "$zephyr_omits" | sort))"
+zephyr_srcs="$(extract_lib "$ROOT/zephyr/CMakeLists.txt")"
+compare "library sources" \
+    "$zephyr_expected" "CMakeLists.txt (client)" \
+    "$zephyr_srcs" zephyr/CMakeLists.txt
+
 cmake_tests="$(extract_tests_cmake "$ROOT/tests/CMakeLists.txt")"
 am_tests="$(extract_tests_am "$ROOT/Makefile.am")"
 compare "test sources" \
@@ -68,6 +82,7 @@ compare "test sources" \
 
 if [ "$status" -eq 0 ]; then
     echo "build-system parity OK: $(echo "$cmake_srcs" | wc -l | tr -d ' ') library"\
-         "sources and $(echo "$cmake_tests" | wc -l | tr -d ' ') test sources match."
+         "sources, $(echo "$zephyr_srcs" | wc -l | tr -d ' ') of them in the Zephyr"\
+         "module, and $(echo "$cmake_tests" | wc -l | tr -d ' ') test sources match."
 fi
 exit "$status"
