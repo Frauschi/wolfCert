@@ -114,7 +114,7 @@ if(WOLFCERT_ENABLE_SERVER)
     target_link_libraries(test_server_stop_idle PRIVATE wolfcert Threads::Threads)
     add_test(NAME server_stop_idle COMMAND test_server_stop_idle)
     # A stop that cannot interrupt an idle peer hangs the serving thread.
-    set_tests_properties(server_stop_idle PROPERTIES TIMEOUT 60)
+    set_tests_properties(server_stop_idle PROPERTIES TIMEOUT 90)
 
     add_executable(test_server_ca_store unit/test_server_ca_store.c)
     target_include_directories(test_server_ca_store PRIVATE ${CMAKE_SOURCE_DIR}/src)

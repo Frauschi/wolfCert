@@ -58,11 +58,18 @@
 #define WOLFCERT_SERVER_POLL_MS 200
 #endif
 
-/* Send/receive timeout on an accepted connection, so a stalled peer cannot
- * hold the handler. Separate from the listener cadence: every expiry is a
- * retry, so lowering this spins the handler rather than speeding shutdown. */
+/* Send/receive timeout on an accepted connection: how often a blocked read or
+ * write wakes to call io_should_stop(). Every expiry is a retry, so lowering
+ * this spins the handler rather than speeding shutdown. */
 #ifndef WOLFCERT_SERVER_IO_TIMEOUT_MS
 #define WOLFCERT_SERVER_IO_TIMEOUT_MS WOLFCERT_SERVER_POLL_MS
+#endif
+
+/* Time limit for the TLS handshake and for each request. A connection that
+ * runs over it is closed so the next client can be served. 0 or less means no
+ * limit. */
+#ifndef WOLFCERT_SERVER_REQUEST_TIMEOUT_MS
+#define WOLFCERT_SERVER_REQUEST_TIMEOUT_MS 10000
 #endif
 
 /* A timeout armed on the accepted connection surfaces as WANT_READ or
@@ -74,17 +81,34 @@ static int tls_want_io(WOLFSSL* ssl, int ret)
     return err == WOLFSSL_ERROR_WANT_READ || err == WOLFSSL_ERROR_WANT_WRITE;
 }
 
+/* Start the connection's deadline for its next phase. */
+static void arm_deadline(WolfCertServer* srv)
+{
+#if WOLFCERT_SERVER_REQUEST_TIMEOUT_MS > 0
+    srv->deadline_ms = wolfcert_mono_ms() + WOLFCERT_SERVER_REQUEST_TIMEOUT_MS;
+#else
+    (void)srv;
+#endif
+}
+
+/* True once shutdown is requested or the connection's deadline has passed. */
+static int io_should_stop(WolfCertServer* srv)
+{
+    return WOLFSSL_ATOMIC_LOAD(srv->stopping) ||
+           (srv->deadline_ms != 0 && wolfcert_mono_ms() >= srv->deadline_ms);
+}
+
 ssize_t wolfcert_io_recv(WolfCertServer* srv, int fd, void* buf, size_t len)
 {
     ssize_t r;
 
     /* A trickling peer never times out, so the loops below never see this. */
-    if (srv != NULL && WOLFSSL_ATOMIC_LOAD(srv->stopping))
+    if (srv != NULL && io_should_stop(srv))
         return -1;
 
     /* A connection the accept loop armed carries a receive timeout, so its
      * expiry is a retry rather than an error: wolfSSL reports it as a want,
-     * a raw socket as EAGAIN. Retrying stops once shutdown is requested. */
+     * a raw socket as EAGAIN. */
     if (srv != NULL && srv->tls_current != NULL) {
         int tr;
 
@@ -94,7 +118,7 @@ ssize_t wolfcert_io_recv(WolfCertServer* srv, int fd, void* buf, size_t len)
             tr = wolfSSL_read(srv->tls_current, buf, (int)len);
         }
         while (tr <= 0 && tls_want_io(srv->tls_current, tr) &&
-               !WOLFSSL_ATOMIC_LOAD(srv->stopping));
+               !io_should_stop(srv));
 
         return tr <= 0 ? -1 : (ssize_t)tr;
     }
@@ -102,10 +126,11 @@ ssize_t wolfcert_io_recv(WolfCertServer* srv, int fd, void* buf, size_t len)
     do {
         r = recv(fd, buf, len, 0);
     }
-    while (r < 0 && srv != NULL && !WOLFSSL_ATOMIC_LOAD(srv->stopping) &&
+    while (r < 0 && srv != NULL &&
            (errno == EINTR ||
             (srv->poll_timeouts_armed &&
-             (errno == EAGAIN || errno == EWOULDBLOCK))));
+             (errno == EAGAIN || errno == EWOULDBLOCK))) &&
+           !io_should_stop(srv));
 
     return r;
 }
@@ -114,7 +139,7 @@ ssize_t wolfcert_io_send(WolfCertServer* srv, int fd, const void* buf, size_t le
 {
     ssize_t r;
 
-    if (srv != NULL && WOLFSSL_ATOMIC_LOAD(srv->stopping))
+    if (srv != NULL && io_should_stop(srv))
         return -1;
 
     /* Mirrors wolfcert_io_recv: the send timeout bounds a peer that stops
@@ -127,7 +152,7 @@ ssize_t wolfcert_io_send(WolfCertServer* srv, int fd, const void* buf, size_t le
             tr = wolfSSL_write(srv->tls_current, buf, (int)len);
         }
         while (tr <= 0 && tls_want_io(srv->tls_current, tr) &&
-               !WOLFSSL_ATOMIC_LOAD(srv->stopping));
+               !io_should_stop(srv));
 
         return tr <= 0 ? -1 : (ssize_t)tr;
     }
@@ -135,10 +160,11 @@ ssize_t wolfcert_io_send(WolfCertServer* srv, int fd, const void* buf, size_t le
     do {
         r = send(fd, buf, len, WOLFCERT_SEND_FLAGS);
     }
-    while (r < 0 && srv != NULL && !WOLFSSL_ATOMIC_LOAD(srv->stopping) &&
+    while (r < 0 && srv != NULL &&
            (errno == EINTR ||
             (srv->poll_timeouts_armed &&
-             (errno == EAGAIN || errno == EWOULDBLOCK))));
+             (errno == EAGAIN || errno == EWOULDBLOCK))) &&
+           !io_should_stop(srv));
 
     return r;
 }
@@ -433,6 +459,8 @@ int wolfcert_server_run(WolfCertServer* srv)
         srv->poll_timeouts_armed = 1;
         wolfcert_sock_nosigpipe(cs);
 
+        arm_deadline(srv);
+
         if (srv->tls_ctx != NULL) {
             /* Terminate TLS on this accepted fd. The protocol handler sees
              * plaintext HTTP through wolfcert_io_{recv,send}. */
@@ -447,7 +475,7 @@ int wolfcert_server_run(WolfCertServer* srv)
                     ret = wolfSSL_accept(ssl);
                 }
                 while (ret != WOLFSSL_SUCCESS && tls_want_io(ssl, ret) &&
-                       !WOLFSSL_ATOMIC_LOAD(srv->stopping));
+                       !io_should_stop(srv));
 
                 if (ret == WOLFSSL_SUCCESS) {
                     srv->tls_current = ssl;
@@ -461,10 +489,11 @@ int wolfcert_server_run(WolfCertServer* srv)
                      * PHA-provided auth on the same TLS connection. */
                     do {
                         srv->keep_alive = 1;
+                        arm_deadline(srv);
                         if (srv->ops->serve_fd(srv, cs) != WOLFCERT_OK)
                             break;
                     }
-                    while (srv->keep_alive && !WOLFSSL_ATOMIC_LOAD(srv->stopping));
+                    while (srv->keep_alive && !io_should_stop(srv));
 
                     srv->tls_current = NULL;
                     wolfSSL_shutdown(ssl);
@@ -480,13 +509,15 @@ int wolfcert_server_run(WolfCertServer* srv)
             /* Plaintext: no TLS. */
             do {
                 srv->keep_alive = 1;
+                arm_deadline(srv);
                 if (srv->ops->serve_fd(srv, cs) != WOLFCERT_OK)
                     break;
             }
-            while (srv->keep_alive && !WOLFSSL_ATOMIC_LOAD(srv->stopping));
+            while (srv->keep_alive && !io_should_stop(srv));
         }
 
         srv->poll_timeouts_armed = 0;
+        srv->deadline_ms = 0;
         close(cs);
     }
 

@@ -64,7 +64,7 @@ void wolfcert_sock_nosigpipe(int fd)
 #endif
 }
 
-static long mono_ms(void)
+long wolfcert_mono_ms(void)
 {
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -150,13 +150,13 @@ int wolfcert_posix_connect(const char* host, int port, int timeout_ms, void* ctx
     /* timeout_ms bounds the whole connect, not each candidate address: with a
      * multi-homed host we shrink the per-attempt budget by what already
      * elapsed so the total stays within the caller's deadline. */
-    long deadline = (timeout_ms > 0) ? mono_ms() + timeout_ms : 0;
+    long deadline = (timeout_ms > 0) ? wolfcert_mono_ms() + timeout_ms : 0;
 
     int fd = -1;
     for (rp = res; rp != NULL; rp = rp->ai_next) {
         int attempt_ms = timeout_ms;
         if (timeout_ms > 0) {
-            attempt_ms = (int)(deadline - mono_ms());
+            attempt_ms = (int)(deadline - wolfcert_mono_ms());
             if (attempt_ms <= 0) {
                 /* budget exhausted */
                 break;

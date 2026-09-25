@@ -158,7 +158,9 @@ typedef struct {
 } WolfCertServerCfgSrv;
 
 WOLFCERT_API int  wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out);
-WOLFCERT_API int  wolfcert_server_run(WolfCertServer* srv);  /* blocking accept loop */
+/* Blocking accept loop. Closes a connection that does not finish its TLS
+ * handshake or its next request within WOLFCERT_SERVER_REQUEST_TIMEOUT_MS. */
+WOLFCERT_API int  wolfcert_server_run(WolfCertServer* srv);
 WOLFCERT_API int  wolfcert_server_stop(WolfCertServer* srv);
 WOLFCERT_API void wolfcert_server_free(WolfCertServer* srv);
 
@@ -167,7 +169,8 @@ WOLFCERT_API uint16_t wolfcert_server_port(const WolfCertServer* srv);
 
 /* Embed wolfCert's protocol handling in an existing event loop: hand the
  * library an already-accepted connection; it services exactly one request
- * and returns, leaving the caller to close the fd. */
+ * and returns, leaving the caller to close the fd.
+ * WOLFCERT_SERVER_REQUEST_TIMEOUT_MS does not apply. */
 WOLFCERT_API int wolfcert_server_serve_fd(WolfCertServer* srv, int fd);
 
 #ifdef __cplusplus
