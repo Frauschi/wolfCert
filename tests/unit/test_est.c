@@ -533,6 +533,51 @@ static int pump_simple_enroll(WolfCertEstSession* s,
     }
 }
 
+/* One request per connection srv_thread() accepts, five in all. */
+static int check_empty_body(WOLFSSL_CTX* ctx, const WolfCertServerCfg* tmpl,
+                            const uint8_t* csr, size_t csr_len,
+                            const uint8_t* cur, size_t cur_len,
+                            const WolfCertKey* dk)
+{
+    struct srv_ctx sc = { .body = NULL, .len = 0, .ctx = ctx };
+    WolfCertServerCfg srv = *tmpl;
+    WolfCertEstSession* sess = NULL;
+    WolfCertBuffer out = { 0 };
+    pthread_t tid;
+    char url[128];
+    int port = 0;
+
+    sc.listen_fd = listen_loopback(&port);
+    REQUIRE(sc.listen_fd >= 0);
+    REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/.well-known/est", port);
+    srv.server_url = url;
+
+    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_HTTP);
+    REQUIRE(out.data == NULL);
+    REQUIRE(wolfcert_est_simple_enroll(&srv, csr, csr_len, &out)
+            == WOLFCERT_ERR_HTTP);
+    REQUIRE(out.data == NULL);
+    REQUIRE(wolfcert_est_simple_reenroll(&srv, cur, cur_len, dk, csr, csr_len,
+                                         &out) == WOLFCERT_ERR_HTTP);
+    REQUIRE(out.data == NULL);
+
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_get_cacerts(sess, &out) == WOLFCERT_ERR_HTTP);
+    wolfcert_est_session_close(sess);
+    REQUIRE(out.data == NULL);
+
+    sess = NULL;
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_simple_enroll(sess, csr, csr_len, &out)
+            == WOLFCERT_ERR_HTTP);
+    wolfcert_est_session_close(sess);
+    REQUIRE(out.data == NULL);
+
+    pthread_join(tid, NULL);
+    return 0;
+}
+
 int main(void)
 {
     /* The mock TLS responder may wolfSSL_write() after the client has read its
@@ -649,6 +694,9 @@ int main(void)
                    "BEGIN CERTIFICATE", 17) != NULL);
     wolfcert_buffer_free(&sess_nb_enrolled);
     wolfcert_est_session_close(sess_nb);
+
+    REQUIRE(check_empty_body(ctx, &srv, csr.data, csr.len, ca_der, ca_len,
+                             dk) == 0);
 
     wolfcert_buffer_free(&csr);
     wolfcert_key_free(dk);

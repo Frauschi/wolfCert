@@ -140,6 +140,12 @@ int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv, WolfCertEncoding 
         return WOLFCERT_ERR_HTTP;
     }
 
+    if (resp.body_len == 0) {
+        wolfcert_http_response_free(&resp);
+        return WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "est",
+            "200 response carried no certificate");
+    }
+
     WolfCertBuffer p7 = { 0 };
     rc = wolfcert_base64_decode(resp.body, resp.body_len, &p7, heap);
 
@@ -240,6 +246,12 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
         wolfcert_http_response_free(&resp);
 
         return mapped;
+    }
+
+    if (resp.body_len == 0) {
+        wolfcert_http_response_free(&resp);
+        return WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "est",
+            "200 response carried no certificate");
     }
 
     WolfCertBuffer p7 = { 0 };
@@ -607,6 +619,12 @@ int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
         return WOLFCERT_ERR_HTTP;
     }
 
+    if (s->in_resp.body_len == 0) {
+        est_async_reset(s);
+        return WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "est",
+            "200 response carried no certificate");
+    }
+
     WolfCertBuffer p7 = { 0 };
     rc = wolfcert_base64_decode(s->in_resp.body, s->in_resp.body_len, &p7, s->heap);
     if (rc == WOLFCERT_OK) {
@@ -678,6 +696,12 @@ int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
         return mapped;
     }
 
+    if (s->in_resp.body_len == 0) {
+        est_async_reset(s);
+        return WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "est",
+            "200 response carried no certificate");
+    }
+
     WolfCertBuffer p7 = { 0 };
     rc = wolfcert_base64_decode(s->in_resp.body, s->in_resp.body_len, &p7, s->heap);
     if (rc == WOLFCERT_OK) {
@@ -716,6 +740,12 @@ int wolfcert_est_session_get_cacerts(WolfCertEstSession* s,
     if (resp.status_code != 200) {
         wolfcert_http_response_free(&resp);
         return WOLFCERT_ERR_HTTP;
+    }
+
+    if (resp.body_len == 0) {
+        wolfcert_http_response_free(&resp);
+        return WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "est",
+            "200 response carried no certificate");
     }
 
     WolfCertBuffer p7 = { 0 };
@@ -781,6 +811,12 @@ int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
         wolfcert_http_response_free(&resp);
 
         return mapped;
+    }
+
+    if (resp.body_len == 0) {
+        wolfcert_http_response_free(&resp);
+        return WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "est",
+            "200 response carried no certificate");
     }
 
     WolfCertBuffer p7 = { 0 };
