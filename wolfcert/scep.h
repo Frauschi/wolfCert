@@ -37,7 +37,8 @@ typedef struct {
     int sha384;                  /* GetCACaps: SHA-384 */
     int sha512;                  /* GetCACaps: SHA-512 */
     int aes;                     /* GetCACaps: AES */
-    int scep_standard;           /* GetCACaps: SCEPStandard */
+    int scep_standard;           /* GetCACaps: SCEPStandard; also sets
+                                  * post_pki_operation, sha256 and aes */
     int get_next_ca_cert;        /* GetCACaps: GetNextCACert */
 } WolfCertScepCaps;
 

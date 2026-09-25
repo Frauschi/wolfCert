@@ -214,11 +214,13 @@ whose payload is an EnvelopedData, built on wolfSSL's `wc_PKCS7` API.
 Each round trip envelopes the payload to the RA/CA cert's public key, signs it
 (for `PKCSReq` with a transient self-signed cert whose key matches the one
 being enrolled), sends it, and parses the response. The pkiMessage is POSTed by
-default; when the passed `caps` shows the CA does **not** advertise
-`POSTPKIOperation`, the client falls back to the RFC 8894 section 4.1 HTTP GET
-form, carrying the message base64-encoded and percent-escaped in the `message`
-query parameter (refusing, with `WOLFCERT_ERR_UNSUPPORTED`, to build a URL
-longer than `WOLFCERT_SCEP_MAX_GET_URL`). The in-tree test server accepts both.
+default; when the passed `caps` shows the CA advertises **neither**
+`POSTPKIOperation` nor `SCEPStandard` (which implies `POSTPKIOperation` per
+RFC 8894 section 3.5.2), the client falls back to the RFC 8894 section 4.1
+HTTP GET form, carrying the message base64-encoded and percent-escaped in the
+`message` query parameter (refusing, with `WOLFCERT_ERR_UNSUPPORTED`, to build
+a URL longer than `WOLFCERT_SCEP_MAX_GET_URL`). The in-tree test server accepts
+both.
 The server's `pkiStatus` maps to a `WolfCertScepResult.status` of `SUCCESS`
 (cert in `cert_pem`), `PENDING` (poll with `GetCertInitial`, quoting the
 returned transaction ID), or `FAILURE`.
@@ -256,8 +258,10 @@ while the crypto stays synchronous.
   which derives the transactionID as the SHA-256 of the signer
   public key (RFC 8894 §3.2.1) so retries of the same key reuse one
   ID. Matches wolfSCEP's derivation.
-- `content_cipher` — `WOLFCERT_SCEP_CIPHER_AUTO` (default: the caps-driven
-  AES-128-CBC / 3DES choice) or an explicit `AES128` / `AES256` / `DES3`.
+- `content_cipher` — `WOLFCERT_SCEP_CIPHER_AUTO` (default: AES-128-CBC when
+  the CA advertises `AES` or `SCEPStandard`, which implies `AES` per RFC 8894
+  section 3.5.2; else 3DES, which a `NO_DES3` wolfSSL rejects with
+  `WOLFCERT_ERR_UNSUPPORTED`) or an explicit `AES128` / `AES256` / `DES3`.
   There is no GetCACaps token for AES-256, so forcing it is a deliberate choice
   for a peer that requires it (e.g. a wolfSCEP deployment); the envelope is
   self-describing, so any AES-capable recipient decrypts it by OID.

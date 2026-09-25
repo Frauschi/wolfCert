@@ -194,6 +194,13 @@ int wolfcert_scep_get_ca_caps(const WolfCertServerCfg* srv, WolfCertScepCaps* ou
     out->scep_standard      = has_cap(b, resp.body_len, "SCEPStandard");
     out->get_next_ca_cert   = has_cap(b, resp.body_len, "GetNextCACert");
 
+    /* RFC 8894 section 3.5.2, Table 7 */
+    if (out->scep_standard) {
+        out->post_pki_operation = 1;
+        out->aes                = 1;
+        out->sha256             = 1;
+    }
+
     wolfcert_http_response_free(&resp);
 
     return WOLFCERT_OK;

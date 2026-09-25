@@ -533,6 +533,38 @@ static int test_caps_token_matching(void)
     return 0;
 }
 
+/* A GetCACaps body carrying only SCEPStandard. */
+static int test_caps_scep_standard(void)
+{
+    const char* caps_body = "SCEPStandard\r\n";
+    struct canned_ctx cc = { .listen_fd = -1, .content_type = "text/plain",
+                             .body = (const uint8_t*)caps_body,
+                             .body_len = strlen(caps_body) };
+    pthread_t tid;
+    int port = 0;
+    cc.listen_fd = listen_loopback(&port);
+    REQUIRE(cc.listen_fd >= 0);
+    REQUIRE(pthread_create(&tid, NULL, canned_srv_thread, &cc) == 0);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
+    WolfCertScepCaps caps = { 0 };
+    int rc = wolfcert_scep_get_ca_caps(&cli, &caps);
+    pthread_join(tid, NULL);
+    REQUIRE(rc == WOLFCERT_OK);
+
+    REQUIRE(caps.scep_standard == 1);
+    REQUIRE(caps.post_pki_operation == 1);
+    REQUIRE(caps.aes == 1);
+    REQUIRE(caps.sha256 == 1);
+    REQUIRE(caps.renewal == 0);
+    REQUIRE(caps.sha384 == 0);
+    REQUIRE(caps.sha512 == 0);
+    REQUIRE(caps.get_next_ca_cert == 0);
+    return 0;
+}
+
 /* Serve `body` once under `content_type` and fetch it with GetCACert. */
 static int fetch_ca(const char* content_type, const uint8_t* body,
                     size_t body_len, WolfCertEncoding enc, WolfCertBuffer* out)
@@ -1215,6 +1247,8 @@ int main(void)
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
     if (test_caps_token_matching())
+        return 1;
+    if (test_caps_scep_standard())
         return 1;
     if (test_get_ca_cert_empty_body())
         return 1;

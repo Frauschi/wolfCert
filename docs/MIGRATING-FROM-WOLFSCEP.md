@@ -39,7 +39,7 @@ If you must keep your own transport, for example on an RTOS with a proprietary s
 | `wolfSCEP_request(WS_REQUEST_CACAPS)` then `wolfSCEP_response` | `wolfcert_scep_get_ca_caps` |
 | `wolfSCEP_request(WS_REQUEST_CA)` then `wolfSCEP_response` | `wolfcert_scep_get_ca_cert` or `wolfcert_scep_get_ca_cert_enc` |
 | `wolfSCEP_request(WS_REQUEST_ENROLL)` then `wolfSCEP_response` | `wolfcert_scep_pkcs_req` or `wolfcert_scep_pkcs_req_ex` |
-| `WS_POST_FLAG` | automatic: POST by default, with the RFC 8894 section 4.1 GET fallback when `GetCACaps` does not advertise `POSTPKIOperation` |
+| `WS_POST_FLAG` | automatic: POST, or the RFC 8894 section 4.1 GET form, chosen from `GetCACaps` (see [`ARCHITECTURE.md`](ARCHITECTURE.md)) |
 | `wolfSCEP_reply_status` (the HTTP status code) | checked internally; a non-200 surfaces as `WOLFCERT_ERR_HTTP` |
 | your own pkiStatus parse against `WS_PKI_SUCCESS` / `WS_PKI_FAILURE` / `WS_PKI_PENDING` | `WolfCertScepResult.status`, `WOLFCERT_SCEP_STATUS_SUCCESS` / `_FAILURE` / `_PENDING` |
 | `wolfSCEP_reply_error`, `wolfSCEP_get_error` | `wolfcert_strerror` and `wolfcert_last_error_message` |
@@ -144,13 +144,11 @@ srv.proto_opts.scep.txid_mode = WOLFCERT_SCEP_TXID_PUBKEY_HASH;
 
 That produces the SHA-256 of the signing certificate's public key, upper-case hex encoded, 64 characters, per RFC 8894 section 3.2.1. It hashes the `subjectPublicKey` BIT STRING contents, not the enclosing `SubjectPublicKeyInfo` with its AlgorithmIdentifier, which is the same input a wolfSCEP-based peer feeds in through `PKCS7.publicKey`, so the two derive the same value. On a renewal the signer is the certificate being replaced, so the ID follows the old key.
 
-**Content encryption is negotiated, not fixed.** By default wolfCert uses AES-128-CBC when the CA advertises the `AES` capability and triple DES otherwise. No `GetCACaps` keyword advertises AES-256, so a server that requires it can only be reached by asking:
+**Content encryption is negotiated, not fixed.** By default wolfCert picks the content cipher from `GetCACaps` (`WOLFCERT_SCEP_CIPHER_AUTO`, see [`ARCHITECTURE.md`](ARCHITECTURE.md)). No `GetCACaps` keyword advertises AES-256, so a server that requires it can only be reached by asking:
 
 ```c
 srv.proto_opts.scep.content_cipher = WOLFCERT_SCEP_CIPHER_AES256;
 ```
-
-A wolfSSL built `NO_DES3` cannot produce the triple DES fallback and will report `WOLFCERT_ERR_UNSUPPORTED` against a CA that advertises no AES.
 
 **Fingerprint verification is now the library's job.** Delete your helper and call `wolfcert_scep_verify_ca_fingerprint`, which hashes the DER certificate and compares in constant time.
 
