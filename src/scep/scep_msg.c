@@ -916,6 +916,16 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
             break;
         }
 
+        /* RFC 8894 section 3.2.1: the text attributes are PrintableStrings,
+         * which hold no NUL. */
+        if ((bit & (SCEP_ATTR_MSG_TYPE | SCEP_ATTR_PKI_STATUS |
+                    SCEP_ATTR_FAIL_INFO)) != 0 &&
+            (v[off] != 0x13 || memchr(v + voff, 0, vlen) != NULL)) {
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
+                              "signed attribute is not a PrintableString");
+            break;
+        }
+
         off = voff;
 
         /* messageType, pkiStatus and failInfo are text; the transactionID and

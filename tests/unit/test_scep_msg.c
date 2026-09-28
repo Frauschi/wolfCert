@@ -1969,6 +1969,10 @@ static const byte scep_oid_msg_type[] =
     { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x02 };
 static const byte scep_oid_trans_id[] =
     { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x07 };
+static const byte scep_oid_pki_status[] =
+    { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x03 };
+static const byte scep_oid_fail_info[] =
+    { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x04 };
 
 /* Sign fixed content with the caller's signed attributes. Taking them raw is
  * what lets a test build an attribute set wolfCert itself never emits.
@@ -2231,6 +2235,92 @@ static int test_multi_value_signed_attrib(void)
     return 0;
 }
 
+/* Sign one text attribute with raw value bytes and parse it back. On success
+ * the parsed string must equal `expect`; on rejection nothing may be left. */
+static int check_text_attrib(const uint8_t* ca_der, size_t ca_len,
+                             const uint8_t* ca_key, size_t ca_key_len,
+                             const byte* oid, word32 oid_sz,
+                             const byte* value, word32 value_sz,
+                             int expect_rc, const char* expect)
+{
+    PKCS7Attrib    attrib;
+    uint8_t*       msg     = NULL;
+    size_t         msg_len = 0;
+    WolfCertBuffer env     = { 0 };
+    char*          mt      = NULL;
+    char*          ps      = NULL;
+    char*          fi      = NULL;
+    const char*    got;
+    int            rc;
+    int            str_ok;
+
+    attrib.oid     = oid;
+    attrib.oidSz   = oid_sz;
+    attrib.value   = value;
+    attrib.valueSz = value_sz;
+    REQUIRE(make_signed_with_attribs(ca_der, ca_len, ca_key, ca_key_len,
+                                     &attrib, 1, &msg, &msg_len) == 0);
+
+    rc = wolfcert_scep_parse_pki_message(msg, msg_len, &env,
+            NULL, NULL, NULL, NULL, NULL, NULL,
+            &mt, &ps, NULL, NULL, &fi, NULL);
+
+    got = mt != NULL ? mt : (ps != NULL ? ps : fi);
+    if (expect_rc == WOLFCERT_OK)
+        str_ok = got != NULL && strcmp(got, expect) == 0;
+    else
+        str_ok = mt == NULL && ps == NULL && fi == NULL;
+
+    WOLFCERT_XFREE(mt, NULL);
+    WOLFCERT_XFREE(ps, NULL);
+    WOLFCERT_XFREE(fi, NULL);
+    wolfcert_buffer_free(&env);
+    free(msg);
+
+    REQUIRE(rc == expect_rc);
+    REQUIRE(str_ok);
+    return 0;
+}
+
+/* RFC 8894 section 3.2.1 carries messageType, pkiStatus and failInfo as
+ * PrintableStrings. Another tag, or a NUL inside, must not parse. */
+static int test_text_attrib_printable(void)
+{
+    static const byte ps_ok[]   = { 0x13, 0x01, '2' };
+    static const byte ps_nul[]  = { 0x13, 0x02, '2', 0x00 };
+    static const byte fi_nul[]  = { 0x13, 0x03, '0', 0x00, 'x' };
+    static const byte mt_utf8[] = { 0x0C, 0x01, '3' };
+    uint8_t* ca_der  = NULL;
+    size_t   ca_len  = 0;
+    uint8_t* ca_key  = NULL;
+    size_t   ca_key_len = 0;
+    int      ret = 0;
+
+    REQUIRE(make_ca(&ca_der, &ca_len, &ca_key, &ca_key_len) == 0);
+
+    if (check_text_attrib(ca_der, ca_len, ca_key, ca_key_len,
+                          scep_oid_pki_status, sizeof(scep_oid_pki_status),
+                          ps_ok, sizeof(ps_ok), WOLFCERT_OK, "2") != 0 ||
+        check_text_attrib(ca_der, ca_len, ca_key, ca_key_len,
+                          scep_oid_pki_status, sizeof(scep_oid_pki_status),
+                          ps_nul, sizeof(ps_nul),
+                          WOLFCERT_ERR_PROTOCOL, NULL) != 0 ||
+        check_text_attrib(ca_der, ca_len, ca_key, ca_key_len,
+                          scep_oid_fail_info, sizeof(scep_oid_fail_info),
+                          fi_nul, sizeof(fi_nul),
+                          WOLFCERT_ERR_PROTOCOL, NULL) != 0 ||
+        check_text_attrib(ca_der, ca_len, ca_key, ca_key_len,
+                          scep_oid_msg_type, sizeof(scep_oid_msg_type),
+                          mt_utf8, sizeof(mt_utf8),
+                          WOLFCERT_ERR_PROTOCOL, NULL) != 0) {
+        ret = 1;
+    }
+
+    free(ca_der);
+    free(ca_key);
+    return ret;
+}
+
 int main(void)
 {
     REQUIRE(test_static_mem_init() == 0);
@@ -2283,6 +2373,8 @@ int main(void)
     if (test_duplicate_signed_attrib())
         return 1;
     if (test_multi_value_signed_attrib())
+        return 1;
+    if (test_text_attrib_printable())
         return 1;
 #ifdef HAVE_ECC
     if (test_envelop_rejects_ecc_ra())

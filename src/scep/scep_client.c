@@ -905,6 +905,15 @@ static int scep_finish(void* heap,
     }
     WOLFCERT_XFREE(rx_rn, heap);
 
+    /* RFC 8894 section 3.2.1.3: a CertRep carries pkiStatus 0, 2 or 3. */
+    if (rc == WOLFCERT_OK &&
+        (status == NULL || (strcmp(status, "0") != 0 &&
+                            strcmp(status, "2") != 0 &&
+                            strcmp(status, "3") != 0))) {
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
+                          "CertRep pkiStatus missing or not 0, 2 or 3");
+    }
+
     if (rc == WOLFCERT_OK) {
         /* Echo the transactionID in the result so callers can poll later;
          * ownership of rx_tid moves to out. */
@@ -912,10 +921,10 @@ static int scep_finish(void* heap,
         out->transaction_id_len = rx_tid_len;
         rx_tid = NULL;
 
-        if (status != NULL && strcmp(status, "3") == 0) {
+        if (strcmp(status, "3") == 0) {
             out->status = WOLFCERT_SCEP_STATUS_PENDING;
         }
-        else if (status == NULL || strcmp(status, "0") != 0) {
+        else if (strcmp(status, "2") == 0) {
             out->status = WOLFCERT_SCEP_STATUS_FAILURE;
             /* RFC 8894 section 3.2.1.4: a FAILURE CertRep carries a failInfo
              * PrintableString of "0".."4". Surface it to the caller; leave the

@@ -636,7 +636,46 @@ struct msgtype_ctx {
     char   reqline[256]; /* the HTTP request line, for the GET operations */
     size_t tid_len;      /* transactionID length, 0 if not reached */
     char   cipher[8];    /* content-encryption OID seen in the EnvelopedData */
+    /* When reply is set, answer with a CertRep signed by rep_cert/rep_key that
+     * carries rep_status; a NULL rep_status leaves pkiStatus out. */
+    const uint8_t* rep_cert;
+    size_t         rep_cert_len;
+    const uint8_t* rep_key;
+    size_t         rep_key_len;
+    const char*    rep_status;
+    int            reply;
 };
+
+/* Send a CertRep echoing the request's transactionID and senderNonce. */
+static void msgtype_send_cert_rep(const struct msgtype_ctx* mc, int cs,
+                                  const uint8_t* tid, size_t tid_len,
+                                  const uint8_t* snonce, size_t snonce_len)
+{
+    uint8_t my_nonce[16];
+    memset(my_nonce, 0x3C, sizeof(my_nonce));
+    WolfCertScepAttrs attrs = {
+        .transaction_id  = tid,      .transaction_id_len  = tid_len,
+        .sender_nonce    = my_nonce, .sender_nonce_len    = sizeof(my_nonce),
+        .message_type    = "3",      .pki_status          = mc->rep_status,
+        .recipient_nonce = snonce,   .recipient_nonce_len = snonce_len,
+    };
+    WolfCertBuffer rep = { 0 };
+    if (wolfcert_scep_build_pki_message(NULL, 0, mc->rep_cert, mc->rep_cert_len,
+                                        mc->rep_key, mc->rep_key_len, SHA256h,
+                                        &attrs, &rep, NULL) != WOLFCERT_OK)
+        return;
+
+    char hdr[160];
+    int hl = snprintf(hdr, sizeof(hdr),
+                      "HTTP/1.1 200 OK\r\n"
+                      "Content-Type: application/x-pki-message\r\n"
+                      "Content-Length: %zu\r\n"
+                      "Connection: close\r\n\r\n", rep.len);
+    if (hl > 0 && (size_t)hl < sizeof(hdr) &&
+        write_all_fd(cs, (const uint8_t*)hdr, (size_t)hl) == 0)
+        (void)write_all_fd(cs, rep.data, rep.len);
+    wolfcert_buffer_free(&rep);
+}
 
 static void* msgtype_srv_thread(void* arg)
 {
@@ -693,10 +732,12 @@ static void* msgtype_srv_thread(void* arg)
         char*    mt  = NULL;
         uint8_t* tid = NULL;
         size_t   tid_len = 0;
+        uint8_t* sn  = NULL;
+        size_t   sn_len = 0;
         WolfCertBuffer env = { 0 };
         if (wolfcert_scep_parse_pki_message(buf + hdr_end, want, &env,
                                             &tid, &tid_len,     /* txid      */
-                                            NULL, NULL,         /* senderNonce */
+                                            &sn, &sn_len,       /* senderNonce */
                                             NULL, NULL,         /* recipNonce  */
                                             &mt,                /* messageType */
                                             NULL,               /* pkiStatus   */
@@ -723,14 +764,19 @@ static void* msgtype_srv_thread(void* arg)
                 else if (memmem(env.data, env.len, OID_DES3, sizeof(OID_DES3)))
                     snprintf(mc->cipher, sizeof(mc->cipher), "des3");
             }
+
+            if (mc->reply)
+                msgtype_send_cert_rep(mc, cs, tid, tid_len, sn, sn_len);
         }
         /* Parser output comes from the wolfCert heap, not libc. */
         WOLFCERT_XFREE(mt, NULL);
         WOLFCERT_XFREE(tid, NULL);
+        WOLFCERT_XFREE(sn, NULL);
         wolfcert_buffer_free(&env);
     }
 
-    /* The client's round trip fails from here; the request is all we wanted. */
+    /* Without a reply the client's round trip fails here, which is fine when
+     * the request is all the caller wanted. */
     close(cs);
     return NULL;
 }
@@ -816,6 +862,58 @@ static int check_renewal_msg_type(const WolfCertScepCaps* caps,
     pthread_join(tid, NULL);
 
     REQUIRE(strcmp(mc.seen, expect) == 0);
+    return 0;
+}
+
+/* Answer a PKCSReq with a CertRep that passes the signer, transactionID and
+ * recipientNonce checks but carries the given pkiStatus (NULL omits it). */
+static int check_pki_status(const WolfCertScepCaps* caps,
+                            const uint8_t* signer_cert, size_t signer_cert_len,
+                            const WolfCertKey* key,
+                            const uint8_t* csr, size_t csr_len,
+                            const char* status, int expect_rc,
+                            WolfCertScepStatus expect_status)
+{
+    uint8_t key_der[4096];
+    int kl = wc_RsaKeyToDer((RsaKey*)key->impl, key_der, sizeof(key_der));
+    REQUIRE(kl > 0);
+
+    struct msgtype_ctx mc = {
+        .listen_fd    = -1,
+        .rep_cert     = signer_cert, .rep_cert_len = signer_cert_len,
+        .rep_key      = key_der,     .rep_key_len  = (size_t)kl,
+        .rep_status   = status,
+        .reply        = 1,
+    };
+    pthread_t tid;
+    int port = 0;
+    mc.listen_fd = listen_loopback(&port);
+    REQUIRE(mc.listen_fd >= 0);
+    REQUIRE(pthread_create(&tid, NULL, msgtype_srv_thread, &mc) == 0);
+
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
+
+    WolfCertScepResult r = { 0 };
+    int rc = wolfcert_scep_pkcs_req_ex(&cli, caps, signer_cert, signer_cert_len,
+                                       signer_cert, signer_cert_len, key,
+                                       csr, csr_len, &r);
+    WolfCertScepStatus got = r.status;
+    int got_tid  = r.transaction_id != NULL || r.transaction_id_len != 0;
+    int got_cert = r.cert_pem.data != NULL || r.cert_pem.len != 0;
+    int got_fail = r.fail_info;
+    wolfcert_scep_result_free(&r);
+    pthread_join(tid, NULL);
+    wc_ForceZero(key_der, sizeof(key_der));
+
+    REQUIRE(rc == expect_rc);
+    REQUIRE(got == expect_status);
+    /* Only an accepted CertRep hands back its transactionID. The reply never
+     * carries a certificate or failInfo. */
+    REQUIRE(got_tid == (expect_rc == WOLFCERT_OK));
+    REQUIRE(got_cert == 0);
+    REQUIRE(got_fail == -1);
     return 0;
 }
 
@@ -1342,6 +1440,25 @@ int main(void)
                                    csr.data, csr.len,
                                    WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ,
                                    "19") == 0);
+
+    /* ---- pkiStatus outside RFC 8894's 0/2/3, or absent, is a protocol
+     * error. "2" is the control: the same reply passes every other check. */
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, "2", WOLFCERT_OK,
+                             WOLFCERT_SCEP_STATUS_FAILURE) == 0);
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, "1", WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET) == 0);
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, NULL, WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET) == 0);
+    /* A valid code as a prefix is not a match. */
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, "30", WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET) == 0);
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, "00", WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET) == 0);
 
     /* ...and the same options read off the wire, since the server de-envelops
      * any OID and so cannot tell an honoured override from an ignored one. */
