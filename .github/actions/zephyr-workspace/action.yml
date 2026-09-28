@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: zephyr-workspace
+description: >
+  Restore or create the west workspace (Zephyr + wolfSSL) in ~/zephyrproject
+  with its venv in ~/zephyr-venv, install the Zephyr SDK with one GNU
+  toolchain, and export ZEPHYR_SDK_INSTALL_DIR.
+
+inputs:
+  zephyr-ref:
+    description: "Zephyr git ref for west init"
+    required: true
+  wolfssl-ref:
+    description: "wolfSSL git ref added to the west manifest"
+    required: true
+  sdk-version:
+    description: "Zephyr SDK version"
+    required: true
+  toolchain:
+    description: "SDK GNU toolchain to install, e.g. x86_64-zephyr-elf"
+    required: true
+  save:
+    description: "Save the workspace cache after a miss (one job only, so jobs cannot race on the key)"
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Install Zephyr build dependencies
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          ninja-build gperf ccache dfu-util device-tree-compiler wget \
+          python3-dev python3-pip python3-setuptools python3-wheel \
+          xz-utils file make gcc libsdl2-dev libmagic1
+
+    # Keyed on everything baked into the restored workspace: the refs and the
+    # manifest script that wrote them, plus the interpreter the venv records.
+    # west update below still moves wolfSSL to the current tip of wolfssl-ref.
+    - name: Workspace cache key
+      id: wskey
+      shell: bash
+      run: |
+        h="${{ hashFiles('scripts/ci/zephyr-add-wolfssl.py') }}"
+        echo "key=zephyr-ws-${RUNNER_OS}-${{ inputs.zephyr-ref }}-${{ inputs.wolfssl-ref }}-${h:0:12}-$(python3 -V | tr -d ' ')" \
+          >> "$GITHUB_OUTPUT"
+
+    - name: Restore the Zephyr workspace
+      id: ws
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/zephyrproject
+          ~/zephyr-venv
+        key: ${{ steps.wskey.outputs.key }}
+
+    - name: Initialise the west workspace
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ ! -x "$HOME/zephyr-venv/bin/west" ]; then
+          python3 -m venv "$HOME/zephyr-venv"
+          "$HOME/zephyr-venv/bin/pip" install -q --upgrade pip west
+        fi
+        if [ ! -d "$HOME/zephyrproject/.west" ]; then
+          "$HOME/zephyr-venv/bin/west" init -m https://github.com/zephyrproject-rtos/zephyr \
+            --mr "${{ inputs.zephyr-ref }}" "$HOME/zephyrproject"
+        fi
+
+    - name: Add wolfSSL to the manifest
+      shell: bash
+      run: |
+        ./scripts/ci/zephyr-add-wolfssl.py \
+          "$HOME/zephyrproject/zephyr/west.yml" "${{ inputs.wolfssl-ref }}"
+
+    - name: Update west modules
+      shell: bash
+      run: |
+        cd "$HOME/zephyrproject"
+        "$HOME/zephyr-venv/bin/west" update --narrow -o=--depth=1
+        "$HOME/zephyr-venv/bin/pip" install -q -r zephyr/scripts/requirements.txt
+
+    - name: Save the Zephyr workspace
+      if: inputs.save == 'true' && steps.ws.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ~/zephyrproject
+          ~/zephyr-venv
+        key: ${{ steps.wskey.outputs.key }}
+
+    - name: Install the Zephyr SDK
+      shell: bash
+      run: |
+        set -euo pipefail
+        v="${{ inputs.sdk-version }}"
+        cd "$HOME"
+        wget -q "https://github.com/zephyrproject-rtos/sdk-ng/releases/download/v${v}/zephyr-sdk-${v}_linux-x86_64_minimal.tar.xz"
+        tar xf "zephyr-sdk-${v}_linux-x86_64_minimal.tar.xz"
+        cd "zephyr-sdk-${v}"
+        ./setup.sh -h -c -t "${{ inputs.toolchain }}"
+        echo "ZEPHYR_SDK_INSTALL_DIR=$HOME/zephyr-sdk-${v}" >> "$GITHUB_ENV"
