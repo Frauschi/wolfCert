@@ -637,12 +637,13 @@ struct msgtype_ctx {
     size_t tid_len;      /* transactionID length, 0 if not reached */
     char   cipher[8];    /* content-encryption OID seen in the EnvelopedData */
     /* When reply is set, answer with a CertRep signed by rep_cert/rep_key that
-     * carries rep_status; a NULL rep_status leaves pkiStatus out. */
+     * carries rep_status and rep_fail_info; NULL leaves that attribute out. */
     const uint8_t* rep_cert;
     size_t         rep_cert_len;
     const uint8_t* rep_key;
     size_t         rep_key_len;
     const char*    rep_status;
+    const char*    rep_fail_info;
     int            reply;
 };
 
@@ -658,6 +659,7 @@ static void msgtype_send_cert_rep(const struct msgtype_ctx* mc, int cs,
         .sender_nonce    = my_nonce, .sender_nonce_len    = sizeof(my_nonce),
         .message_type    = "3",      .pki_status          = mc->rep_status,
         .recipient_nonce = snonce,   .recipient_nonce_len = snonce_len,
+        .fail_info       = mc->rep_fail_info,
     };
     WolfCertBuffer rep = { 0 };
     if (wolfcert_scep_build_pki_message(NULL, 0, mc->rep_cert, mc->rep_cert_len,
@@ -866,13 +868,15 @@ static int check_renewal_msg_type(const WolfCertScepCaps* caps,
 }
 
 /* Answer a PKCSReq with a CertRep that passes the signer, transactionID and
- * recipientNonce checks but carries the given pkiStatus (NULL omits it). */
+ * recipientNonce checks but carries the given pkiStatus and failInfo (NULL
+ * omits either). */
 static int check_pki_status(const WolfCertScepCaps* caps,
                             const uint8_t* signer_cert, size_t signer_cert_len,
                             const WolfCertKey* key,
                             const uint8_t* csr, size_t csr_len,
-                            const char* status, int expect_rc,
-                            WolfCertScepStatus expect_status)
+                            const char* status, const char* fail_info,
+                            int expect_rc, WolfCertScepStatus expect_status,
+                            int expect_fail)
 {
     uint8_t key_der[4096];
     int kl = wc_RsaKeyToDer((RsaKey*)key->impl, key_der, sizeof(key_der));
@@ -883,6 +887,7 @@ static int check_pki_status(const WolfCertScepCaps* caps,
         .rep_cert     = signer_cert, .rep_cert_len = signer_cert_len,
         .rep_key      = key_der,     .rep_key_len  = (size_t)kl,
         .rep_status   = status,
+        .rep_fail_info = fail_info,
         .reply        = 1,
     };
     pthread_t tid;
@@ -910,10 +915,10 @@ static int check_pki_status(const WolfCertScepCaps* caps,
     REQUIRE(rc == expect_rc);
     REQUIRE(got == expect_status);
     /* Only an accepted CertRep hands back its transactionID. The reply never
-     * carries a certificate or failInfo. */
+     * carries a certificate. */
     REQUIRE(got_tid == (expect_rc == WOLFCERT_OK));
     REQUIRE(got_cert == 0);
-    REQUIRE(got_fail == -1);
+    REQUIRE(got_fail == expect_fail);
     return 0;
 }
 
@@ -1444,21 +1449,50 @@ int main(void)
     /* ---- pkiStatus outside RFC 8894's 0/2/3, or absent, is a protocol
      * error. "2" is the control: the same reply passes every other check. */
     REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
-                             dk, csr.data, csr.len, "2", WOLFCERT_OK,
-                             WOLFCERT_SCEP_STATUS_FAILURE) == 0);
+                             dk, csr.data, csr.len, "2", "0", WOLFCERT_OK,
+                             WOLFCERT_SCEP_STATUS_FAILURE, 0) == 0);
     REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
-                             dk, csr.data, csr.len, "1", WOLFCERT_ERR_PROTOCOL,
-                             WOLFCERT_SCEP_STATUS_UNSET) == 0);
+                             dk, csr.data, csr.len, "2", "4", WOLFCERT_OK,
+                             WOLFCERT_SCEP_STATUS_FAILURE, 4) == 0);
     REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
-                             dk, csr.data, csr.len, NULL, WOLFCERT_ERR_PROTOCOL,
-                             WOLFCERT_SCEP_STATUS_UNSET) == 0);
+                             dk, csr.data, csr.len, "1", NULL,
+                             WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET, -1) == 0);
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, NULL, NULL,
+                             WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET, -1) == 0);
     /* A valid code as a prefix is not a match. */
     REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
-                             dk, csr.data, csr.len, "30", WOLFCERT_ERR_PROTOCOL,
-                             WOLFCERT_SCEP_STATUS_UNSET) == 0);
+                             dk, csr.data, csr.len, "30", NULL,
+                             WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET, -1) == 0);
     REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
-                             dk, csr.data, csr.len, "00", WOLFCERT_ERR_PROTOCOL,
-                             WOLFCERT_SCEP_STATUS_UNSET) == 0);
+                             dk, csr.data, csr.len, "00", NULL,
+                             WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET, -1) == 0);
+
+    /* A FAILURE whose failInfo is outside 0..4, or absent, is also an error. */
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, "2", "5",
+                             WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET, -1) == 0);
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, "2", "12",
+                             WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET, -1) == 0);
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, "2", NULL,
+                             WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET, -1) == 0);
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, "2", "",
+                             WOLFCERT_ERR_PROTOCOL,
+                             WOLFCERT_SCEP_STATUS_UNSET, -1) == 0);
+    /* A failInfo on a non-FAILURE CertRep is ignored. */
+    REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
+                             dk, csr.data, csr.len, "3", "2", WOLFCERT_OK,
+                             WOLFCERT_SCEP_STATUS_PENDING, -1) == 0);
 
     /* ...and the same options read off the wire, since the server de-envelops
      * any OID and so cannot tell an honoured override from an ignored one. */

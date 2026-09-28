@@ -914,6 +914,14 @@ static int scep_finish(void* heap,
                           "CertRep pkiStatus missing or not 0, 2 or 3");
     }
 
+    /* RFC 8894 section 3.2.1.4: a FAILURE CertRep carries failInfo 0..4. */
+    if (rc == WOLFCERT_OK && strcmp(status, "2") == 0 &&
+        (fail_info == NULL || fail_info[0] < '0' || fail_info[0] > '4' ||
+         fail_info[1] != '\0')) {
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
+                          "FAILURE CertRep failInfo missing or not 0..4");
+    }
+
     if (rc == WOLFCERT_OK) {
         /* Echo the transactionID in the result so callers can poll later;
          * ownership of rx_tid moves to out. */
@@ -925,15 +933,8 @@ static int scep_finish(void* heap,
             out->status = WOLFCERT_SCEP_STATUS_PENDING;
         }
         else if (strcmp(status, "2") == 0) {
-            out->status = WOLFCERT_SCEP_STATUS_FAILURE;
-            /* RFC 8894 section 3.2.1.4: a FAILURE CertRep carries a failInfo
-             * PrintableString of "0".."4". Surface it to the caller; leave the
-             * default -1 when the server omitted the attribute. */
-            if (fail_info != NULL &&
-                fail_info[0] >= '0' && fail_info[0] <= '4' &&
-                fail_info[1] == '\0') {
-                out->fail_info = fail_info[0] - '0';
-            }
+            out->status    = WOLFCERT_SCEP_STATUS_FAILURE;
+            out->fail_info = fail_info[0] - '0';
         }
         else {
             /* status "0" is SUCCESS: de-envelop the CertRep and convert the

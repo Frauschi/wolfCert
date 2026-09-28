@@ -120,7 +120,7 @@ typedef struct {
     size_t             transaction_id_len;
     /* RFC 8894 section 3.2.1.4 failInfo; meaningful only when status==FAILURE.
      * 0=badAlg, 1=badMessageCheck, 2=badRequest, 3=badTime, 4=badCertId.
-     * -1 if the server did not include the attribute. */
+     * -1 unless status is FAILURE. */
     int                fail_info;
     void*              heap;
 } WolfCertScepResult;
