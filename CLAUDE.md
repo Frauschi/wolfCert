@@ -189,6 +189,27 @@ Minimal orientation:
   non-RSA keys with `WOLFCERT_ERR_UNSUPPORTED`. EST is the right
   protocol for Ed25519 / Ed448 / ML-DSA.
 
+## Adding a Zephyr board to the EST sample
+
+Supporting a new board in `zephyr/samples/wolfcert_est_client/` takes all of:
+
+1. `boards/<board>.conf`, plus a `.overlay` if the devicetree needs changing.
+   What the board must supply is in
+   [`zephyr/README.md` → "Adding a board"](zephyr/README.md#adding-a-board).
+2. A `build_only: true` scenario in the sample's `sample.yaml` with
+   `platform_allow: <board target>`.
+3. `EXTRA_DIST` lines for the new files in `zephyr/include.am`.
+4. A CI job in `.github/workflows/zephyr.yml` modelled on the `mcxn` job:
+   `.github/actions/zephyr-workspace` with the board's SDK toolchain, twister
+   `--build-only` for the board, then `scripts/ci/twister-assert-ran.py
+   --built-only <scenario>`.
+5. A row in both board tables of
+   [`zephyr/README.md` → "EST client sample"](zephyr/README.md#est-client-sample).
+6. A run on the hardware: enroll against a host `wolfcert-server`, and check
+   every thread's stack headroom with `CONFIG_THREAD_ANALYZER`, since the
+   thread-local data takes room on each one
+   ([`zephyr/README.md` → "Sizing"](zephyr/README.md#sizing)).
+
 ## Pointers to the rest of the docs
 
 - `README.md` - user-facing quick start.
