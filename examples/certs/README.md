@@ -43,3 +43,20 @@ build/wolfcert-client enroll --proto est \
 ```
 
 Swap `ecc` for `mldsa` to drive the ML-DSA hierarchy.
+
+## A server certificate for another host
+
+For a server that devices reach at an address the checked-in server leaf does
+not name, issue a leaf signed by the `ecc/` CA with
+[`gen-server-cert.sh`](gen-server-cert.sh), which needs OpenSSL >= 3.0:
+
+```sh
+examples/certs/gen-server-cert.sh -o est-lan IP:192.0.2.10 DNS:est.example.com
+```
+
+Pass the pair to `wolfcert-server` with `--tls-cert est-lan/server-cert.pem
+--tls-key est-lan/server-key.pem`, and listen on `0.0.0.0:8443` rather than the
+`127.0.0.1` in "Use with the CLIs" so that other hosts can reach it.
+
+The leaf takes the CA's validity period, so a client whose clock accepts the CA
+accepts the leaf too, whenever it was issued.
