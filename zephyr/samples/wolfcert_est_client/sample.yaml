@@ -7,9 +7,12 @@ common:
   harness: console
   harness_config:
     fixture: wolfcert_est_server
-    type: one_line
+    type: multi_line
+    ordered: true
     regex:
       - "enrolled: [1-9][0-9]* bytes"
+      - "-----BEGIN CERTIFICATE-----"
+      - "-----END CERTIFICATE-----"
 tests:
   sample.wolfcert.est_client:
     timeout: 120

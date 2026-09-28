@@ -29,6 +29,9 @@ Expected output:
 
 ```
 enrolled: <N> bytes
+-----BEGIN CERTIFICATE-----
+...
+-----END CERTIFICATE-----
 ```
 
 The sample reaches the host at `10.0.2.2`, the QEMU SLIRP gateway. The
@@ -37,8 +40,10 @@ left on.
 
 ## Adapting it
 
-- **Trust anchor.** `examples/certs/ecc/ca-cert.pem` is embedded by
-  `generate_inc_file_for_target`. Swap in your CA and the URL to match.
+- **Server settings.** The URL, Basic credentials, subject and trust anchor
+  are `CONFIG_WOLFCERT_SAMPLE_*` options in this sample's `Kconfig`. Set
+  them in a file passed with `-DEXTRA_CONF_FILE=<file>`. The trust anchor
+  defaults to `examples/certs/ecc/ca-cert.pem`.
 - **RNG.** `CONFIG_TEST_RANDOM_GENERATOR=y` is not a real random source, and
   keys generated from it are predictable. Drop it and supply a hardware
   entropy source before generating a key you intend to keep.

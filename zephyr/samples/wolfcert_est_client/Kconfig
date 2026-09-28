@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+
+mainmenu "wolfCert EST client sample"
+
+menu "wolfCert EST client sample"
+
+# zephyr/README.md (EST client sample) describes each option.
+
+config WOLFCERT_SAMPLE_EST_URL
+	string "EST server URL"
+	default "https://10.0.2.2:8443/.well-known/est"
+
+config WOLFCERT_SAMPLE_EST_USER
+	string "EST HTTP Basic user name"
+	default "alice"
+
+config WOLFCERT_SAMPLE_EST_PASS
+	string "EST HTTP Basic password"
+	default "hunter2"
+
+config WOLFCERT_SAMPLE_SUBJECT
+	string "Certificate subject"
+	default "CN=zephyr-device"
+
+config WOLFCERT_SAMPLE_CA_CERT
+	string "Trust anchor PEM file"
+	default ""
+
+endmenu
+
+source "Kconfig.zephyr"
