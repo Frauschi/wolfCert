@@ -67,10 +67,16 @@ optional key types wolfCert picks up when available:
     --enable-pkcs7 --enable-certgen --enable-certreq --enable-certext \
     --enable-keygen --enable-ecc --enable-cryptocb --enable-base64encode \
     --enable-ed25519 --enable-ed448 --enable-mldsa \
-    --enable-postauth --enable-opensslextra --enable-ip-alt-name \
-    --enable-des3 --enable-sni \
-    CPPFLAGS="-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL"
+    --enable-postauth --enable-ip-alt-name --enable-des3 --enable-sni \
+    CPPFLAGS="-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL -DKEEP_PEER_CERT \
+              -DWOLFSSL_PUBLIC_ASN -DWOLFSSL_HAVE_TLS_UNIQUE"
 ```
+
+`-DKEEP_PEER_CERT` and `-DWOLFSSL_HAVE_TLS_UNIQUE` are needed only by the test
+server's post-handshake-auth mode (`wolfcert-server --tls-post-handshake-auth`).
+Without them that mode returns `WOLFCERT_ERR_UNSUPPORTED`, and
+`est_pha_roundtrip` / `est_async_roundtrip` skip. `--enable-opensslextra`
+gives `KEEP_PEER_CERT` but not `WOLFSSL_HAVE_TLS_UNIQUE`.
 
 ### Header-based configuration (no build system)
 
