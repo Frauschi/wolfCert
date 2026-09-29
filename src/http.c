@@ -446,7 +446,7 @@ struct WolfCertHttpSession {
     long          sm_content_length;  /* -1 if unknown */
     char*         sm_content_type;     /* taken from headers */
     int           sm_status;
-    int           sm_retry_after_sec;   /* delta-seconds; 0 if absent */
+    int           sm_retry_after_sec;   /* seconds; 0 if absent */
     int           sm_head_request;
     int           sm_interim;           /* interim 1xx blocks dropped so far */
     WolfCertHttpResponse* sm_resp;     /* caller's resp; written to on DONE */
@@ -639,6 +639,186 @@ static char* find_header(const char* headers, const char* name, void* heap)
         p = nl + 2;
     }
     return NULL;
+}
+
+#define WOLFCERT_HTTP_MAX_RETRY_AFTER 86400
+/* 2026-01-01 00:00:00 UTC; an earlier wc_Time() is a clock not yet set. */
+#define WOLFCERT_HTTP_CLOCK_FLOOR     1767225600
+
+static int only_ows(const char* p)
+{
+    while (*p == ' ' || *p == '\t')
+        ++p;
+
+    return *p == '\0';
+}
+
+#ifndef NO_ASN_TIME
+static int take_digits(const char** p, int min, int max, int* out)
+{
+    int n = 0;
+    int v = 0;
+
+    while (n < max && **p >= '0' && **p <= '9') {
+        v = v * 10 + (**p - '0');
+        ++*p;
+        ++n;
+    }
+    if (n < min)
+        return -1;
+
+    *out = v;
+    return 0;
+}
+
+static int take_month(const char** p)
+{
+    static const char months[] = "JanFebMarAprMayJunJulAugSepOctNovDec";
+    int i;
+
+    for (i = 0; i < 12; i++) {
+        if (strncmp(*p, months + i * 3, 3) == 0) {
+            *p += 3;
+            return i + 1;
+        }
+    }
+
+    return 0;
+}
+
+static int take_time_of_day(const char** p, int* out)
+{
+    int h;
+    int m;
+    int sec;
+
+    if (take_digits(p, 2, 2, &h) != 0 || *(*p)++ != ':' ||
+        take_digits(p, 2, 2, &m) != 0 || *(*p)++ != ':' ||
+        take_digits(p, 2, 2, &sec) != 0 || h > 23 || m > 59 || sec > 60)
+        return -1;
+
+    *out = h * 3600 + m * 60 + sec;
+    return 0;
+}
+
+/* Seconds since 1970-01-01 00:00:00 UTC for a UTC date and time of day. */
+static int64_t date_to_unix_time(int year, int mon, int day, int tod)
+{
+    int64_t y   = year - (mon <= 2);
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (mon + (mon > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+
+    return (era * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468)
+           * 86400 + tod;
+}
+
+/* Seconds since 1970-01-01 00:00:00 UTC for an HTTP-date (RFC 9110
+ * section 5.6.7), or -1. */
+static int64_t http_date_to_unix_time(const char* s, int64_t now)
+{
+    static const unsigned char mdays[12] = {
+        31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31
+    };
+    const char* p = s;
+    int     day = 0;
+    int     mon = 0;
+    int     year = 0;
+    int     tod = 0;
+    int     two_digit = 0;
+
+    while ((*p >= 'A' && *p <= 'Z') || (*p >= 'a' && *p <= 'z'))
+        ++p;
+
+    if (p[0] == ',' && p[1] == ' ') {
+        p += 2;
+        if (take_digits(&p, 2, 2, &day) != 0)
+            return -1;
+
+        if (*p == ' ') {
+            ++p;
+            mon = take_month(&p);
+            if (mon == 0 || *p++ != ' ' || take_digits(&p, 4, 4, &year) != 0)
+                return -1;
+        }
+        else if (*p == '-') {
+            ++p;
+            mon = take_month(&p);
+            if (mon == 0 || *p++ != '-' || take_digits(&p, 2, 2, &year) != 0)
+                return -1;
+            two_digit = 1;
+        }
+        else {
+            return -1;
+        }
+
+        if (*p++ != ' ' || take_time_of_day(&p, &tod) != 0 ||
+            strncmp(p, " GMT", 4) != 0 || !only_ows(p + 4))
+            return -1;
+    }
+    else if (p[0] == ' ') {
+        ++p;
+        mon = take_month(&p);
+        if (mon == 0 || *p++ != ' ')
+            return -1;
+        if (*p == ' ')
+            ++p;
+        if (take_digits(&p, 1, 2, &day) != 0 || *p++ != ' ' ||
+            take_time_of_day(&p, &tod) != 0 || *p++ != ' ' ||
+            take_digits(&p, 4, 4, &year) != 0 || !only_ows(p))
+            return -1;
+    }
+    else {
+        return -1;
+    }
+
+    /* A two-digit year more than 50 years ahead is the most recent past one. */
+    if (two_digit) {
+        year += 1900;
+        while (date_to_unix_time(year + 50, mon, day, tod) <= now)
+            year += 100;
+    }
+
+    if (day < 1 || day > mdays[mon - 1] ||
+        (mon == 2 && day == 29 &&
+         !((year % 4 == 0 && year % 100 != 0) || year % 400 == 0)))
+        return -1;
+
+    return date_to_unix_time(year, mon, day, tod);
+}
+#endif
+
+/* Retry-After as seconds to wait; see WolfCertHttpResponse.retry_after_sec. */
+static int parse_retry_after(const char* v)
+{
+    int64_t delay = 0;
+
+    if (*v >= '0' && *v <= '9') {
+        while (*v >= '0' && *v <= '9') {
+            if (delay <= WOLFCERT_HTTP_MAX_RETRY_AFTER)
+                delay = delay * 10 + (*v - '0');
+            ++v;
+        }
+        if (!only_ows(v))
+            delay = 0;
+    }
+#ifndef NO_ASN_TIME
+    else {
+        int64_t now = (int64_t)wc_Time(NULL);
+        int64_t when = -1;
+
+        if (now >= WOLFCERT_HTTP_CLOCK_FLOOR)
+            when = http_date_to_unix_time(v, now);
+        if (when >= 0)
+            delay = when - now;
+    }
+#endif
+
+    if (delay <= 0)
+        return 0;
+
+    return (delay > WOLFCERT_HTTP_MAX_RETRY_AFTER)
+               ? WOLFCERT_HTTP_MAX_RETRY_AFTER : (int)delay;
 }
 
 static int parse_status_line(const char* line, int* out_status)
@@ -1342,19 +1522,9 @@ static int http_read_response(WolfCertConn* c,
 
     if (rc == WOLFCERT_OK) {
         ct = find_header(headers_nt, "Content-Type", heap);
-        /* RFC 7231 section 7.1.3: `Retry-After` carries either delta-seconds
-         * or an HTTP-date. wolfCert parses delta-seconds only. */
         ra = find_header(headers_nt, "Retry-After", heap);
         if (ra != NULL) {
-            const char* p = ra;
-            while (*p == ' ' || *p == '\t')
-                ++p;
-
-            if (*p >= '0' && *p <= '9') {
-                long v = strtol(p, NULL, 10);
-                if (v > 0 && v <= 86400)
-                    retry_after = (int)v;
-            }
+            retry_after = parse_retry_after(ra);
             WOLFCERT_XFREE(ra, heap);
         }
 
@@ -1932,16 +2102,7 @@ static int inspect_headers(WolfCertHttpSession* s)
     s->sm_retry_after_sec = 0;
     char* ra = find_header(hdrs, "Retry-After", s->heap);
     if (ra != NULL) {
-        const char* p = ra;
-        while (*p == ' ' || *p == '\t')
-            ++p;
-
-        if (*p >= '0' && *p <= '9') {
-            long v = strtol(p, NULL, 10);
-            if (v > 0 && v <= 86400)
-                s->sm_retry_after_sec = (int)v;
-        }
-
+        s->sm_retry_after_sec = parse_retry_after(ra);
         WOLFCERT_XFREE(ra, s->heap);
     }
 

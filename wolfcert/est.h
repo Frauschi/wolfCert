@@ -145,7 +145,7 @@ WOLFCERT_API int wolfcert_csr_attrs_build(const WolfCertCsrAttrItem* items,
 /* ---- EST enrollment result (RFC 7030 section 4.2) -----------------------------
  *
  * RFC 7030 section 4.2.3 lets a server respond to /simpleenroll (or
- * /simplereenroll) with `202 Accepted` + `Retry-After: <delta>` when the
+ * /simplereenroll) with `202 Accepted` + `Retry-After` when the
  * request has been accepted but the certificate is not yet ready -
  * typically because the deployment requires manual approval. This is the
  * EST analogue of SCEP's `pkiStatus=PENDING`. The client is expected to
@@ -158,9 +158,9 @@ WOLFCERT_API int wolfcert_csr_attrs_build(const WolfCertCsrAttrItem* items,
  *                         the issued cert (PEM).
  *   status == PENDING   -> the call returns `WOLFCERT_OK`; `cert_pem` is
  *                         empty; `retry_after_sec` carries
- *                         the server's hint (0 when the server did not
- *                         send Retry-After, or sent it in the HTTP-date
- *                         form which wolfCert does not yet parse).
+ *                         the server's hint in seconds (0 when the
+ *                         server did not send a usable Retry-After; see
+ *                         `WolfCertHttpResponse.retry_after_sec`).
  *   status == FAILURE   -> any other HTTP status came back; the call returns
  *                         `WOLFCERT_ERR_AUTH` for 401/403, else
  *                         `WOLFCERT_ERR_HTTP`.
@@ -187,9 +187,9 @@ typedef struct {
     /* Populated and owned iff status == SUCCESS. */
     WolfCertBuffer    cert_pem;
     /* Server's suggested wait before the client should re-POST. Only
-     * meaningful when status == PENDING. 0 when the server did not send
-     * `Retry-After`; callers may apply their own backoff policy in that
-     * case. */
+     * meaningful when status == PENDING. 0 when the server sent no usable
+     * `Retry-After` (see `WolfCertHttpResponse.retry_after_sec`); callers may
+     * apply their own backoff policy in that case. */
     int               retry_after_sec;
     void*             heap;
 } WolfCertEstResult;
