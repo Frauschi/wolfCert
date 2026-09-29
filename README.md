@@ -72,11 +72,7 @@ optional key types wolfCert picks up when available:
               -DWOLFSSL_PUBLIC_ASN -DWOLFSSL_HAVE_TLS_UNIQUE"
 ```
 
-`-DKEEP_PEER_CERT` and `-DWOLFSSL_HAVE_TLS_UNIQUE` are needed only by the test
-server's post-handshake-auth mode (`wolfcert-server --tls-post-handshake-auth`).
-Without them that mode returns `WOLFCERT_ERR_UNSUPPORTED`, and
-`est_pha_roundtrip` / `est_async_roundtrip` skip. `--enable-opensslextra`
-gives `KEEP_PEER_CERT` but not `WOLFSSL_HAVE_TLS_UNIQUE`.
+`-DKEEP_PEER_CERT` and `-DWOLFSSL_HAVE_TLS_UNIQUE` are needed only by the test server. Its post-handshake-auth mode (`wolfcert-server --tls-post-handshake-auth`) needs both, and its `/simplereenroll` needs `KEEP_PEER_CERT` to compare the CSR with the certificate being renewed. Without them that mode returns `WOLFCERT_ERR_UNSUPPORTED`, an mTLS server answers `/simplereenroll` with 500, `est_pha_roundtrip` / `est_async_roundtrip` skip, and `est_mtls_roundtrip` skips its reenroll cases. `--enable-opensslextra` gives `KEEP_PEER_CERT` but not `WOLFSSL_HAVE_TLS_UNIQUE`.
 
 ### Header-based configuration (no build system)
 

@@ -61,6 +61,7 @@
 
 static void* server_thread(void* arg) { wolfcert_server_run((WolfCertServer*)arg); return NULL; }
 
+#ifdef KEEP_PEER_CERT
 static int impostor_customize(void* wolfssl_cert, void* ctx)
 {
     Cert* c = (Cert*)wolfssl_cert;
@@ -124,12 +125,14 @@ static int same_public_key(const uint8_t* a, size_t a_len, const uint8_t* b,
     wc_FreeDecodedCert(&dc[1]);
     return ret;
 }
+#endif
 
 /* Reenroll with a mismatched meta, with a renaming customize callback, then
- * with a fresh key. */
-static int test_client_reenroll_keeps_identity(const char* url,
-                                               const uint8_t* tls_cert,
-                                               size_t tls_cert_len)
+ * with a fresh key, against a server that trusts the cert being renewed. */
+static int test_client_reenroll_keeps_identity(const uint8_t* tls_cert,
+                                               size_t tls_cert_len,
+                                               const uint8_t* tls_key,
+                                               size_t tls_key_len)
 {
     static const char* const impostor_dns[] = { "impostor.example" };
     uint8_t* cur_cert = NULL;
@@ -140,6 +143,16 @@ static int test_client_reenroll_keeps_identity(const char* url,
     WolfCertKey* out_key = NULL;
     WolfCertBuffer issued = { 0 };
     WolfCertCertMeta meta;
+    WolfCertServerCfgSrv scfg = {
+        .protocol         = WOLFCERT_PROTO_EST,
+        .bind_host        = "127.0.0.1",
+        .bind_port        = 0,
+        .tls_cert_pem     = tls_cert, .tls_cert_pem_len = tls_cert_len,
+        .tls_key_pem      = tls_key,  .tls_key_pem_len  = tls_key_len,
+    };
+    WolfCertServer* srv = NULL;
+    pthread_t tid;
+    char url[128];
     WolfCertServerCfg cli = {
         .protocol          = WOLFCERT_PROTO_EST,
         .server_url        = url,
@@ -147,15 +160,24 @@ static int test_client_reenroll_keeps_identity(const char* url,
         .trust_anchors_len = tls_cert_len,
         .verify_server     = 1,
     };
+#ifdef KEEP_PEER_CERT
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE,
                             .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     int called = 0;
+#endif
 
     REQUIRE(mint_self_id("reenroll-device", 0, &cur_cert, &cur_cert_len,
                          &cur_key_pem, &cur_key_len) == 0);
     REQUIRE(wolfcert_key_from_pem(cur_key_pem, cur_key_len, NULL, &cur_key)
             == WOLFCERT_OK);
+
+    scfg.tls_client_ca_pem     = cur_cert;
+    scfg.tls_client_ca_pem_len = cur_cert_len;
+    REQUIRE(wolfcert_server_start(&scfg, &srv) == WOLFCERT_OK);
+    REQUIRE(pthread_create(&tid, NULL, server_thread, srv) == 0);
+    snprintf(url, sizeof(url), "https://127.0.0.1:%u/.well-known/est",
+             wolfcert_server_port(srv));
 
     memset(&meta, 0, sizeof(meta));
     meta.subject_dn = "CN=impostor";
@@ -170,6 +192,7 @@ static int test_client_reenroll_keeps_identity(const char* url,
                                      cur_key, NULL, &meta, &out_key, &issued)
             == WOLFCERT_ERR_BAD_ARG);
 
+#ifdef KEEP_PEER_CERT
     /* The caller's callback still runs but cannot rename the cert. */
     memset(&meta, 0, sizeof(meta));
     meta.customize     = impostor_customize;
@@ -190,7 +213,11 @@ static int test_client_reenroll_keeps_identity(const char* url,
     REQUIRE(check_renewed_identity(&issued) == 0);
     REQUIRE(same_public_key(issued.data, issued.len, cur_cert,
                             cur_cert_len) == 0);
+#endif
 
+    wolfcert_server_stop(srv);
+    pthread_join(tid, NULL);
+    wolfcert_server_free(srv);
     wolfcert_key_free(out_key);
     wolfcert_buffer_free(&issued);
     wolfcert_key_free(cur_key);
@@ -296,8 +323,8 @@ int main(void)
     wolfcert_buffer_free(&ca_pem_der);
     wc_FreeDer(&ta_der);
 
-    REQUIRE(test_client_reenroll_keeps_identity(url, tls_cert, tls_cert_len)
-            == 0);
+    REQUIRE(test_client_reenroll_keeps_identity(tls_cert, tls_cert_len,
+                                                tls_key, tls_key_len) == 0);
 
     wolfcert_server_stop(srv);
     pthread_join(tid, NULL);

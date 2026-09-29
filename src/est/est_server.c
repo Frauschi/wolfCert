@@ -33,6 +33,7 @@
 #include "../internal.h"
 
 #include <wolfssl/ssl.h>
+#include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/hash.h>
 #include <wolfssl/wolfcrypt/sha256.h>
 #include <wolfssl/wolfcrypt/memory.h>
@@ -932,7 +933,90 @@ static void send_missing_oid(WolfCertServer* s, int fd,
     send_all(s, fd, body, (size_t)bl);
 }
 
-static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req)
+/* RFC 7030 section 4.2.2: a reenroll CSR must carry the Subject and SAN of
+ * the TLS client certificate it renews. */
+static int reenroll_identity_check(WolfCertServer* s,
+                                   const uint8_t* csr_der, size_t csr_len)
+{
+#ifdef KEEP_PEER_CERT
+    WOLFSSL_X509* peer = NULL;
+    const unsigned char* peer_der = NULL;
+    int peer_len = 0;
+    DecodedCert pc;
+    DecodedCert cc;
+    const byte* psan = NULL;
+    const byte* csan = NULL;
+    word32 psan_len = 0;
+    word32 csan_len = 0;
+    int rc = WOLFCERT_OK;
+    int wrc;
+
+    if (s->tls_current != NULL)
+        peer = wolfSSL_get_peer_certificate(s->tls_current);
+    if (peer != NULL)
+        peer_der = wolfSSL_X509_get_der(peer, &peer_len);
+    if (peer_der == NULL || peer_len <= 0) {
+        if (peer != NULL)
+            wolfSSL_FreeX509(peer);
+        /* With a client CA set, a missing cert is not the client's fault. */
+        if (s->tls_current != NULL && s->cfg.tls_client_ca_pem != NULL &&
+                s->cfg.tls_client_ca_pem_len > 0)
+            return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
+                "reenroll: cannot read the client certificate");
+        return WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "est",
+            "reenroll: no client certificate to renew");
+    }
+
+    wc_InitDecodedCert(&pc, peer_der, (word32)peer_len, s->heap);
+    wc_InitDecodedCert(&cc, (byte*)csr_der, (word32)csr_len, s->heap);
+    wrc = wc_ParseCert(&pc, CERT_TYPE, NO_VERIFY, NULL);
+    if (wrc != 0) {
+        rc = WOLFCERT_ERR(wrc == MEMORY_E ? WOLFCERT_ERR_MEMORY :
+                          WOLFCERT_ERR_CRYPTO, "est",
+            "reenroll: cannot parse the client certificate (%d)", wrc);
+    }
+    else if ((wrc = wc_ParseCert(&cc, CERTREQ_TYPE, VERIFY, NULL)) != 0) {
+        if (wrc == MEMORY_E)
+            rc = WOLFCERT_ERR_WC(wrc, "est", "reenroll: ParseCert(CSR)");
+        else
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "est",
+                "reenroll: CSR does not parse or verify (%d)", wrc);
+    }
+    else if (wolfcert_find_san(&pc, &psan, &psan_len) != WOLFCERT_OK ||
+             wolfcert_find_san(&cc, &csan, &csan_len) != WOLFCERT_OK) {
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "est",
+            "reenroll: extensions do not parse");
+    }
+    else if (pc.subjectRawLen != cc.subjectRawLen ||
+             (pc.subjectRawLen > 0 &&
+              memcmp(pc.subjectRaw, cc.subjectRaw,
+                     (size_t)pc.subjectRawLen) != 0) ||
+             pc.extSubjAltNameCrit != cc.extSubjAltNameCrit ||
+             (psan == NULL) != (csan == NULL) || psan_len != csan_len ||
+             (psan_len > 0 && memcmp(psan, csan, psan_len) != 0)) {
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "est",
+            "reenroll: CSR Subject/SAN differs from the renewed certificate");
+    }
+
+    wc_FreeDecodedCert(&cc);
+    wc_FreeDecodedCert(&pc);
+    wolfSSL_FreeX509(peer);
+    return rc;
+#else
+    (void)csr_der;
+    (void)csr_len;
+    if (s->tls_current == NULL || s->cfg.tls_client_ca_pem == NULL ||
+            s->cfg.tls_client_ca_pem_len == 0)
+        return WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "est",
+            "reenroll: no client certificate to renew");
+    /* The handshake demanded a client cert, which this build cannot read. */
+    return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "est",
+        "reenroll: this wolfSSL build keeps no peer certificate");
+#endif
+}
+
+static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
+                          int reenroll)
 {
     int pha = ensure_post_handshake_auth(s);
     if (pha != WOLFCERT_OK) {
@@ -969,6 +1053,21 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req)
     if (rc != WOLFCERT_OK) {
         send_status(s, fd,400, "Bad Request");
         return rc;
+    }
+
+    if (reenroll) {
+        rc = reenroll_identity_check(s, csr.data, csr.len);
+        if (rc != WOLFCERT_OK) {
+            if (rc == WOLFCERT_ERR_AUTH)
+                send_status(s, fd, 401, "Unauthorized");
+            else if (rc == WOLFCERT_ERR_PARSE || rc == WOLFCERT_ERR_PROTOCOL)
+                send_status(s, fd, 400, "Bad Request");
+            else
+                send_status(s, fd, 500, "Server Error");
+
+            wolfcert_buffer_free(&csr);
+            return rc;
+        }
     }
 
     /* RFC 7030 section 3.5 lets an EST client bind the proof-of-possession to
@@ -1081,7 +1180,8 @@ static int handle_request(WolfCertServer* s, int fd)
             rc = WOLFCERT_ERR_AUTH;
         }
         else {
-            rc = handler_enroll(s, fd, &req);
+            rc = handler_enroll(s, fd, &req,
+                                strcmp(suffix, "simplereenroll") == 0);
         }
     }
     else {
