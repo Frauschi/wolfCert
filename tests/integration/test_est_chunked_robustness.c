@@ -272,6 +272,43 @@ static int accept_multisegment_chunked_body(uint16_t port)
     return 0;
 }
 
+/* Authorization is a singleton field, so a second one is a malformed request. */
+static int reject_duplicate_authorization(uint16_t port)
+{
+    const char* req =
+        "GET /.well-known/est/cacerts HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Authorization: Basic AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n"
+        "Authorization: Basic AA==\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    /* A field that only starts with "Authorization" is a different field. */
+    const char* other =
+        "GET /.well-known/est/cacerts HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Authorization-Foo: x\r\n"
+        "Authorization: Basic AA==\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    /* RFC 9112 section 5.1: whitespace before a colon is a 400. */
+    const char* spaced =
+        "GET /.well-known/est/cacerts HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Length : 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    char status[128] = { 0 };
+    send_and_read_status(port, req, strlen(req), status, sizeof(status));
+    REQUIRE(strstr(status, "400") != NULL);
+    memset(status, 0, sizeof(status));
+    send_and_read_status(port, other, strlen(other), status, sizeof(status));
+    REQUIRE(strstr(status, "200") != NULL);
+    memset(status, 0, sizeof(status));
+    send_and_read_status(port, spaced, strlen(spaced), status, sizeof(status));
+    REQUIRE(strstr(status, "400") != NULL);
+    return 0;
+}
+
 /* Build a chunked simpleenroll request whose body carries a real,
  * base64-encoded CSR in a single chunk, but split so the last-chunk line
  * ("0\r\n") is delivered separately from its terminating trailer CRLF.
@@ -518,6 +555,8 @@ int main(void)
         rc = accept_multisegment_chunked_body(port);
     if (rc == 0)
         rc = keepalive_after_split_trailer(port);
+    if (rc == 0)
+        rc = reject_duplicate_authorization(port);
     if (rc == 0)
         rc = no_sigpipe_on_response();
 

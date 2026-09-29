@@ -259,6 +259,15 @@ static int chunked_body_complete(const uint8_t* raw, size_t raw_len)
     return 0;
 }
 
+/* 1 when the line's field name is `name`, followed directly by ':'. */
+static int hdr_is(const char* line, size_t llen, const char* name)
+{
+    size_t n = strlen(name);
+
+    return llen > n && line[n] == ':' &&
+           wolfcert_ascii_ncasecmp(line, name, n) == 0;
+}
+
 static int parse_request(WolfCertServer* s, int fd, EstRequest* out, void* heap)
 {
     memset(out, 0, sizeof(*out));
@@ -307,52 +316,49 @@ static int parse_request(WolfCertServer* s, int fd, EstRequest* out, void* heap)
 
     int chunked = 0;
     while (read_line(&p, end, &line, &llen) == 0 && llen > 0) {
-        if (llen > 14 && strncasecmp(line, "Content-Length", 14) == 0) {
-            char* colon = memchr(line, ':', llen);
-            if (colon != NULL)
-                out->content_length = (size_t)strtoul(colon + 1, NULL, 10);
-        }
-        else if (llen > 17 && strncasecmp(line, "Transfer-Encoding", 17) == 0) {
-            char* colon = memchr(line, ':', llen);
-            if (colon != NULL) {
-                const char* v = colon + 1;
-                while (v < line + llen && (*v == ' ' || *v == '\t')) {
-                    ++v;
-                }
+        const char* hc = memchr(line, ':', llen);
 
-                size_t vlen = (size_t)(line + llen - v);
-                if (vlen >= 7 && strncasecmp(v, "chunked", 7) == 0)
-                    chunked = 1;
+        /* RFC 9112 section 5.1: whitespace before the colon is a 400. */
+        if (hc != NULL && hc > line && (hc[-1] == ' ' || hc[-1] == '\t'))
+            return WOLFCERT_ERR_PROTOCOL;
+        if (hdr_is(line, llen, "Content-Length")) {
+            out->content_length = (size_t)strtoul(hc + 1, NULL, 10);
+        }
+        else if (hdr_is(line, llen, "Transfer-Encoding")) {
+            const char* v = hc + 1;
+            while (v < line + llen && (*v == ' ' || *v == '\t')) {
+                ++v;
+            }
+
+            size_t vlen = (size_t)(line + llen - v);
+            if (vlen >= 7 && wolfcert_ascii_ncasecmp(v, "chunked", 7) == 0)
+                chunked = 1;
+        }
+        else if (hdr_is(line, llen, "Authorization")) {
+            if (out->auth_header != NULL)
+                return WOLFCERT_ERR_PROTOCOL;
+
+            const char* val = hc + 1;
+            while (val < line + llen && (*val == ' ' || *val == '\t')) {
+                ++val;
+            }
+
+            size_t vlen = (size_t)(line + llen - val);
+            out->auth_header = (char*)WOLFCERT_XMALLOC(vlen + 1, heap);
+            if (out->auth_header) {
+                memcpy(out->auth_header, val, vlen);
+                out->auth_header[vlen] = '\0';
             }
         }
-        else if (llen > 13 && strncasecmp(line, "Authorization", 13) == 0) {
-            char* colon = memchr(line, ':', llen);
-            if (colon != NULL) {
-                char* val = colon + 1;
-                while (*val == ' ' || *val == '\t') {
-                    ++val;
-                }
-
-                size_t vlen = llen - (size_t)(val - line);
-                out->auth_header = (char*)WOLFCERT_XMALLOC(vlen + 1, heap);
-                if (out->auth_header) {
-                    memcpy(out->auth_header, val, vlen);
-                    out->auth_header[vlen] = '\0';
-                }
+        else if (hdr_is(line, llen, "Connection")) {
+            const char* v = hc + 1;
+            while (v < line + llen && (*v == ' ' || *v == '\t')) {
+                ++v;
             }
-        }
-        else if (llen > 10 && strncasecmp(line, "Connection", 10) == 0) {
-            char* colon = memchr(line, ':', llen);
-            if (colon != NULL) {
-                const char* v = colon + 1;
-                while (v < line + llen && (*v == ' ' || *v == '\t')) {
-                    ++v;
-                }
 
-                size_t vlen = (size_t)(line + llen - v);
-                if (vlen >= 5 && strncasecmp(v, "close", 5) == 0)
-                    out->connection_close = 1;
-            }
+            size_t vlen = (size_t)(line + llen - v);
+            if (vlen >= 5 && wolfcert_ascii_ncasecmp(v, "close", 5) == 0)
+                out->connection_close = 1;
         }
     }
 
