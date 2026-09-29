@@ -25,7 +25,8 @@
  *   - wolfcert_est_session_simple_enroll_nb (/simpleenroll under
  *     TLS 1.3 post-handshake auth),
  * all on a single TLS connection whose fd is fed to poll() between
- * WOLFCERT_ERR_WANT_READ / _WANT_WRITE returns.
+ * WOLFCERT_ERR_WANT_READ / _WANT_WRITE returns. A Basic-only server then
+ * checks the credentials on every request and rejects a wrong password.
  *
  * Mirrors test_est_pha_roundtrip's scenario but with the caller
  * explicitly owning the event loop.
@@ -67,21 +68,23 @@ static void* server_thread(void* arg)
     return NULL;
 }
 
+/* Wait on the session fd in the direction a WANT_* return asked for. */
+static int wait_io(WolfCertEstSession* s, int rc)
+{
+    struct pollfd p = { .fd = wolfcert_est_session_fd(s),
+        .events = (rc == WOLFCERT_ERR_WANT_WRITE) ? POLLOUT : POLLIN };
+    return poll(&p, 1, 5000) > 0 ? 0 : -1;
+}
+
 /* Pump one call until it returns OK or an error. poll() in between. */
 static int pump_get_cacerts(WolfCertEstSession* s, WolfCertBuffer* out)
 {
-    int fd = wolfcert_est_session_fd(s);
     for (;;) {
         int rc = wolfcert_est_session_get_cacerts_nb(s, out);
         if (rc == WOLFCERT_OK)
             return 0;
         if (rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE) {
-            struct pollfd p = {
-                .fd = fd,
-                .events = (rc == WOLFCERT_ERR_WANT_WRITE) ? POLLOUT : POLLIN,
-            };
-            int pr = poll(&p, 1, 5000);
-            if (pr <= 0)
+            if (wait_io(s, rc) != 0)
                 return -1;
             continue;
         }
@@ -90,28 +93,36 @@ static int pump_get_cacerts(WolfCertEstSession* s, WolfCertBuffer* out)
     }
 }
 
+/* Returns the terminal code, so a caller can assert a rejection. */
 static int pump_simple_enroll(WolfCertEstSession* s,
                               const uint8_t* csr, size_t csr_len,
                               WolfCertBuffer* out)
 {
-    int fd = wolfcert_est_session_fd(s);
     for (;;) {
         int rc = wolfcert_est_session_simple_enroll_nb(s, csr, csr_len, out);
-        if (rc == WOLFCERT_OK)
-            return 0;
         if (rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE) {
-            struct pollfd p = {
-                .fd = fd,
-                .events = (rc == WOLFCERT_ERR_WANT_WRITE) ? POLLOUT : POLLIN,
-            };
-            int pr = poll(&p, 1, 5000);
-            if (pr <= 0)
-                return -1;
+            if (wait_io(s, rc) != 0)
+                return WOLFCERT_ERR_IO;
             continue;
         }
-        fprintf(stderr, "enroll rc=%d (%s) last=%s\n",
-                rc, wolfcert_strerror(rc), wolfcert_last_error_message());
-        return -1;
+        if (rc != WOLFCERT_OK)
+            fprintf(stderr, "enroll rc=%d (%s) last=%s\n",
+                    rc, wolfcert_strerror(rc), wolfcert_last_error_message());
+        return rc;
+    }
+}
+
+/* pump_simple_enroll() for the result-struct form. */
+static int pump_simple_enroll_ex(WolfCertEstSession* s,
+                                 const uint8_t* csr, size_t csr_len,
+                                 WolfCertEstResult* out)
+{
+    for (;;) {
+        int rc = wolfcert_est_session_simple_enroll_nb_ex(s, csr, csr_len, out);
+        if (rc != WOLFCERT_ERR_WANT_READ && rc != WOLFCERT_ERR_WANT_WRITE)
+            return rc;
+        if (wait_io(s, rc) != 0)
+            return WOLFCERT_ERR_IO;
     }
 }
 
@@ -243,6 +254,34 @@ int main(void)
 
     wolfcert_buffer_free(&bca);
     wolfcert_buffer_free(&bissued);
+    wolfcert_est_session_close(bes);
+
+    /* Wrong password: both async enroll forms report the 401, one session
+     * each. */
+    WolfCertServerCfg wcli = bcli;
+    wcli.proto_opts.est.password = "wrong";
+    bes = NULL;
+    REQUIRE(wolfcert_est_session_open_async(&wcli, &bes) == WOLFCERT_OK);
+
+    WolfCertEstResult wr = { 0 };
+    REQUIRE(pump_simple_enroll_ex(bes, csr.data, csr.len, &wr)
+            == WOLFCERT_ERR_AUTH);
+    REQUIRE(wr.status == WOLFCERT_EST_STATUS_FAILURE);
+    REQUIRE(wr.cert_pem.data == NULL);
+    wolfcert_est_result_free(&wr);
+
+    /* The failed enroll is no longer in flight, so a new operation is not
+     * refused as one. */
+    REQUIRE(wolfcert_est_session_get_cacerts_nb(bes, &bca)
+            != WOLFCERT_ERR_BAD_ARG);
+    wolfcert_buffer_free(&bca);
+    wolfcert_est_session_close(bes);
+
+    bes = NULL;
+    REQUIRE(wolfcert_est_session_open_async(&wcli, &bes) == WOLFCERT_OK);
+    REQUIRE(pump_simple_enroll(bes, csr.data, csr.len, &bissued)
+            == WOLFCERT_ERR_AUTH);
+    REQUIRE(bissued.data == NULL);
     wolfcert_est_session_close(bes);
 
     wolfcert_server_stop(bsrv);

@@ -152,15 +152,24 @@ WOLFCERT_API int wolfcert_csr_attrs_build(const WolfCertCsrAttrItem* items,
  * wait at least `retry_after_sec` seconds and then re-POST the identical
  * request (same CSR, same URL, same credentials).
  *
- * The richer `_ex` entry points below surface this explicitly:
- *   status == SUCCESS   -> `cert_pem` holds the issued cert (PEM).
- *   status == PENDING   -> `cert_pem` is empty; `retry_after_sec` carries
+ * Every `_ex` enroll call below, one-shot or session, reports the outcome in
+ * a `WolfCertEstResult`:
+ *   status == SUCCESS   -> the call returns `WOLFCERT_OK`; `cert_pem` holds
+ *                         the issued cert (PEM).
+ *   status == PENDING   -> the call returns `WOLFCERT_OK`; `cert_pem` is
+ *                         empty; `retry_after_sec` carries
  *                         the server's hint (0 when the server did not
  *                         send Retry-After, or sent it in the HTTP-date
  *                         form which wolfCert does not yet parse).
- *   status == FAILURE   -> a 4xx/5xx came back (auth / parse / policy).
- *   status == UNSET     -> the call didn't reach a server round-trip;
- *                         inspect the int return code.
+ *   status == FAILURE   -> any other HTTP status came back; the call returns
+ *                         `WOLFCERT_ERR_AUTH` for 401/403, else
+ *                         `WOLFCERT_ERR_HTTP`.
+ *   status == UNSET     -> no usable reply (bad argument, config or
+ *                         allocation failure, a refused call, transport
+ *                         or parse error, or a 200 with no body); inspect
+ *                         the int return code.
+ * Each enroll call without the `_ex` suffix returns PENDING as
+ * `WOLFCERT_ERR_PENDING` and drops the hint; use its `_ex` form to get it.
  *
  * `WolfCertEstStatus`'s values mirror `WolfCertScepStatus` on purpose so
  * callers that want a single "status -> action" switch across protocols
@@ -192,39 +201,23 @@ typedef struct {
  * result before passing it again. */
 WOLFCERT_API void wolfcert_est_result_free(WolfCertEstResult* r);
 
-/* POST /.well-known/est/simpleenroll.
- *
- * Simple-result form: a 202-Accepted (pending) response is surfaced as
- * `WOLFCERT_ERR_PENDING`; the richer `_ex` form below exposes the
- * Retry-After hint so callers can drive a poll loop. */
+/* POST /.well-known/est/simpleenroll. */
 WOLFCERT_API int wolfcert_est_simple_enroll(const WolfCertServerCfg* srv,
                                             const uint8_t* csr_der, size_t csr_der_len,
                                             WolfCertBuffer* out_cert_pem);
 
-/* Richer-shape `/simpleenroll` that distinguishes SUCCESS / PENDING /
- * FAILURE in `out->status` and carries the server's `Retry-After` hint
- * when present. Returns `WOLFCERT_OK` for every successful HTTP
- * round-trip; negative return codes are reserved for transport / parse
- * failures. On PENDING the caller waits `out->retry_after_sec` (or its
- * own floor) and re-invokes `wolfcert_est_simple_enroll_ex` with the
- * same arguments. */
 WOLFCERT_API int wolfcert_est_simple_enroll_ex(const WolfCertServerCfg* srv,
                                                const uint8_t* csr_der, size_t csr_der_len,
                                                WolfCertEstResult* out);
 
 /* POST /.well-known/est/simplereenroll. Uses the caller's current cert/key
- * as the TLS client credential.
- *
- * Simple-result form: 202-Accepted (pending) surfaces as
- * `WOLFCERT_ERR_PENDING`; use the `_ex` form for Retry-After access. */
+ * as the TLS client credential. */
 WOLFCERT_API int wolfcert_est_simple_reenroll(const WolfCertServerCfg* srv,
                                               const uint8_t* current_cert, size_t current_cert_len,
                                               const WolfCertKey* current_key,
                                               const uint8_t* csr_der, size_t csr_der_len,
                                               WolfCertBuffer* out_cert_pem);
 
-/* Richer-shape `/simplereenroll`. Semantics match
- * `wolfcert_est_simple_enroll_ex`. */
 WOLFCERT_API int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
                                                  const uint8_t* current_cert, size_t current_cert_len,
                                                  const WolfCertKey* current_key,
@@ -266,6 +259,11 @@ WOLFCERT_API int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
                                                     const uint8_t* csr_der, size_t csr_der_len,
                                                     WolfCertBuffer* out_cert_pem);
 
+WOLFCERT_API int wolfcert_est_session_simple_enroll_ex(WolfCertEstSession* s,
+                                                       const uint8_t* csr_der,
+                                                       size_t csr_der_len,
+                                                       WolfCertEstResult* out);
+
 WOLFCERT_API void wolfcert_est_session_close(WolfCertEstSession* s);
 
 /* Socket fd of the backing HTTP session - hand to poll/epoll/kqueue;
@@ -278,12 +276,15 @@ WOLFCERT_API int wolfcert_est_session_fd(const WolfCertEstSession* s);
  * srv->proto_opts.est.allow_post_handshake_auth and/or other options plus
  * the new wolfcert_est_session_open_async().
  *
- * Each call drives the HTTP session state machine forward and returns
- *   WOLFCERT_OK              - `out_*` populated.
+ * Each _nb call drives the HTTP session state machine forward and returns
+ *   WOLFCERT_OK              - the output is populated.
  *   WOLFCERT_ERR_WANT_READ   - wait for readable, then call again
  *                              with the same arguments.
  *   WOLFCERT_ERR_WANT_WRITE  - wait for writable, then call again.
- *   other negative values    - permanent failure.
+ *   other negative values    - the request ended with that error.
+ * One request runs at a time: while a _nb request is in flight, a blocking
+ * session request or a _nb call for a different operation or output pointer
+ * returns WOLFCERT_ERR_BAD_ARG and leaves the in-flight one intact.
  */
 WOLFCERT_API int wolfcert_est_session_open_async(const WolfCertServerCfg* srv,
                                                  WolfCertEstSession** out);
@@ -295,6 +296,11 @@ WOLFCERT_API int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
                                                        const uint8_t* csr_der,
                                                        size_t csr_der_len,
                                                        WolfCertBuffer* out_cert_pem);
+
+WOLFCERT_API int wolfcert_est_session_simple_enroll_nb_ex(WolfCertEstSession* s,
+                                                          const uint8_t* csr_der,
+                                                          size_t csr_der_len,
+                                                          WolfCertEstResult* out);
 
 #ifdef __cplusplus
 }

@@ -487,6 +487,33 @@ static int test_est_result_defined_on_early_return(void)
     }
     wolfcert_est_result_free(&r);
 
+    memset(&r, 0xA5, sizeof(r));
+    if (est_result_defined("session_simple_enroll_ex",
+            wolfcert_est_session_simple_enroll_ex(NULL, blob, sizeof(blob),
+                                                  &r), &r)) {
+        wolfcert_key_free(key);
+        return 1;
+    }
+    wolfcert_est_result_free(&r);
+
+    memset(&r, 0xA5, sizeof(r));
+    if (est_result_defined("session_simple_enroll_nb_ex",
+            wolfcert_est_session_simple_enroll_nb_ex(NULL, blob, sizeof(blob),
+                                                     &r), &r)) {
+        wolfcert_key_free(key);
+        return 1;
+    }
+    wolfcert_est_result_free(&r);
+
+    if (wolfcert_est_session_simple_enroll_ex(NULL, blob, sizeof(blob), NULL)
+            != WOLFCERT_ERR_BAD_ARG ||
+        wolfcert_est_session_simple_enroll_nb_ex(NULL, blob, sizeof(blob), NULL)
+            != WOLFCERT_ERR_BAD_ARG) {
+        fprintf(stderr, "FAIL session enroll _ex: NULL out not rejected\n");
+        wolfcert_key_free(key);
+        return 1;
+    }
+
     wolfcert_key_free(key);
     return 0;
 }

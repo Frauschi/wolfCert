@@ -61,6 +61,33 @@ static inline void test_sleep_ms(long ms)
     nanosleep(&ts, NULL);
 }
 
+/* Open a loopback listener that completes the TCP handshake (via the kernel
+ * backlog) but never accepts, reads, or answers, so a non-blocking HTTP request
+ * sent to it is guaranteed to stay in WOLFCERT_ERR_WANT_READ. Returns the
+ * listening fd (>= 0) and writes the bound port to *out_port, or -1 on error. */
+static inline int black_hole_listener(uint16_t* out_port)
+{
+    struct sockaddr_in addr;
+    socklen_t addr_len = sizeof(addr);
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = 0;   /* ephemeral */
+    if (inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr) != 1 ||
+            bind(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0 ||
+            listen(fd, 16) != 0 ||
+            getsockname(fd, (struct sockaddr*)&addr, &addr_len) != 0) {
+        close(fd);
+        return -1;
+    }
+
+    *out_port = ntohs(addr.sin_port);
+    return fd;
+}
+
 /* A key algorithm + parameter the current build supports, for client
  * enrollments where the algorithm is incidental to what the test verifies. */
 #if defined(WOLFCERT_HAVE_ECC)

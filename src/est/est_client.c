@@ -162,13 +162,50 @@ int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv, WolfCertEncoding 
     return rc;
 }
 
+/* Fill *out from a /simpleenroll or /simplereenroll response, and free resp. */
+static int est_enroll_finish(void* heap, WolfCertHttpResponse* resp,
+                             WolfCertEstResult* out)
+{
+    int rc;
+    int status = resp->status_code;
+    WolfCertBuffer p7 = { 0 };
+
+    /* RFC 7030 section 4.2.3: 202 Accepted = enrolment pending. */
+    if (status == 202) {
+        out->status          = WOLFCERT_EST_STATUS_PENDING;
+        out->retry_after_sec = resp->retry_after_sec;
+        rc = WOLFCERT_OK;
+    }
+    else if (status != 200) {
+        out->status = WOLFCERT_EST_STATUS_FAILURE;
+        rc = WOLFCERT_ERR(status == 401 || status == 403 ? WOLFCERT_ERR_AUTH
+                                                         : WOLFCERT_ERR_HTTP,
+                          "est", "enrollment rejected: HTTP %d", status);
+    }
+    else if (resp->body_len == 0) {
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "est",
+            "200 response carried no certificate");
+    }
+    else {
+        rc = wolfcert_base64_decode(resp->body, resp->body_len, &p7, heap);
+    }
+
+    /* Drop the base64 body before the PEM conversion. */
+    wolfcert_http_response_free(resp);
+
+    if (rc == WOLFCERT_OK && status == 200) {
+        rc = wolfcert_pkcs7_certs_to_pem(p7.data, p7.len, &out->cert_pem, heap);
+        if (rc == WOLFCERT_OK)
+            out->status = WOLFCERT_EST_STATUS_SUCCESS;
+    }
+    wolfcert_buffer_free(&p7);
+    return rc;
+}
+
 /* Core round-trip for /simpleenroll and /simplereenroll, shared by the
  * simple-result `wolfcert_est_simple_enroll` / `_reenroll` (which flatten
  * 202 Accepted into WOLFCERT_ERR_PENDING and ignore Retry-After) and
- * the richer `_ex` variants (which expose the status + hint directly).
- * Returns WOLFCERT_OK for any HTTP round-trip the library understood -
- * the caller looks at `out->status` to distinguish SUCCESS / PENDING /
- * FAILURE. Transport / parse failures return a negative code. */
+ * the richer `_ex` variants (which expose the status + hint directly). */
 static int post_enroll_ex(const WolfCertServerCfg* srv,
                           const char* suffix,
                           const uint8_t* csr_der, size_t csr_der_len,
@@ -229,46 +266,7 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
     if (rc != WOLFCERT_OK)
         return rc;
 
-    /* RFC 7030 section 4.2.3: 202 Accepted = enrolment pending. The client is
-     * expected to wait `Retry-After` seconds and re-POST the same CSR. */
-    if (resp.status_code == 202) {
-        out->status          = WOLFCERT_EST_STATUS_PENDING;
-        out->retry_after_sec = resp.retry_after_sec;
-        wolfcert_http_response_free(&resp);
-
-        return WOLFCERT_OK;
-    }
-
-    if (resp.status_code != 200) {
-        out->status = WOLFCERT_EST_STATUS_FAILURE;
-        int mapped = resp.status_code == 401 || resp.status_code == 403
-                     ? WOLFCERT_ERR_AUTH : WOLFCERT_ERR_HTTP;
-        wolfcert_http_response_free(&resp);
-
-        return mapped;
-    }
-
-    if (resp.body_len == 0) {
-        wolfcert_http_response_free(&resp);
-        return WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "est",
-            "200 response carried no certificate");
-    }
-
-    WolfCertBuffer p7 = { 0 };
-    rc = wolfcert_base64_decode(resp.body, resp.body_len, &p7, heap);
-
-    wolfcert_http_response_free(&resp);
-    if (rc != WOLFCERT_OK)
-        return rc;
-
-    rc = wolfcert_pkcs7_certs_to_pem(p7.data, p7.len, &out->cert_pem, heap);
-
-    wolfcert_buffer_free(&p7);
-    if (rc != WOLFCERT_OK)
-        return rc;
-
-    out->status = WOLFCERT_EST_STATUS_SUCCESS;
-    return WOLFCERT_OK;
+    return est_enroll_finish(heap, &resp, out);
 }
 
 void wolfcert_est_result_free(WolfCertEstResult* r)
@@ -280,6 +278,24 @@ void wolfcert_est_result_free(WolfCertEstResult* r)
     r->status          = WOLFCERT_EST_STATUS_UNSET;
     r->retry_after_sec = 0;
     r->heap            = NULL;
+}
+
+/* Flatten an _ex result for the simple-result calls: PENDING becomes
+ * WOLFCERT_ERR_PENDING and an issued cert moves to out_cert_pem. Frees r. */
+static int est_result_flatten(int rc, WolfCertEstResult* r,
+                              WolfCertBuffer* out_cert_pem)
+{
+    if (rc == WOLFCERT_OK && r->status == WOLFCERT_EST_STATUS_PENDING) {
+        rc = WOLFCERT_ERR_PENDING;
+    }
+    else if (rc == WOLFCERT_OK) {
+        *out_cert_pem = r->cert_pem;
+        r->cert_pem.data = NULL;
+        r->cert_pem.len  = 0;
+    }
+
+    wolfcert_est_result_free(r);
+    return rc;
 }
 
 int wolfcert_est_simple_enroll_ex(const WolfCertServerCfg* srv,
@@ -337,28 +353,7 @@ int wolfcert_est_simple_enroll(const WolfCertServerCfg* srv,
     WolfCertEstResult r = { 0 };
     int rc = post_enroll_ex(srv, "simpleenroll", csr_der, csr_der_len,
                             NULL, 0, NULL, 0, &r);
-
-    if (rc != WOLFCERT_OK) {
-        wolfcert_est_result_free(&r);
-        return rc;
-    }
-
-    if (r.status == WOLFCERT_EST_STATUS_PENDING) {
-        wolfcert_est_result_free(&r);
-        return WOLFCERT_ERR_PENDING;
-    }
-
-    if (r.status != WOLFCERT_EST_STATUS_SUCCESS) {
-        wolfcert_est_result_free(&r);
-        return WOLFCERT_ERR_PROTOCOL;
-    }
-
-    *out_cert_pem = r.cert_pem;
-    r.cert_pem.data = NULL;
-    r.cert_pem.len = 0;
-    wolfcert_est_result_free(&r);
-
-    return WOLFCERT_OK;
+    return est_result_flatten(rc, &r, out_cert_pem);
 }
 
 int wolfcert_est_simple_reenroll(const WolfCertServerCfg* srv,
@@ -374,28 +369,7 @@ int wolfcert_est_simple_reenroll(const WolfCertServerCfg* srv,
     WolfCertEstResult r = { 0 };
     int rc = wolfcert_est_simple_reenroll_ex(srv, current_cert, current_cert_len,
                                              current_key, csr_der, csr_der_len, &r);
-
-    if (rc != WOLFCERT_OK) {
-        wolfcert_est_result_free(&r);
-        return rc;
-    }
-
-    if (r.status == WOLFCERT_EST_STATUS_PENDING) {
-        wolfcert_est_result_free(&r);
-        return WOLFCERT_ERR_PENDING;
-    }
-
-    if (r.status != WOLFCERT_EST_STATUS_SUCCESS) {
-        wolfcert_est_result_free(&r);
-        return WOLFCERT_ERR_PROTOCOL;
-    }
-
-    *out_cert_pem = r.cert_pem;
-    r.cert_pem.data = NULL;
-    r.cert_pem.len = 0;
-    wolfcert_est_result_free(&r);
-
-    return WOLFCERT_OK;
+    return est_result_flatten(rc, &r, out_cert_pem);
 }
 
 /* ---- keep-alive EST session -------------------------------------------- */
@@ -418,7 +392,7 @@ struct WolfCertEstSession {
     WolfCertBuffer       in_body;      /* base64-encoded CSR for POST, owned */
     WolfCertHttpRequest  in_req;
     WolfCertHttpResponse in_resp;
-    WolfCertBuffer*      in_out;
+    const void*          in_owner;     /* caller's output, checked on resume */
     enum { EST_OP_GET_CACERTS, EST_OP_SIMPLE_ENROLL } in_op;
 };
 
@@ -556,8 +530,22 @@ static void est_async_reset(WolfCertEstSession* s)
     wolfcert_http_response_free(&s->in_resp);
     memset(&s->in_req,  0, sizeof(s->in_req));
     memset(&s->in_resp, 0, sizeof(s->in_resp));
-    s->in_out    = NULL;
+    s->in_owner  = NULL;
     s->in_active = 0;
+}
+
+/* Refuse a resumed _nb call that does not match the request in flight. */
+static int est_session_resume_check(const WolfCertEstSession* s, int op,
+                                    const void* owner)
+{
+    if ((int)s->in_op != op)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
+            "a different EST operation is already in flight on this session");
+    if (owner != s->in_owner)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
+            "output pointer differs from the in-flight request; pass the "
+            "same pointer to each poll call");
+    return WOLFCERT_OK;
 }
 
 void wolfcert_est_session_close(WolfCertEstSession* s)
@@ -585,6 +573,8 @@ void wolfcert_est_session_close(WolfCertEstSession* s)
 int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
                                         WolfCertBuffer* out_ca_pem)
 {
+    int rc;
+
     if (s == NULL || out_ca_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
@@ -600,12 +590,17 @@ int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
             .max_response_bytes = s->max_body,
             .heap = s->heap,
         };
-        s->in_out    = out_ca_pem;
+        s->in_owner  = out_ca_pem;
         s->in_op     = EST_OP_GET_CACERTS;
         s->in_active = 1;
     }
+    else {
+        rc = est_session_resume_check(s, EST_OP_GET_CACERTS, out_ca_pem);
+        if (rc != WOLFCERT_OK)
+            return rc;
+    }
 
-    int rc = wolfcert_http_session_request_nb(s->http, &s->in_req, &s->in_resp);
+    rc = wolfcert_http_session_request_nb(s->http, &s->in_req, &s->in_resp);
     if (rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE)
         return rc;
 
@@ -628,7 +623,7 @@ int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
     WolfCertBuffer p7 = { 0 };
     rc = wolfcert_base64_decode(s->in_resp.body, s->in_resp.body_len, &p7, s->heap);
     if (rc == WOLFCERT_OK) {
-        rc = wolfcert_pkcs7_certs_to_pem(p7.data, p7.len, s->in_out, s->heap);
+        rc = wolfcert_pkcs7_certs_to_pem(p7.data, p7.len, out_ca_pem, s->heap);
         wolfcert_buffer_free(&p7);
     }
 
@@ -636,12 +631,15 @@ int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
     return rc;
 }
 
-int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
-                                          const uint8_t* csr_der,
-                                          size_t csr_der_len,
-                                          WolfCertBuffer* out_cert_pem)
+/* Drive the async /simpleenroll into *out. `owner` is the caller's output
+ * pointer; a resumed call must pass the same one. */
+static int est_session_enroll_nb(WolfCertEstSession* s, const uint8_t* csr_der,
+                                 size_t csr_der_len, const void* owner,
+                                 WolfCertEstResult* out)
 {
-    if (s == NULL || csr_der == NULL || csr_der_len == 0 || out_cert_pem == NULL)
+    int rc;
+
+    if (s == NULL || csr_der == NULL || csr_der_len == 0)
         return WOLFCERT_ERR_BAD_ARG;
 
     if (!s->in_active) {
@@ -649,7 +647,7 @@ int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
         if (s->in_url == NULL)
             return WOLFCERT_ERR_MEMORY;
 
-        int rc = wolfcert_base64_encode_mime(csr_der, csr_der_len, &s->in_body, s->heap);
+        rc = wolfcert_base64_encode_mime(csr_der, csr_der_len, &s->in_body, s->heap);
         if (rc != WOLFCERT_OK) {
             WOLFCERT_XFREE(s->in_url, s->heap);
             s->in_url = NULL;
@@ -669,48 +667,55 @@ int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
             .max_response_bytes        = s->max_body,
             .heap                      = s->heap,
         };
-        s->in_out    = out_cert_pem;
+        s->in_owner  = owner;
         s->in_op     = EST_OP_SIMPLE_ENROLL;
         s->in_active = 1;
     }
+    else {
+        rc = est_session_resume_check(s, EST_OP_SIMPLE_ENROLL, owner);
+        if (rc != WOLFCERT_OK)
+            return rc;
+    }
 
-    int rc = wolfcert_http_session_request_nb(s->http, &s->in_req, &s->in_resp);
+    rc = wolfcert_http_session_request_nb(s->http, &s->in_req, &s->in_resp);
     if (rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE)
         return rc;
 
-    if (rc != WOLFCERT_OK) {
-        est_async_reset(s);
-        return rc;
-    }
-
-    if (s->in_resp.status_code != 200) {
-        int mapped;
-        if (s->in_resp.status_code == 202)
-            mapped = WOLFCERT_ERR_PENDING;
-        else if (s->in_resp.status_code == 401 || s->in_resp.status_code == 403)
-            mapped = WOLFCERT_ERR_AUTH;
-        else
-            mapped = WOLFCERT_ERR_HTTP;
-        est_async_reset(s);
-
-        return mapped;
-    }
-
-    if (s->in_resp.body_len == 0) {
-        est_async_reset(s);
-        return WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "est",
-            "200 response carried no certificate");
-    }
-
-    WolfCertBuffer p7 = { 0 };
-    rc = wolfcert_base64_decode(s->in_resp.body, s->in_resp.body_len, &p7, s->heap);
     if (rc == WOLFCERT_OK) {
-        rc = wolfcert_pkcs7_certs_to_pem(p7.data, p7.len, s->in_out, s->heap);
-        wolfcert_buffer_free(&p7);
+        out->heap = s->heap;
+        rc = est_enroll_finish(s->heap, &s->in_resp, out);
     }
 
     est_async_reset(s);
     return rc;
+}
+
+int wolfcert_est_session_simple_enroll_nb_ex(WolfCertEstSession* s,
+                                             const uint8_t* csr_der,
+                                             size_t csr_der_len,
+                                             WolfCertEstResult* out)
+{
+    if (out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    memset(out, 0, sizeof(*out));
+
+    return est_session_enroll_nb(s, csr_der, csr_der_len, out, out);
+}
+
+int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
+                                          const uint8_t* csr_der,
+                                          size_t csr_der_len,
+                                          WolfCertBuffer* out_cert_pem)
+{
+    WolfCertEstResult r = { 0 };
+    int rc;
+
+    if (s == NULL || csr_der == NULL || csr_der_len == 0 || out_cert_pem == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    rc = est_session_enroll_nb(s, csr_der, csr_der_len, out_cert_pem, &r);
+    return est_result_flatten(rc, &r, out_cert_pem);
 }
 
 int wolfcert_est_session_get_cacerts(WolfCertEstSession* s,
@@ -718,6 +723,10 @@ int wolfcert_est_session_get_cacerts(WolfCertEstSession* s,
 {
     if (s == NULL || out_ca_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
+
+    if (s->in_active)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
+            "an async EST request is in flight on this session");
 
     char* url = join_path(s->base_url, "cacerts", s->heap);
     if (url == NULL)
@@ -761,25 +770,40 @@ int wolfcert_est_session_get_cacerts(WolfCertEstSession* s,
     return rc;
 }
 
-int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
-                                       const uint8_t* csr_der, size_t csr_der_len,
-                                       WolfCertBuffer* out_cert_pem)
+int wolfcert_est_session_simple_enroll_ex(WolfCertEstSession* s,
+                                          const uint8_t* csr_der,
+                                          size_t csr_der_len,
+                                          WolfCertEstResult* out)
 {
-    if (s == NULL || csr_der == NULL || csr_der_len == 0 || out_cert_pem == NULL)
+    int rc;
+    char* url = NULL;
+    WolfCertBuffer b64 = { 0 };
+    WolfCertHttpRequest req;
+    WolfCertHttpResponse resp = { 0 };
+
+    if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    char* url = join_path(s->base_url, "simpleenroll", s->heap);
+    memset(out, 0, sizeof(*out));
+
+    if (s == NULL || csr_der == NULL || csr_der_len == 0)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    if (s->in_active)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
+            "an async EST request is in flight on this session");
+
+    url = join_path(s->base_url, "simpleenroll", s->heap);
     if (url == NULL)
         return WOLFCERT_ERR_MEMORY;
 
-    WolfCertBuffer b64 = { 0 };
-    int rc = wolfcert_base64_encode_mime(csr_der, csr_der_len, &b64, s->heap);
+    rc = wolfcert_base64_encode_mime(csr_der, csr_der_len, &b64, s->heap);
     if (rc != WOLFCERT_OK) {
         WOLFCERT_XFREE(url, s->heap);
         return rc;
     }
 
-    WolfCertHttpRequest req = {
+    req = (WolfCertHttpRequest){
         .method                    = "POST",
         .url                       = url,
         .content_type              = "application/pkcs10",
@@ -792,7 +816,6 @@ int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
         .max_response_bytes        = s->max_body,
         .heap                      = s->heap,
     };
-    WolfCertHttpResponse resp = { 0 };
     rc = wolfcert_http_session_request(s->http, &req, &resp);
 
     WOLFCERT_XFREE(url, s->heap);
@@ -800,36 +823,22 @@ int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
     if (rc != WOLFCERT_OK)
         return rc;
 
-    if (resp.status_code != 200) {
-        int mapped;
-        if (resp.status_code == 202)
-            mapped = WOLFCERT_ERR_PENDING;
-        else if (resp.status_code == 401 || resp.status_code == 403)
-            mapped = WOLFCERT_ERR_AUTH;
-        else
-            mapped = WOLFCERT_ERR_HTTP;
-        wolfcert_http_response_free(&resp);
+    out->heap = s->heap;
+    return est_enroll_finish(s->heap, &resp, out);
+}
 
-        return mapped;
-    }
+int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
+                                       const uint8_t* csr_der, size_t csr_der_len,
+                                       WolfCertBuffer* out_cert_pem)
+{
+    WolfCertEstResult r = { 0 };
+    int rc;
 
-    if (resp.body_len == 0) {
-        wolfcert_http_response_free(&resp);
-        return WOLFCERT_ERR(WOLFCERT_ERR_HTTP, "est",
-            "200 response carried no certificate");
-    }
+    if (s == NULL || csr_der == NULL || csr_der_len == 0 || out_cert_pem == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
 
-    WolfCertBuffer p7 = { 0 };
-    rc = wolfcert_base64_decode(resp.body, resp.body_len, &p7, s->heap);
-
-    wolfcert_http_response_free(&resp);
-    if (rc != WOLFCERT_OK)
-        return rc;
-
-    rc = wolfcert_pkcs7_certs_to_pem(p7.data, p7.len, out_cert_pem, s->heap);
-
-    wolfcert_buffer_free(&p7);
-    return rc;
+    rc = wolfcert_est_session_simple_enroll_ex(s, csr_der, csr_der_len, &r);
+    return est_result_flatten(rc, &r, out_cert_pem);
 }
 
 int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
