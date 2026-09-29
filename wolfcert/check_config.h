@@ -49,6 +49,7 @@
     #define WOLFSSL_USE_OPTIONS_H
 #endif
 #include <wolfssl/wolfcrypt/settings.h>
+#include <wolfssl/version.h>
 
 #if defined(WOLFSSL_USE_OPTIONS_H) && !defined(WOLFSSL_OPTIONS_H) && \
     !defined(WOLFSSL_NO_OPTIONS_H)
@@ -84,6 +85,10 @@
 
 #if !defined(WOLFCERT_NO_WOLFSSL_FEATURE_CHECK) && \
     !defined(WOLFCERT_WOLFSSL_CONFIG_UNRESOLVED)
+
+#if LIBWOLFSSL_VERSION_HEX < 0x05009004
+#error "wolfCert requires wolfSSL 5.9.4 or newer."
+#endif
 
 /* Mandatory wolfSSL features. Rebuild wolfSSL with:
  *   ./configure --enable-pkcs7 --enable-certgen --enable-certreq \

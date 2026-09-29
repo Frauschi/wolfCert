@@ -36,6 +36,7 @@ jobs:
           - { name: autoconf-full,         os: ubuntu-latest, build: autoconf, wolfssl: full }
           - { name: cmake-full-opensslextra, os: ubuntu-latest, build: cmake,  wolfssl: full-opensslextra }
           - { name: cmake-full-all,        os: ubuntu-latest, build: cmake,    wolfssl: full-all }
+          - { name: cmake-full-floor,      os: ubuntu-latest, build: cmake,    wolfssl: full, wolfssl_ref: v5.9.4-stable }
           # ---- wolfSSL key-alg / crypto variants (also gated in pr.yml; kept
           #      here to seed their distinct prefixes + retest fresh master) ----
           - { name: cmake-est-only-nonrsa, os: ubuntu-latest, build: cmake,    wolfssl: est-only-nonrsa, cmake_extra: -DWOLFCERT_ENABLE_SCEP=OFF }
@@ -78,7 +79,7 @@ jobs:
         uses: ./.github/actions/build-wolfssl
         with:
           config: ${{ matrix.wolfssl }}
-          ref: ${{ env.WOLFSSL_REF }}
+          ref: ${{ matrix.wolfssl_ref || env.WOLFSSL_REF }}
           save: "true"   # nightly (re)seeds the shared cache for PR runs
 
       - name: Build & test (CMake)

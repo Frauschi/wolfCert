@@ -61,15 +61,6 @@ none of `WOLFSSL_USER_SETTINGS`, `WOLFSSL_NO_OPTIONS_H`,
 among those because `settings.h` picks a config for them itself, past the point
 it would read `options.h`.
 
-STM32CubeMX2 needs one extra step on wolfSSL 5.9.2, where `settings.h` locates
-`mx_wolfSSL_conf.h` by probing with `__has_include` and so sets
-`WOLFSSL_MX2_CONF_INCLUDE` too late for the test above to see. Those builds need
-`WOLFSSL_CUSTOM_CONFIG` *and* an explicit `#include "mx_wolfSSL_conf.h"`, since
-the probe is itself switched off by `WOLFSSL_CUSTOM_CONFIG`, as it is by
-`WOLFSSL_NO_OPTIONS_H`. Later wolfSSL drops the probe and takes
-`WOLFSSL_MX2_CONF_INCLUDE` from the pack's generated `Pre_Include_Global.h`,
-which the test above does see, so nothing extra is needed there.
-
 This makes include order matter for a build that takes its feature set from
 `<wolfssl/options.h>` - the ordinary autoconf or CMake wolfSSL. `settings.h` is
 header-guarded, so a wolfSSL header reaching it before any wolfCert header

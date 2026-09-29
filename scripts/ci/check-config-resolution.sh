@@ -4,7 +4,7 @@
 # Config-resolution gate: wolfCert's two public entry points must resolve the
 # same wolfSSL feature set from the same flags.
 #
-#   <wolfcert/wolfcert.h>  -> memory.h -> types.h -> check_config.h
+#   <wolfcert/wolfcert.h>  -> types.h -> check_config.h
 #   <wolfcert/est.h>       ->             types.h -> check_config.h
 #
 # Each case stages an <wolfssl/options.h> that disagrees with user_settings.h;

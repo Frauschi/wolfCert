@@ -47,7 +47,7 @@
  *     WOLFCERT_HAVE_RSA.
  *
  * The enabled set must also be backed by the wolfSSL you link against. wolfCert
- * requires a wolfSSL (>= 5.9.2) built with at least:
+ * requires a wolfSSL (>= 5.9.4) built with at least:
  *   --enable-pkcs7 --enable-certgen --enable-certreq --enable-certext
  *   --enable-keygen --enable-cryptocb --enable-base64encode
  *   CPPFLAGS="-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL -DWOLFSSL_PUBLIC_ASN"

@@ -164,9 +164,9 @@ AS_IF([test "x$with_wolfssl" != "xno" && test "x$with_wolfssl" != "xyes" && test
      wolfssl_origin=" (from $with_wolfssl)"
      AC_MSG_NOTICE([using wolfSSL from $with_wolfssl])])
 
-PKG_CHECK_MODULES([WOLFSSL], [wolfssl >= 5.9.2],
+PKG_CHECK_MODULES([WOLFSSL], [wolfssl >= 5.9.4],
     [have_wolfssl=yes],
-    [AC_MSG_ERROR([wolfssl >= 5.9.2 not found via pkg-config. wolfCert
+    [AC_MSG_ERROR([wolfssl >= 5.9.4 not found via pkg-config. wolfCert
       requires a wolfSSL build with HAVE_PKCS7, WOLFSSL_CERT_GEN,
       WOLFSSL_CERT_REQ, WOLFSSL_CERT_EXT, WOLFSSL_KEY_GEN, HAVE_ECC,
       WOLF_CRYPTO_CB, WOLFSSL_BASE64_ENCODE, WOLFSSL_ALT_NAMES,

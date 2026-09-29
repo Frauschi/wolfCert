@@ -458,7 +458,7 @@ static int ca_key_param(WolfCertKeyType t)
  * certificate against the CA. A pub_check that leaves the key's public half
  * unset passes the pair check and still signs garbage, so asserting the
  * reload alone would miss it. */
-static int reloaded_ca_signs(WolfCertStoreOps* store, WolfCertKeyType ca_type)
+static int reloaded_ca_signs(WolfCertStoreOps* store)
 {
     /* Any compiled algorithm serves as the leaf; the first entry always is. */
     WolfCertKeyCfg kcfg = { .type = CA_KEY_TYPES[0],
@@ -481,19 +481,6 @@ static int reloaded_ca_signs(WolfCertStoreOps* store, WolfCertKeyType ca_type)
     rc = wolfcert_ca_issue(&ca, csr.data, csr.len, &issued, &issued_len);
     wolfcert_buffer_free(&csr);
     REQUIRE(rc == WOLFCERT_OK);
-
-    (void)ca_type;
-#ifdef WOLFSSL_NO_MALLOC
-    /* A WOLFSSL_NO_MALLOC wolfSSL never copies an RSA public key onto the CA
-     * Signer, so its chain verify fails BAD_FUNC_ARG. Assert the issue half
-     * only, until that lands upstream and the declared wolfSSL floor clears
-     * it. */
-    if (ca_type == WOLFCERT_KEY_RSA) {
-        WOLFCERT_XFREE(issued, ca.heap);
-        wolfcert_ca_free(&ca);
-        return 0;
-    }
-#endif
 
     cm = wolfSSL_CertManagerNew();
     REQUIRE(cm != NULL);
@@ -531,7 +518,7 @@ static int test_every_alg_reloads(void)
         REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
         wolfcert_server_free(srv);
 
-        if (reloaded_ca_signs(store, CA_KEY_TYPES[i]))
+        if (reloaded_ca_signs(store))
             return 1;
 
         wolfcert_store_memory_close(store);

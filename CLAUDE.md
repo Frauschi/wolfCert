@@ -26,7 +26,7 @@ cmake --build build -j
 make -j
 ```
 
-wolfCert targets **wolfSSL >= 5.9.2**. The build **hard-fails** at
+wolfCert targets **wolfSSL >= 5.9.4**. The build **hard-fails** at
 configure time if the installed wolfSSL lacks any of `HAVE_PKCS7`,
 `WOLFSSL_CERT_GEN`, `WOLFSSL_CERT_REQ`, `WOLFSSL_CERT_EXT`,
 `WOLFSSL_KEY_GEN`, `WOLF_CRYPTO_CB`, `WOLFSSL_BASE64_ENCODE`,

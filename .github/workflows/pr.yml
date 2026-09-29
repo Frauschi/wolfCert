@@ -54,6 +54,13 @@ jobs:
             os: ubuntu-latest
             build: autoconf
             wolfssl: full
+          # ---- The oldest wolfSSL release wolfCert supports ----
+          - name: cmake-full-floor
+            os: ubuntu-latest
+            build: cmake
+            wolfssl: full
+            wolfssl_ref: v5.9.4-stable
+            cmake_extra: -DWOLFCERT_WERROR=ON
           - name: cmake-full-asan-ubsan
             os: ubuntu-latest
             build: cmake
@@ -165,7 +172,7 @@ jobs:
         uses: ./.github/actions/build-wolfssl
         with:
           config: ${{ matrix.wolfssl }}
-          ref: ${{ env.WOLFSSL_REF }}
+          ref: ${{ matrix.wolfssl_ref || env.WOLFSSL_REF }}
           save: "false"   # PR is restore-only; the nightly reseeds the cache
 
       - name: Build & test (CMake)
