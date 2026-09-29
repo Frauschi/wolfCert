@@ -56,7 +56,7 @@ make -j
 
 ### wolfSSL prerequisite
 
-wolfCert targets **wolfSSL >= 5.9.2** and must find it via `pkg-config`
+wolfCert targets **wolfSSL >= 5.9.4** and must find it via `pkg-config`
 (`wolfssl`). The configure-time probe hard-fails with a specific "rebuild
 wolfSSL with --enable-X" diagnostic if a required wolfSSL feature is missing.
 A canonical wolfSSL configure line that satisfies every requirement, plus the

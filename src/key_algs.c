@@ -348,13 +348,7 @@ static int ed25519_pub_check(struct WolfCertKey* k, const uint8_t* pub,
     if (memcmp(mine, pub, sizeof(mine)) != 0)
         return WOLFCERT_ERR_PARSE;
 
-    /* On wolfSSL 5.9.2 make_public only sets pubKeySet, leaving key->p empty
-     * while wc_ed25519_sign_msg() hashes it -- so import the half we just
-     * verified. Newer wolfSSL stores it itself and this is a no-op. */
-    rc = wc_ed25519_import_public(mine, sizeof(mine), (ed25519_key*)k->impl);
-
-    return rc == 0 ? WOLFCERT_OK
-                   : WOLFCERT_ERR_WC(rc, "keygen", "ed25519_import_public");
+    return WOLFCERT_OK;
 }
 
 static void ed25519_free(struct WolfCertKey* k)
@@ -423,14 +417,7 @@ static int ed448_pub_check(struct WolfCertKey* k, const uint8_t* pub,
     if (memcmp(mine, pub, sizeof(mine)) != 0)
         return WOLFCERT_ERR_PARSE;
 
-    /* wc_ed448_make_public() sets pubKeySet but, unlike its Ed25519
-     * counterpart, leaves key->p untouched -- and wc_ed448_sign_msg() gates
-     * on the flag while hashing key->p. Import the half we just verified, or
-     * every certificate this CA issues is signed over an all-zero key. */
-    rc = wc_ed448_import_public(mine, sizeof(mine), (ed448_key*)k->impl);
-
-    return rc == 0 ? WOLFCERT_OK
-                   : WOLFCERT_ERR_WC(rc, "keygen", "ed448_import_public");
+    return WOLFCERT_OK;
 }
 
 static void ed448_free(struct WolfCertKey* k)

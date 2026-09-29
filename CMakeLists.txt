@@ -86,16 +86,17 @@ if(WITH_WOLFSSL)
 endif()
 
 # Prefer a CMake package config (newer wolfSSL), fall back to pkg-config.
+# The package config records only MAJOR.MINOR, so the floor is probed below.
 find_package(wolfssl CONFIG QUIET)
 if(NOT wolfssl_FOUND)
     find_package(PkgConfig QUIET)
     if(PkgConfig_FOUND)
-        pkg_check_modules(WOLFSSL IMPORTED_TARGET wolfssl)
+        pkg_check_modules(WOLFSSL IMPORTED_TARGET "wolfssl>=5.9.4")
     endif()
     if(NOT WOLFSSL_FOUND)
         message(FATAL_ERROR
-            "wolfSSL not found via CMake config or pkg-config. wolfCert "
-            "requires wolfSSL 5.9.2 or newer, built with: HAVE_PKCS7, "
+            "wolfSSL >= 5.9.4 not found via CMake config or pkg-config. "
+            "wolfCert requires wolfSSL 5.9.4 or newer, built with: HAVE_PKCS7, "
             "WOLFSSL_CERT_GEN, WOLFSSL_CERT_REQ, WOLFSSL_CERT_EXT, "
             "WOLFSSL_KEY_GEN, HAVE_ECC, WOLF_CRYPTO_CB, WOLFSSL_BASE64_ENCODE, "
             "WOLFSSL_ALT_NAMES, WOLFSSL_CERT_NAME_ALL; a shared wolfSSL also "
@@ -120,6 +121,17 @@ set(_wc_wolfssl_prologue "
 ")
 
 set(CMAKE_REQUIRED_INCLUDES ${_wolfssl_cflags})
+unset(_have_wolfssl_floor CACHE)
+check_c_source_compiles("${_wc_wolfssl_prologue}
+    #include <wolfssl/version.h>
+    #if LIBWOLFSSL_VERSION_HEX < 0x05009004
+    #error too old
+    #endif
+    int main(void) { return 0; }
+" _have_wolfssl_floor)
+if(NOT _have_wolfssl_floor)
+    message(FATAL_ERROR "wolfCert requires wolfSSL 5.9.4 or newer.")
+endif()
 foreach(sym IN ITEMS HAVE_PKCS7 WOLFSSL_CERT_GEN WOLFSSL_CERT_REQ WOLFSSL_CERT_EXT
                      WOLFSSL_KEY_GEN WOLF_CRYPTO_CB WOLFSSL_BASE64_ENCODE
                      WOLFSSL_ALT_NAMES WOLFSSL_CERT_NAME_ALL)

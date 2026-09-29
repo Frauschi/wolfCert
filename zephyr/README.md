@@ -12,8 +12,7 @@ builds it; the on-target tests enrol against `wolfcert-server` on the host.
 ## Requirements
 
 - Zephyr and its matching SDK; tested with Zephyr **v4.4.2** and SDK 1.0.1.
-- wolfSSL from **master**: wolfCert calls `wc_SetDNSEntry()` and
-  `wc_SetAltNamesFromList()`, which are not in the v5.9.2 release.
+- wolfSSL **v5.9.4** or newer.
 
 ## Adding wolfCert to a west workspace
 
@@ -26,7 +25,7 @@ manifest:
   projects:
     - name: wolfssl
       path: modules/crypto/wolfssl
-      revision: master
+      revision: v5.9.4-stable
       remote: wolfssl
     - name: wolfCert
       path: modules/lib/wolfcert

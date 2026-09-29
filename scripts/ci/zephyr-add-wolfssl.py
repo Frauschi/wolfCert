@@ -4,8 +4,8 @@
 
 Usage: zephyr-add-wolfssl.py <west.yml> <revision>
 
-wolfCert needs wolfSSL features the upstream manifest does not carry, and
-calls wc_SetDNSEntry(), which is in no release tag. Idempotent.
+wolfCert needs wolfSSL 5.9.4 or newer, which the upstream manifest does not
+carry. Idempotent.
 """
 
 import sys
