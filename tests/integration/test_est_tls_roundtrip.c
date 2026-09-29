@@ -42,6 +42,7 @@
 #include <wolfssl/wolfcrypt/random.h>
 
 #include "tls_test_util.h"
+#include "est_client_cases.h"
 #include <wolfssl/wolfcrypt/rsa.h>
 
 #include <pthread.h>
@@ -59,6 +60,144 @@
 
 
 static void* server_thread(void* arg) { wolfcert_server_run((WolfCertServer*)arg); return NULL; }
+
+static int impostor_customize(void* wolfssl_cert, void* ctx)
+{
+    Cert* c = (Cert*)wolfssl_cert;
+
+    *(int*)ctx = 1;
+    snprintf(c->subject.commonName, sizeof(c->subject.commonName), "%s",
+             "impostor");
+    return WOLFCERT_OK;
+}
+
+/* The issued cert must name CN=reenroll-device with iPAddress SAN 127.0.0.1. */
+static int check_renewed_identity(const WolfCertBuffer* issued)
+{
+    static const uint8_t ip[4] = { 127, 0, 0, 1 };
+    uint8_t der[4096];
+    DecodedCert dc;
+    int der_len;
+    int found;
+
+    der_len = wc_CertPemToDer(issued->data, (int)issued->len, der,
+                              (int)sizeof(der), CERT_TYPE);
+    REQUIRE(der_len > 0);
+
+    wc_InitDecodedCert(&dc, der, (word32)der_len, NULL);
+    REQUIRE(wc_ParseCert(&dc, CERT_TYPE, NO_VERIFY, NULL) == 0);
+    REQUIRE(dc.subjectCN != NULL);
+    REQUIRE(dc.subjectCNLen == (int)strlen("reenroll-device"));
+    REQUIRE(memcmp(dc.subjectCN, "reenroll-device",
+                   strlen("reenroll-device")) == 0);
+    found = has_alt(dc.altNames, ASN_IP_TYPE, (const char*)ip,
+                    (int)sizeof(ip));
+    wc_FreeDecodedCert(&dc);
+    REQUIRE(found);
+    return 0;
+}
+
+/* 1 when both PEM certs carry the same public key, 0 when not, -1 on error. */
+static int same_public_key(const uint8_t* a, size_t a_len, const uint8_t* b,
+                           size_t b_len)
+{
+    uint8_t der[2][4096];
+    DecodedCert dc[2];
+    int len[2];
+    int ret = -1;
+
+    len[0] = wc_CertPemToDer(a, (int)a_len, der[0], (int)sizeof(der[0]),
+                             CERT_TYPE);
+    len[1] = wc_CertPemToDer(b, (int)b_len, der[1], (int)sizeof(der[1]),
+                             CERT_TYPE);
+    if (len[0] <= 0 || len[1] <= 0)
+        return -1;
+
+    wc_InitDecodedCert(&dc[0], der[0], (word32)len[0], NULL);
+    wc_InitDecodedCert(&dc[1], der[1], (word32)len[1], NULL);
+    if (wc_ParseCert(&dc[0], CERT_TYPE, NO_VERIFY, NULL) == 0 &&
+            wc_ParseCert(&dc[1], CERT_TYPE, NO_VERIFY, NULL) == 0)
+        ret = dc[0].pubKeySize == dc[1].pubKeySize &&
+              memcmp(dc[0].publicKey, dc[1].publicKey,
+                     dc[0].pubKeySize) == 0;
+    wc_FreeDecodedCert(&dc[0]);
+    wc_FreeDecodedCert(&dc[1]);
+    return ret;
+}
+
+/* Reenroll with a mismatched meta, with a renaming customize callback, then
+ * with a fresh key. */
+static int test_client_reenroll_keeps_identity(const char* url,
+                                               const uint8_t* tls_cert,
+                                               size_t tls_cert_len)
+{
+    static const char* const impostor_dns[] = { "impostor.example" };
+    uint8_t* cur_cert = NULL;
+    size_t cur_cert_len = 0;
+    uint8_t* cur_key_pem = NULL;
+    size_t cur_key_len = 0;
+    WolfCertKey* cur_key = NULL;
+    WolfCertKey* out_key = NULL;
+    WolfCertBuffer issued = { 0 };
+    WolfCertCertMeta meta;
+    WolfCertServerCfg cli = {
+        .protocol          = WOLFCERT_PROTO_EST,
+        .server_url        = url,
+        .trust_anchors     = tls_cert,
+        .trust_anchors_len = tls_cert_len,
+        .verify_server     = 1,
+    };
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE,
+                            .param = TEST_ENROLL_KEY_PARAM,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    int called = 0;
+
+    REQUIRE(mint_self_id("reenroll-device", 0, &cur_cert, &cur_cert_len,
+                         &cur_key_pem, &cur_key_len) == 0);
+    REQUIRE(wolfcert_key_from_pem(cur_key_pem, cur_key_len, NULL, &cur_key)
+            == WOLFCERT_OK);
+
+    memset(&meta, 0, sizeof(meta));
+    meta.subject_dn = "CN=impostor";
+    REQUIRE(wolfcert_client_reenroll(NULL, &cli, cur_cert, cur_cert_len,
+                                     cur_key, NULL, &meta, &out_key, &issued)
+            == WOLFCERT_ERR_BAD_ARG);
+
+    memset(&meta, 0, sizeof(meta));
+    meta.san_dns     = impostor_dns;
+    meta.san_dns_len = 1;
+    REQUIRE(wolfcert_client_reenroll(NULL, &cli, cur_cert, cur_cert_len,
+                                     cur_key, NULL, &meta, &out_key, &issued)
+            == WOLFCERT_ERR_BAD_ARG);
+
+    /* The caller's callback still runs but cannot rename the cert. */
+    memset(&meta, 0, sizeof(meta));
+    meta.customize     = impostor_customize;
+    meta.customize_ctx = &called;
+    REQUIRE(wolfcert_client_reenroll(NULL, &cli, cur_cert, cur_cert_len,
+                                     cur_key, NULL, &meta, &out_key, &issued)
+            == WOLFCERT_OK);
+    REQUIRE(called == 1);
+    REQUIRE(out_key == NULL);
+    REQUIRE(check_renewed_identity(&issued) == 0);
+    wolfcert_buffer_free(&issued);
+
+    memset(&meta, 0, sizeof(meta));
+    REQUIRE(wolfcert_client_reenroll(NULL, &cli, cur_cert, cur_cert_len,
+                                     cur_key, &kcfg, &meta, &out_key, &issued)
+            == WOLFCERT_OK);
+    REQUIRE(out_key != NULL);
+    REQUIRE(check_renewed_identity(&issued) == 0);
+    REQUIRE(same_public_key(issued.data, issued.len, cur_cert,
+                            cur_cert_len) == 0);
+
+    wolfcert_key_free(out_key);
+    wolfcert_buffer_free(&issued);
+    wolfcert_key_free(cur_key);
+    free(cur_cert);
+    free(cur_key_pem);
+    return 0;
+}
 
 int main(void)
 {
@@ -156,6 +295,9 @@ int main(void)
     REQUIRE(ca_pem_der.len > 0);
     wolfcert_buffer_free(&ca_pem_der);
     wc_FreeDer(&ta_der);
+
+    REQUIRE(test_client_reenroll_keeps_identity(url, tls_cert, tls_cert_len)
+            == 0);
 
     wolfcert_server_stop(srv);
     pthread_join(tid, NULL);

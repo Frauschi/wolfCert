@@ -104,8 +104,18 @@ expect_reject "over-long --serial"     "20 octets" \
 
 # reenroll authenticates TLS with --cert/--key, so a separate identity is refused.
 expect_reject "reenroll with --client-cert" "--client-cert/--client-key are not used" \
-    reenroll --proto est --url "$EST_URL" --subject CN=x --cert /dev/null \
+    reenroll --proto est --url "$EST_URL" --cert /dev/null \
     --key /dev/null --client-cert /dev/null --client-key /dev/null
+
+# reenroll refuses --subject and --san-*.
+expect_reject "reenroll with --subject" "--subject/--san-* are not used" \
+    reenroll --proto est --url "$EST_URL" --subject CN=x --cert /dev/null \
+    --key /dev/null
+for san in --san-dns --san-ip --san-uri --san-email; do
+    expect_reject "reenroll with $san" "--subject/--san-* are not used" \
+        reenroll --proto est --url "$EST_URL" "$san" x --cert /dev/null \
+        --key /dev/null
+done
 
 # The accept side of the same boundary: 20 octets is the longest RFC 5280
 # permits and must get past parse_serial, failing later on the unreachable

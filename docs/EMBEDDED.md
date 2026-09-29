@@ -102,7 +102,7 @@ miscompile.
 | Consumer | Where it lives | Default size | Dominated by |
 |----------|----------------|--------------|--------------|
 | wolfSSL `Cert` (CSR / cert build) | **heap** (`wc_CertNew`) | ~20+ KB | `altNames[16384]` |
-| wolfSSL `DecodedCert` (cert parse) | **stack**, transient | several KB | parse scratch |
+| wolfSSL `DecodedCert` (cert parse) | **stack** or **heap**, transient | several KB | parse scratch |
 | HTTP request handling | **stack** (EST + client); **heap** (SCEP server) | 2-3 KB stack | request read buffer |
 
 The good news: wolfCert never stack-allocates a `Cert`. Every CSR/cert
@@ -120,12 +120,12 @@ the bulk of the size (defaults from `wolfssl/wolfcrypt/asn_public.h`):
 | Macro | Default | Effect |
 |-------|---------|--------|
 | `WC_CTC_MAX_ALT_SIZE` | `16384` | size of `Cert.altNames[]` - the encoded SAN extension. **Single largest contributor.** |
-| `WC_CTC_NAME_SIZE` | `64` | size of every `CertName` string field (CN, O, OU, ...). `CertName` carries ~19 such fields under the `WOLFSSL_CERT_NAME_ALL` + `WOLFSSL_CERT_EXT` config wolfCert requires, ×2 for issuer+subject, plus raw copies. |
+| `WC_CTC_NAME_SIZE` | `64` | size of every `CertName` string field (CN, O, OU, ...). `CertName` carries ~23 such fields under the `WOLFSSL_CERT_NAME_ALL` + `WOLFSSL_CERT_EXT` config wolfCert requires, ×2 for issuer+subject, plus raw copies. |
 
 These are **wolfSSL** settings, not wolfCert ones - set them when you build
 wolfSSL (via `user_settings.h` or `CPPFLAGS`), and wolfCert picks up
 whatever wolfSSL provides. For example, to drop a `Cert` from ~20 KB to
-~3 KB:
+~5 KB:
 
 ```c
 /* user_settings.h, when building wolfSSL */
@@ -142,7 +142,10 @@ Trade-offs:
   `WOLFCERT_ERR_BAD_ARG` rather than truncating it - both when a client
   builds a CSR (`assign_rdn()` in `src/csr.c`) and when the test server
   issues from one (`wolfcert_copy_csr_subject()` in `src/ca_issue.c`) - so
-  shrinking this caps how long a CN you can request.
+  shrinking this caps how long a CN you can request. A renewal instead
+  copies the certificate's subject whole, so there the limit is the total
+  encoded name, `sizeof(CertName)` (about 800 bytes at 32), and a longer one
+  fails with `WOLFCERT_ERR_UNSUPPORTED`.
 - Disabling `WOLFSSL_CERT_NAME_ALL` and/or `WOLFSSL_CERT_EXT` in wolfSSL
   removes the less-common `CertName` fields entirely - but wolfCert's
   build requires both (see `CLAUDE.md` / `CMakeLists.txt`), so prefer

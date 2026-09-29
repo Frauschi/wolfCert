@@ -67,8 +67,9 @@ WOLFCERT_API int  wolfcert_client_enroll(WolfCertClient* client,
                                          WolfCertKey** out_key,
                                          WolfCertBuffer* out_cert_pem);
 
-/* Re-enroll using an existing cert/key. If new_key_cfg is NULL the existing
- * key is reused; otherwise a fresh key is generated. */
+/* Re-enroll using an existing cert/key; a NULL new_key_cfg reuses the key.
+ * The CSR copies current_cert's Subject and SAN: WOLFCERT_ERR_BAD_ARG if meta
+ * sets them, _PARSE for a bad cert, _UNSUPPORTED if one cannot be carried. */
 WOLFCERT_API int  wolfcert_client_reenroll(WolfCertClient* client,
                                            const WolfCertServerCfg* srv,
                                            const uint8_t* current_cert, size_t current_cert_len,

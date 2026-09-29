@@ -271,11 +271,171 @@ static int choose_sig_type(const WolfCertKey* key, const WolfCertKeyAlg* alg,
     return alg->ctc_sig_default;
 }
 
+/* Find the subjectAltName extension in a certificate's [3] Extensions and
+ * return its GeneralNames bytes; *san stays NULL when there is none. */
+static int find_san(const byte* ext, int ext_sz, const byte** san,
+                    word32* san_len)
+{
+    static const byte san_oid[] = { ASN_OBJECT_ID, 0x03, 0x55, 0x1D, 0x11 };
+    word32 idx = 0;
+    word32 end = 0;
+    word32 ext_end = 0;
+    int len = 0;
+    int rc = WOLFCERT_OK;
+    byte tag = 0;
+
+    *san = NULL;
+    *san_len = 0;
+    if (ext == NULL || ext_sz <= 0)
+        return WOLFCERT_OK;
+
+    if (GetASNTag(ext, &idx, &tag, (word32)ext_sz) < 0 ||
+            tag != (ASN_CONTEXT_SPECIFIC | ASN_CONSTRUCTED | 3) ||
+            GetLength(ext, &idx, &len, (word32)ext_sz) < 0 ||
+            GetASNTag(ext, &idx, &tag, (word32)ext_sz) < 0 ||
+            tag != (ASN_SEQUENCE | ASN_CONSTRUCTED) ||
+            GetLength(ext, &idx, &len, (word32)ext_sz) < 0)
+        rc = WOLFCERT_ERR_PARSE;
+    else
+        end = idx + (word32)len;
+
+    /* Extension ::= SEQUENCE { OID, critical BOOLEAN OPTIONAL, OCTET STRING } */
+    while (rc == WOLFCERT_OK && *san == NULL && idx < end) {
+        if (GetASNTag(ext, &idx, &tag, end) < 0 ||
+                tag != (ASN_SEQUENCE | ASN_CONSTRUCTED) ||
+                GetLength(ext, &idx, &len, end) < 0) {
+            rc = WOLFCERT_ERR_PARSE;
+        }
+        else {
+            ext_end = idx + (word32)len;
+            if (ext_end - idx < sizeof(san_oid) ||
+                    memcmp(ext + idx, san_oid, sizeof(san_oid)) != 0) {
+                idx = ext_end;
+            }
+            else {
+                idx += (word32)sizeof(san_oid);
+                if (idx < ext_end && ext[idx] == ASN_BOOLEAN) {
+                    if (GetASNTag(ext, &idx, &tag, ext_end) < 0 ||
+                            GetLength(ext, &idx, &len, ext_end) < 0)
+                        rc = WOLFCERT_ERR_PARSE;
+                    else
+                        idx += (word32)len;
+                }
+                if (rc == WOLFCERT_OK &&
+                        (GetASNTag(ext, &idx, &tag, ext_end) < 0 ||
+                         tag != ASN_OCTET_STRING ||
+                         GetLength(ext, &idx, &len, ext_end) < 0))
+                    rc = WOLFCERT_ERR_PARSE;
+                if (rc == WOLFCERT_OK) {
+                    *san = ext + idx;
+                    *san_len = (word32)len;
+                }
+            }
+        }
+    }
+
+    return rc;
+}
+
+/* Copy renew_cert's Subject and SAN into cert */
+static int copy_cert_identity(Cert* cert, const uint8_t* renew_cert,
+                              size_t renew_cert_len, void* heap)
+{
+    WolfCertBuffer pem_der = { 0 };
+    const uint8_t* der = renew_cert;
+    size_t der_len = renew_cert_len;
+    DecodedCert* dc = NULL;
+    const byte* san = NULL;
+    word32 san_len = 0;
+    int rc = WOLFCERT_OK;
+    int wrc;
+
+    if (!wolfcert_buffer_is_der(renew_cert, renew_cert_len)) {
+        rc = wolfcert_pem_cert_to_der(renew_cert, renew_cert_len, &pem_der,
+                                      heap);
+        if (rc == WOLFCERT_ERR_PARSE)
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "csr",
+                              "certificate being renewed is not PEM or DER");
+        der = pem_der.data;
+        der_len = pem_der.len;
+    }
+
+    if (rc == WOLFCERT_OK) {
+        dc = (DecodedCert*)WOLFCERT_XMALLOC(sizeof(*dc), heap);
+        if (dc == NULL)
+            rc = WOLFCERT_ERR_MEMORY;
+    }
+    if (rc == WOLFCERT_OK) {
+        wc_InitDecodedCert(dc, der, (word32)der_len, heap);
+        wrc = wc_ParseCert(dc, CERT_TYPE, NO_VERIFY, NULL);
+        /* Only the identity is read; an unknown critical extension is fine */
+        if (wrc != 0 && wrc != ASN_CRIT_EXT_E)
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "csr",
+                              "certificate being renewed does not parse (%d)",
+                              wrc);
+    }
+
+    /* Leave an empty Name blank; copy any other into sbjRaw if NUL-free */
+    if (rc == WOLFCERT_OK && dc->subjectRaw != NULL &&
+            dc->subjectRawLen == 0) {
+        memset(&cert->subject, 0, sizeof(cert->subject));
+        cert->sbjRaw[0] = '\0';
+    }
+    else if (rc == WOLFCERT_OK &&
+            (dc->subjectRaw == NULL || dc->subjectRawLen <= 0 ||
+             dc->subjectRawLen >= (int)sizeof(cert->sbjRaw) ||
+             memchr(dc->subjectRaw, 0x00, (size_t)dc->subjectRawLen) != NULL)) {
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "csr",
+                          "certificate subject cannot be carried into a CSR");
+    }
+    else if (rc == WOLFCERT_OK) {
+        memcpy(cert->sbjRaw, dc->subjectRaw, (size_t)dc->subjectRawLen);
+        cert->sbjRaw[dc->subjectRawLen] = '\0';
+    }
+
+    if (rc == WOLFCERT_OK &&
+            find_san(dc->extensions, dc->extensionsSz, &san, &san_len) !=
+            WOLFCERT_OK)
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "csr",
+                          "certificate extensions do not parse");
+    if (rc == WOLFCERT_OK && san_len > sizeof(cert->altNames))
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "csr",
+                          "certificate SAN is %u bytes, limit %zu",
+                          (unsigned)san_len, sizeof(cert->altNames));
+    if (rc == WOLFCERT_OK) {
+        if (san != NULL)
+            memcpy(cert->altNames, san, san_len);
+        cert->altNamesSz = (int)san_len;
+        cert->altNamesCrit = dc->extSubjAltNameCrit;
+    }
+
+    if (dc != NULL) {
+        wc_FreeDecodedCert(dc);
+        WOLFCERT_XFREE(dc, heap);
+    }
+    wolfcert_buffer_free(&pem_der);
+    return rc;
+}
+
 int wolfcert_csr_build(const WolfCertKey* key, const WolfCertCertMeta* meta,
                        WolfCertBuffer* out_der)
 {
+    return wolfcert_csr_build_ex(key, meta, NULL, 0, out_der);
+}
+
+int wolfcert_csr_build_ex(const WolfCertKey* key, const WolfCertCertMeta* meta,
+                          const uint8_t* renew_cert, size_t renew_cert_len,
+                          WolfCertBuffer* out_der)
+{
     if (key == NULL || meta == NULL || out_der == NULL)
         return WOLFCERT_ERR_BAD_ARG;
+
+    if (renew_cert != NULL &&
+            (meta->subject_dn != NULL || meta->san_dns_len != 0 ||
+             meta->san_ip_len != 0 || meta->san_uri_len != 0 ||
+             meta->san_email_len != 0))
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "csr",
+            "a renewal keeps the certificate's subject and SAN");
 
     void* heap = key->heap ? key->heap : wolfcert_default_heap();
 
@@ -332,6 +492,15 @@ int wolfcert_csr_build(const WolfCertKey* key, const WolfCertCertMeta* meta,
         }
     }
 
+    /* After customize, so the callback cannot change a renewal's identity */
+    if (renew_cert != NULL) {
+        rc = copy_cert_identity(cert, renew_cert, renew_cert_len, heap);
+        if (rc != WOLFCERT_OK) {
+            wc_CertFree(cert);
+            return rc;
+        }
+    }
+
     const WolfCertKeyAlg* alg = wolfcert_key_alg(key->type);
     if (alg == NULL) {
         wc_CertFree(cert);
@@ -339,12 +508,14 @@ int wolfcert_csr_build(const WolfCertKey* key, const WolfCertCertMeta* meta,
     }
     cert->sigType = choose_sig_type(key, alg, meta);
 
-    /* Size the DER buffer: algorithm hint + RSA modulus head room. */
+    /* Size the DER buffer: algorithm hint + RSA modulus head room + the
+     * subject and SAN carried. */
     size_t der_cap = alg->der_cap_hint + 1024;
     if (key->type == WOLFCERT_KEY_RSA) {
         size_t bits = key->rsa_bits ? (size_t)key->rsa_bits : 4096;
         der_cap = bits + 2048;
     }
+    der_cap += (size_t)cert->altNamesSz + strlen((const char*)cert->sbjRaw);
     uint8_t* der = (uint8_t*)WOLFCERT_XMALLOC(der_cap, heap);
     if (der == NULL) {
         wc_CertFree(cert);

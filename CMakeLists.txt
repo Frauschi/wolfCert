@@ -165,18 +165,20 @@ check_c_source_compiles("
     extern char wc_SetDNSEntry(void);
     extern char wc_SetAltNamesFromList(void);
     extern char SetLength(void);
+    extern char GetASNTag(void);
+    extern char GetLength(void);
     int main(void)
     {
         return FreeAltNames() + wc_SetDNSEntry() + wc_SetAltNamesFromList() +
-            SetLength();
+            SetLength() + GetASNTag() + GetLength();
     }
 " _have_asn_helpers)
 unset(CMAKE_REQUIRED_LIBRARIES)
 if(NOT _have_asn_helpers)
     message(FATAL_ERROR
         "wolfSSL does not export its ASN helpers (wc_SetDNSEntry, "
-        "wc_SetAltNamesFromList, FreeAltNames, SetLength). Rebuild wolfSSL "
-        "with CPPFLAGS=\"-DWOLFSSL_PUBLIC_ASN\".")
+        "wc_SetAltNamesFromList, FreeAltNames, SetLength, GetASNTag, "
+        "GetLength). Rebuild wolfSSL with CPPFLAGS=\"-DWOLFSSL_PUBLIC_ASN\".")
 endif()
 
 # Features that default-on in wolfSSL and that wolfCert depends on
