@@ -508,7 +508,7 @@ int wolfcert_pem_cert_to_der(const uint8_t* pem, size_t pem_len,
     if (rc != 0 || der == NULL) {
         if (der != NULL)
             wc_FreeDer(&der);
-        return WOLFCERT_ERR_PARSE;
+        return rc == MEMORY_E ? WOLFCERT_ERR_MEMORY : WOLFCERT_ERR_PARSE;
     }
 
     uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(der->length, heap);

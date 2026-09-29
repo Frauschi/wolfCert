@@ -893,7 +893,9 @@ static int scep_finish(void* heap,
     if (rc == WOLFCERT_OK) {
         rc = wolfcert_scep_verify_rep_signer(rx_signer, rx_signer_len,
                                              ca_bundle, ca_bundle_len, heap);
-        if (rc != WOLFCERT_OK)
+        if (rc == WOLFCERT_ERR_MEMORY)
+            rc = WOLFCERT_ERR(rc, "scep", "out of memory checking the CertRep signer");
+        else if (rc != WOLFCERT_OK)
             rc = WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "scep",
                               "CertRep is not signed by the CA/RA certificate");
     }
@@ -1323,20 +1325,26 @@ WOLFCERT_TEST_VIS int wolfcert_scep_pem_has_cert(const uint8_t* pem, size_t pem_
 {
     static const char BEGIN[] = "-----BEGIN CERTIFICATE-----";
     const size_t blen = sizeof(BEGIN) - 1;
+    DecodedCert* dc;
     const char* p;
     const char* end;
+    int match = 0;
 
     if (pem == NULL || issuer == NULL || serial == NULL || pem_len < blen)
         return 0;
+
+    dc = (DecodedCert*)WOLFCERT_XMALLOC(sizeof(*dc), heap);
+    if (dc == NULL)
+        return WOLFCERT_ERR(WOLFCERT_ERR_MEMORY, "scep",
+            "GetCert: cannot allocate a DecodedCert");
 
     p   = (const char*)pem;
     end = p + pem_len;
 
     /* Compare the remaining length: p + blen would run past the buffer. */
-    while ((size_t)(end - p) >= blen) {
+    while (match == 0 && (size_t)(end - p) >= blen) {
         WolfCertBuffer der = { 0 };
-        DecodedCert dc;
-        int match;
+        int rc;
 
         if (memcmp(p, BEGIN, blen) != 0) {
             p++;
@@ -1344,36 +1352,36 @@ WOLFCERT_TEST_VIS int wolfcert_scep_pem_has_cert(const uint8_t* pem, size_t pem_
         }
 
         /* A bad entry must not end the search: the target may sit behind it. */
-        if (wolfcert_pem_cert_to_der((const uint8_t*)p, (size_t)(end - p),
-                                     &der, heap) != WOLFCERT_OK) {
-            p += blen;
-            continue;
+        rc = wolfcert_pem_cert_to_der((const uint8_t*)p, (size_t)(end - p),
+                                      &der, heap);
+        if (rc == WOLFCERT_ERR_MEMORY) {
+            match = WOLFCERT_ERR(WOLFCERT_ERR_MEMORY, "scep",
+                "GetCert: out of memory decoding a certificate");
+        }
+        else if (rc == WOLFCERT_OK) {
+            wc_InitDecodedCert(dc, der.data, (word32)der.len, heap);
+            rc = wc_ParseCert(dc, CERT_TYPE, NO_VERIFY, NULL);
+            if (rc == MEMORY_E) {
+                match = WOLFCERT_ERR(WOLFCERT_ERR_MEMORY, "scep",
+                    "GetCert: out of memory parsing a certificate");
+            }
+            else if (rc == 0) {
+                match = dc->serialSz > 0 &&
+                        (size_t)dc->serialSz == serial_len &&
+                        memcmp(dc->serial, serial, serial_len) == 0 &&
+                        dc->issuerRaw != NULL && dc->issuerRawLen > 0 &&
+                        (size_t)dc->issuerRawLen == issuer_len &&
+                        memcmp(dc->issuerRaw, issuer, issuer_len) == 0;
+            }
+            wc_FreeDecodedCert(dc);
         }
 
-        wc_InitDecodedCert(&dc, der.data, (word32)der.len, heap);
-        if (wc_ParseCert(&dc, CERT_TYPE, NO_VERIFY, NULL) != 0) {
-            wc_FreeDecodedCert(&dc);
-            wolfcert_buffer_free(&der);
-            p += blen;
-            continue;
-        }
-
-        match = dc.serialSz > 0 && (size_t)dc.serialSz == serial_len &&
-                memcmp(dc.serial, serial, serial_len) == 0 &&
-                dc.issuerRaw != NULL && dc.issuerRawLen > 0 &&
-                (size_t)dc.issuerRawLen == issuer_len &&
-                memcmp(dc.issuerRaw, issuer, issuer_len) == 0;
-
-        wc_FreeDecodedCert(&dc);
         wolfcert_buffer_free(&der);
-
-        if (match)
-            return 1;
-
         p += blen;
     }
 
-    return 0;
+    WOLFCERT_XFREE(dc, heap);
+    return match;
 }
 
 int wolfcert_scep_get_cert(const WolfCertServerCfg* srv,
@@ -1435,14 +1443,17 @@ int wolfcert_scep_get_cert(const WolfCertServerCfg* srv,
                                 key_der, key_der_len,
                                 "21", ias.data, ias.len, NULL, 0, out);
 
-    if (rc == WOLFCERT_OK && out->status == WOLFCERT_SCEP_STATUS_SUCCESS &&
-            !wolfcert_scep_pem_has_cert(out->cert_pem.data, out->cert_pem.len,
-                                        want_issuer, want_issuer_len,
-                                        want_serial, want_serial_len, heap)) {
-        wolfcert_buffer_free(&out->cert_pem);
-        out->status = WOLFCERT_SCEP_STATUS_UNSET;
-        rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
-            "GetCert returned no certificate with the requested issuer and serial");
+    if (rc == WOLFCERT_OK && out->status == WOLFCERT_SCEP_STATUS_SUCCESS) {
+        int has = wolfcert_scep_pem_has_cert(out->cert_pem.data,
+                                             out->cert_pem.len,
+                                             want_issuer, want_issuer_len,
+                                             want_serial, want_serial_len, heap);
+        if (has != 1) {
+            wolfcert_buffer_free(&out->cert_pem);
+            out->status = WOLFCERT_SCEP_STATUS_UNSET;
+            rc = (has < 0) ? has : WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
+                "GetCert returned no certificate with the requested issuer and serial");
+        }
     }
 
     wolfcert_buffer_free(&ias);

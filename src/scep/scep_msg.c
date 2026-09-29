@@ -462,7 +462,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
     const uint8_t* csr_der, size_t csr_len, uint8_t** out_der, size_t* out_len,
     void* heap)
 {
-    DecodedCert dc;
+    DecodedCert* dc;
     Cert*    cert;
     WC_RNG   rng;
     uint8_t* der;
@@ -486,6 +486,12 @@ WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
 
     wc_InitCert_ex(cert, heap, WOLFCERT_DEVID_SOFTWARE);
 
+    dc = (DecodedCert*)WOLFCERT_XMALLOC(sizeof(*dc), heap);
+    if (dc == NULL) {
+        wc_CertFree(cert);
+        return WOLFCERT_ERR_MEMORY;
+    }
+
     /* RFC 8894 section 2.3: the signer certificate SHOULD carry the same
      * subject name as the enclosed PKCS#10 request. The certificate is
      * self-signed, so its issuer name is the same DN.
@@ -496,33 +502,35 @@ WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
      * for a NUL-free DN that leaves room for a terminator, and fall back to the
      * request's common name otherwise. The signer subject is not security
      * relevant: issuance binds on the public key, not this name. */
-    wc_InitDecodedCert(&dc, (const byte*)csr_der, (word32)csr_len, heap);
-    rc = wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL);
+    wc_InitDecodedCert(dc, (const byte*)csr_der, (word32)csr_len, heap);
+    rc = wc_ParseCert(dc, CERTREQ_TYPE, NO_VERIFY, NULL);
     if (rc != 0) {
-        wc_FreeDecodedCert(&dc);
+        wc_FreeDecodedCert(dc);
+        WOLFCERT_XFREE(dc, heap);
         wc_CertFree(cert);
         return WOLFCERT_ERR_PARSE;
     }
 
-    if (dc.subjectRaw != NULL && dc.subjectRawLen > 0 &&
-            dc.subjectRawLen < (int)sizeof(cert->sbjRaw) &&
-            memchr(dc.subjectRaw, 0x00, (size_t)dc.subjectRawLen) == NULL) {
-        memcpy(cert->sbjRaw, dc.subjectRaw, (size_t)dc.subjectRawLen);
-        cert->sbjRaw[dc.subjectRawLen] = '\0';
-        memcpy(cert->issRaw, dc.subjectRaw, (size_t)dc.subjectRawLen);
-        cert->issRaw[dc.subjectRawLen] = '\0';
+    if (dc->subjectRaw != NULL && dc->subjectRawLen > 0 &&
+            dc->subjectRawLen < (int)sizeof(cert->sbjRaw) &&
+            memchr(dc->subjectRaw, 0x00, (size_t)dc->subjectRawLen) == NULL) {
+        memcpy(cert->sbjRaw, dc->subjectRaw, (size_t)dc->subjectRawLen);
+        cert->sbjRaw[dc->subjectRawLen] = '\0';
+        memcpy(cert->issRaw, dc->subjectRaw, (size_t)dc->subjectRawLen);
+        cert->issRaw[dc->subjectRawLen] = '\0';
     }
-    else if (dc.subjectCN != NULL && dc.subjectCNLen > 0) {
-        int cn = dc.subjectCNLen < CTC_NAME_SIZE - 1
-                 ? dc.subjectCNLen : CTC_NAME_SIZE - 1;
-        memcpy(cert->subject.commonName, dc.subjectCN, (size_t)cn);
+    else if (dc->subjectCN != NULL && dc->subjectCNLen > 0) {
+        int cn = dc->subjectCNLen < CTC_NAME_SIZE - 1
+                 ? dc->subjectCNLen : CTC_NAME_SIZE - 1;
+        memcpy(cert->subject.commonName, dc->subjectCN, (size_t)cn);
         cert->subject.commonName[cn] = '\0';
     }
     else {
         strncpy(cert->subject.commonName, "SCEP Enrollee", CTC_NAME_SIZE - 1);
         cert->subject.commonName[CTC_NAME_SIZE - 1] = '\0';
     }
-    wc_FreeDecodedCert(&dc);
+    wc_FreeDecodedCert(dc);
+    WOLFCERT_XFREE(dc, heap);
 
     cert->selfSigned = 1;
     cert->sigType    = CTC_SHA256wRSA;
@@ -1037,57 +1045,52 @@ static void issuing_ca_name(const DecodedCert* dc, const uint8_t** out_name,
     }
 }
 
-WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_subject(
-                                      const uint8_t* ra_cert_der, size_t ra_cert_len,
-                                      const uint8_t* csr_der,     size_t csr_len,
-                                      WolfCertBuffer* out_der, void* heap)
+static int issuer_and_subject_der(DecodedCert* ic, DecodedCert* sc,
+                                  const uint8_t* ra_cert_der, size_t ra_cert_len,
+                                  const uint8_t* csr_der,     size_t csr_len,
+                                  WolfCertBuffer* out_der, void* heap)
 {
     const uint8_t* issuer_name;
     int            issuer_name_len;
 
-    if (ra_cert_der == NULL || csr_der == NULL || out_der == NULL)
-        return WOLFCERT_ERR_BAD_ARG;
-
-    DecodedCert ic;
-    wc_InitDecodedCert(&ic, (byte*)ra_cert_der,
+    wc_InitDecodedCert(ic, (byte*)ra_cert_der,
                                         (word32)ra_cert_len, heap);
 
-    int rc = wc_ParseCert(&ic, CERT_TYPE, NO_VERIFY, NULL);
+    int rc = wc_ParseCert(ic, CERT_TYPE, NO_VERIFY, NULL);
     if (rc != 0) {
-        wc_FreeDecodedCert(&ic);
+        wc_FreeDecodedCert(ic);
         return WOLFCERT_ERR_PARSE;
     }
 
-    DecodedCert sc;
-    wc_InitDecodedCert(&sc, (byte*)csr_der, (word32)csr_len, heap);
+    wc_InitDecodedCert(sc, (byte*)csr_der, (word32)csr_len, heap);
 
-    rc = wc_ParseCert(&sc, CERTREQ_TYPE, NO_VERIFY, NULL);
+    rc = wc_ParseCert(sc, CERTREQ_TYPE, NO_VERIFY, NULL);
     if (rc != 0) {
-        wc_FreeDecodedCert(&ic);
-        wc_FreeDecodedCert(&sc);
+        wc_FreeDecodedCert(ic);
+        wc_FreeDecodedCert(sc);
         return WOLFCERT_ERR_PARSE;
     }
 
-    issuing_ca_name(&ic, &issuer_name, &issuer_name_len);
+    issuing_ca_name(ic, &issuer_name, &issuer_name_len);
 
     if (issuer_name == NULL || issuer_name_len <= 0 ||
-            sc.subjectRaw == NULL || sc.subjectRawLen <= 0) {
-        wc_FreeDecodedCert(&ic);
-        wc_FreeDecodedCert(&sc);
+            sc->subjectRaw == NULL || sc->subjectRawLen <= 0) {
+        wc_FreeDecodedCert(ic);
+        wc_FreeDecodedCert(sc);
         return WOLFCERT_ERR_PARSE;
     }
 
     /* Give each Name its own SEQUENCE, so the result decodes as
      * IssuerAndSubject ::= SEQUENCE { issuer Name, subject Name }. */
     size_t issuer_tlv  = enc_tlv_len((size_t)issuer_name_len);
-    size_t subject_tlv = enc_tlv_len((size_t)sc.subjectRawLen);
+    size_t subject_tlv = enc_tlv_len((size_t)sc->subjectRawLen);
     size_t inner = issuer_tlv + subject_tlv;
     size_t cap   = inner + 8;
 
     uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
     if (buf == NULL) {
-        wc_FreeDecodedCert(&ic);
-        wc_FreeDecodedCert(&sc);
+        wc_FreeDecodedCert(ic);
+        wc_FreeDecodedCert(sc);
         return WOLFCERT_ERR_MEMORY;
     }
 
@@ -1095,8 +1098,8 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_subject(
     int ll = der_put_len(buf + 1, cap - 1, inner);
     if (ll < 0) {
         WOLFCERT_XFREE(buf, heap);
-        wc_FreeDecodedCert(&ic);
-        wc_FreeDecodedCert(&sc);
+        wc_FreeDecodedCert(ic);
+        wc_FreeDecodedCert(sc);
         return WOLFCERT_ERR_MEMORY;
     }
 
@@ -1105,21 +1108,21 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_subject(
                          buf + off, cap - off);
     if (n > 0) {
         off += (size_t)n;
-        n = enc_seq(sc.subjectRaw, (size_t)sc.subjectRawLen,
+        n = enc_seq(sc->subjectRaw, (size_t)sc->subjectRawLen,
                     buf + off, cap - off);
     }
 
     if (n < 0) {
         WOLFCERT_XFREE(buf, heap);
-        wc_FreeDecodedCert(&ic);
-        wc_FreeDecodedCert(&sc);
+        wc_FreeDecodedCert(ic);
+        wc_FreeDecodedCert(sc);
         return WOLFCERT_ERR_MEMORY;
     }
 
     off += (size_t)n;
 
-    wc_FreeDecodedCert(&ic);
-    wc_FreeDecodedCert(&sc);
+    wc_FreeDecodedCert(ic);
+    wc_FreeDecodedCert(sc);
     out_der->data = buf;
     out_der->len = off;
     out_der->heap = heap;
@@ -1127,31 +1130,47 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_subject(
     return WOLFCERT_OK;
 }
 
-WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_serial(
+WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_subject(
                                       const uint8_t* ra_cert_der, size_t ra_cert_len,
-                                      const uint8_t* serial, size_t serial_len,
+                                      const uint8_t* csr_der,     size_t csr_len,
                                       WolfCertBuffer* out_der, void* heap)
+{
+    DecodedCert* dc;
+    int rc;
+
+    if (ra_cert_der == NULL || csr_der == NULL || out_der == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    dc = (DecodedCert*)WOLFCERT_XMALLOC(2 * sizeof(*dc), heap);
+    if (dc == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    rc = issuer_and_subject_der(&dc[0], &dc[1], ra_cert_der, ra_cert_len,
+                                csr_der, csr_len, out_der, heap);
+    WOLFCERT_XFREE(dc, heap);
+    return rc;
+}
+
+static int issuer_and_serial_der(DecodedCert* ic,
+                                 const uint8_t* ra_cert_der, size_t ra_cert_len,
+                                 const uint8_t* serial, size_t serial_len,
+                                 WolfCertBuffer* out_der, void* heap)
 {
     const uint8_t* issuer_name;
     int            issuer_name_len;
 
-    if (ra_cert_der == NULL || serial == NULL || serial_len == 0 ||
-            out_der == NULL)
-        return WOLFCERT_ERR_BAD_ARG;
+    wc_InitDecodedCert(ic, (byte*)ra_cert_der, (word32)ra_cert_len, heap);
 
-    DecodedCert ic;
-    wc_InitDecodedCert(&ic, (byte*)ra_cert_der, (word32)ra_cert_len, heap);
-
-    int rc = wc_ParseCert(&ic, CERT_TYPE, NO_VERIFY, NULL);
+    int rc = wc_ParseCert(ic, CERT_TYPE, NO_VERIFY, NULL);
     if (rc != 0) {
-        wc_FreeDecodedCert(&ic);
+        wc_FreeDecodedCert(ic);
         return WOLFCERT_ERR_PARSE;
     }
 
-    issuing_ca_name(&ic, &issuer_name, &issuer_name_len);
+    issuing_ca_name(ic, &issuer_name, &issuer_name_len);
 
     if (issuer_name == NULL || issuer_name_len <= 0) {
-        wc_FreeDecodedCert(&ic);
+        wc_FreeDecodedCert(ic);
         return WOLFCERT_ERR_PARSE;
     }
 
@@ -1164,7 +1183,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_serial(
 
     uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
     if (buf == NULL) {
-        wc_FreeDecodedCert(&ic);
+        wc_FreeDecodedCert(ic);
         return WOLFCERT_ERR_MEMORY;
     }
 
@@ -1172,7 +1191,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_serial(
     int ll = der_put_len(buf + 1, cap - 1, inner);
     if (ll < 0) {
         WOLFCERT_XFREE(buf, heap);
-        wc_FreeDecodedCert(&ic);
+        wc_FreeDecodedCert(ic);
         return WOLFCERT_ERR_MEMORY;
     }
 
@@ -1184,7 +1203,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_serial(
         n = enc_integer(serial, serial_len, buf + off, cap - off);
     }
 
-    wc_FreeDecodedCert(&ic);
+    wc_FreeDecodedCert(ic);
 
     if (n < 0) {
         WOLFCERT_XFREE(buf, heap);
@@ -1197,6 +1216,28 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_serial(
     out_der->heap = heap;
 
     return WOLFCERT_OK;
+}
+
+WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_serial(
+                                      const uint8_t* ra_cert_der, size_t ra_cert_len,
+                                      const uint8_t* serial, size_t serial_len,
+                                      WolfCertBuffer* out_der, void* heap)
+{
+    DecodedCert* ic;
+    int rc;
+
+    if (ra_cert_der == NULL || serial == NULL || serial_len == 0 ||
+            out_der == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    ic = (DecodedCert*)WOLFCERT_XMALLOC(sizeof(*ic), heap);
+    if (ic == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    rc = issuer_and_serial_der(ic, ra_cert_der, ra_cert_len, serial, serial_len,
+                               out_der, heap);
+    WOLFCERT_XFREE(ic, heap);
+    return rc;
 }
 
 WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_serial(
@@ -1279,32 +1320,36 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_name_matches(
 int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
                            uint8_t** out_spki, size_t* out_len, void* heap)
 {
-    DecodedCert dc;
-    wc_InitDecodedCert(&dc, (byte*)der, (word32)len, heap);
+    DecodedCert* dc = (DecodedCert*)WOLFCERT_XMALLOC(sizeof(*dc), heap);
+    uint8_t* buf = NULL;
+    int rc = WOLFCERT_OK;
+    int wrc;
 
-    int rc = wc_ParseCert(&dc, is_csr ? CERTREQ_TYPE : CERT_TYPE, NO_VERIFY, NULL);
-    if (rc != 0) {
-        wc_FreeDecodedCert(&dc);
-        return WOLFCERT_ERR_PARSE;
-    }
-
-    if (dc.publicKey == NULL || dc.pubKeySize == 0) {
-        wc_FreeDecodedCert(&dc);
-        return WOLFCERT_ERR_PARSE;
-    }
-
-    uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(dc.pubKeySize, heap);
-    if (buf == NULL) {
-        wc_FreeDecodedCert(&dc);
+    if (dc == NULL)
         return WOLFCERT_ERR_MEMORY;
+
+    wc_InitDecodedCert(dc, (byte*)der, (word32)len, heap);
+    wrc = wc_ParseCert(dc, is_csr ? CERTREQ_TYPE : CERT_TYPE, NO_VERIFY, NULL);
+    if (wrc == MEMORY_E)
+        rc = WOLFCERT_ERR_MEMORY;
+    else if (wrc != 0 || dc->publicKey == NULL || dc->pubKeySize == 0)
+        rc = WOLFCERT_ERR_PARSE;
+
+    if (rc == WOLFCERT_OK) {
+        buf = (uint8_t*)WOLFCERT_XMALLOC(dc->pubKeySize, heap);
+        if (buf == NULL)
+            rc = WOLFCERT_ERR_MEMORY;
     }
 
-    memcpy(buf, dc.publicKey, dc.pubKeySize);
-    *out_spki = buf;
-    *out_len = dc.pubKeySize;
-    wc_FreeDecodedCert(&dc);
+    if (rc == WOLFCERT_OK) {
+        memcpy(buf, dc->publicKey, dc->pubKeySize);
+        *out_spki = buf;
+        *out_len = dc->pubKeySize;
+    }
 
-    return WOLFCERT_OK;
+    wc_FreeDecodedCert(dc);
+    WOLFCERT_XFREE(dc, heap);
+    return rc;
 }
 
 /* Total length (tag + length octets + value) of the DER SEQUENCE at `p`, or 0
@@ -1333,28 +1378,35 @@ WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert
     size_t   ca_spki_len = 0;
     size_t   off = 0;
     size_t   clen;
-    int      matched = 0;
+    int      erc;
+    int      rc;
 
     if (signer_cert == NULL || ca_bundle == NULL)
         return WOLFCERT_ERR_AUTH;
 
-    if (wolfcert_extract_spki(signer_cert, signer_cert_len, 0,
-                              &signer_spki, &signer_spki_len, heap) != WOLFCERT_OK)
-        return WOLFCERT_ERR_AUTH;
+    rc = wolfcert_extract_spki(signer_cert, signer_cert_len, 0,
+                               &signer_spki, &signer_spki_len, heap);
+    if (rc != WOLFCERT_OK)
+        return rc == WOLFCERT_ERR_MEMORY ? rc : WOLFCERT_ERR_AUTH;
 
     /* RFC 8894: the CertRep is signed by the CA or its RA. Accept the signer
      * if it shares a public key with any certificate in the trusted GetCACert
      * bundle (one or more concatenated DER certs). */
-    while (off < ca_bundle_len && !matched) {
+    rc = WOLFCERT_ERR_AUTH;
+    while (off < ca_bundle_len && rc == WOLFCERT_ERR_AUTH) {
         clen = der_seq_len(ca_bundle + off, ca_bundle_len - off);
         if (clen == 0)
             break;
 
-        if (wolfcert_extract_spki(ca_bundle + off, clen, 0,
-                                  &ca_spki, &ca_spki_len, heap) == WOLFCERT_OK) {
+        erc = wolfcert_extract_spki(ca_bundle + off, clen, 0,
+                                    &ca_spki, &ca_spki_len, heap);
+        if (erc == WOLFCERT_ERR_MEMORY) {
+            rc = erc;
+        }
+        else if (erc == WOLFCERT_OK) {
             if (ca_spki_len == signer_spki_len &&
                     memcmp(ca_spki, signer_spki, signer_spki_len) == 0)
-                matched = 1;
+                rc = WOLFCERT_OK;
             WOLFCERT_XFREE(ca_spki, heap);
             ca_spki = NULL;
         }
@@ -1363,7 +1415,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert
     }
 
     WOLFCERT_XFREE(signer_spki, heap);
-    return matched ? WOLFCERT_OK : WOLFCERT_ERR_AUTH;
+    return rc;
 }
 
 WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
