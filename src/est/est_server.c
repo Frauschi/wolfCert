@@ -53,10 +53,10 @@
  *
  * The EST RFC has no explicit transaction identifier for async
  * enrollment - the client is expected to re-POST the identical CSR. We
- * key pending entries off the SHA-256 of the base64-encoded request
- * body so the second POST produces the same digest as the first, even
- * across reconnects. The queue is capped and intentionally shallow;
- * real deployments use a proper approval workflow. */
+ * key pending entries off the SHA-256 of the decoded, signature-checked
+ * CSR DER so the second POST produces the same digest as the first, even
+ * across reconnects and base64 re-wrapping. The queue is capped and
+ * intentionally shallow; real deployments use a proper approval workflow. */
 #define EST_PENDING_CAP 8
 
 /* How long a client gets to answer a post-handshake CertificateRequest. */
@@ -1010,6 +1010,24 @@ static int reenroll_identity_check(WolfCertServer* s,
 #endif
 }
 
+/* Parse the PKCS#10 request and check its self-signature. */
+static int csr_verify(const uint8_t* csr_der, size_t csr_len, void* heap)
+{
+    DecodedCert dc;
+    int rc;
+
+    wc_InitDecodedCert(&dc, (byte*)csr_der, (word32)csr_len, heap);
+    rc = wc_ParseCert(&dc, CERTREQ_TYPE, VERIFY, NULL);
+    wc_FreeDecodedCert(&dc);
+    if (rc == MEMORY_E)
+        return WOLFCERT_ERR_WC(rc, "est", "ParseCert(CSR)");
+    if (rc != 0)
+        return WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "est",
+            "CSR does not parse or verify (%d)", rc);
+
+    return WOLFCERT_OK;
+}
+
 static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
                           int reenroll)
 {
@@ -1033,26 +1051,6 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
     if (req->body == NULL || req->body_len == 0) {
         send_error(s, fd, 400, "Bad Request", "request body is empty\n");
         return WOLFCERT_ERR_HTTP;
-    }
-
-    /* Manual-approval gate. First POST for a given CSR: park it and
-     * return 202 + Retry-After. Second (matching) POST: drop the
-     * pending entry and fall through to issuance. */
-    if (s->cfg.est_require_approval && s->priv != NULL) {
-        EstPriv* p = (EstPriv*)s->priv;
-        uint8_t h[32];
-        sha256_bytes(req->body, req->body_len, h);
-        int idx = pending_find(p, h);
-        if (idx < 0) {
-            if (!pending_add(p, h)) {
-                send_error(s, fd, 503, "Service Unavailable",
-                           "pending enrollment queue is full\n");
-                return WOLFCERT_ERR_PROTOCOL;
-            }
-            send_accepted_retry_after(s, fd, s->cfg.est_retry_after_sec);
-            return WOLFCERT_OK;
-        }
-        pending_remove(p, idx);
     }
 
     WolfCertBuffer csr = { 0 };
@@ -1117,6 +1115,39 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
             wolfcert_buffer_free(&csr);
             return erc;
         }
+    }
+
+    /* Manual-approval gate. First POST for a given CSR: park it and
+     * return 202 + Retry-After. Second (matching) POST: drop the
+     * pending entry and fall through to issuance. */
+    if (s->cfg.est_require_approval && s->priv != NULL) {
+        EstPriv* p = (EstPriv*)s->priv;
+        uint8_t h[32];
+        /* The reenroll identity check has already verified the CSR. */
+        rc = reenroll ? WOLFCERT_OK : csr_verify(csr.data, csr.len, s->heap);
+        if (rc == WOLFCERT_ERR_MEMORY) {
+            send_error(s, fd, 500, "Server Error", "cannot check the CSR\n");
+            wolfcert_buffer_free(&csr);
+            return rc;
+        }
+        if (rc != WOLFCERT_OK) {
+            send_error(s, fd, 400, "Bad CSR", "CSR rejected by the CA\n");
+            wolfcert_buffer_free(&csr);
+            return rc;
+        }
+        sha256_bytes(csr.data, csr.len, h);
+        int idx = pending_find(p, h);
+        if (idx < 0) {
+            wolfcert_buffer_free(&csr);
+            if (!pending_add(p, h)) {
+                send_error(s, fd, 503, "Service Unavailable",
+                           "pending enrollment queue is full\n");
+                return WOLFCERT_ERR_PROTOCOL;
+            }
+            send_accepted_retry_after(s, fd, s->cfg.est_retry_after_sec);
+            return WOLFCERT_OK;
+        }
+        pending_remove(p, idx);
     }
 
     uint8_t* issued = NULL;

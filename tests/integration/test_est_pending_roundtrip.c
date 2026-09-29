@@ -48,6 +48,7 @@
 
 #include <wolfssl/ssl.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
+#include <wolfssl/wolfcrypt/coding.h>
 
 #include "tls_test_util.h"
 
@@ -136,6 +137,32 @@ static int make_csr(const char* subject, WolfCertKey** out_key,
     return wolfcert_csr_build(*out_key, &meta, out_csr) == WOLFCERT_OK ? 0 : 1;
 }
 
+/* POST a base64 CSR body as given and return the response status code. */
+static int post_enroll_raw(uint16_t port, const byte* b64, word32 b64_len)
+{
+    TestTlsConn c;
+    char hdr[256];
+    char resp[64] = { 0 };
+    int n;
+
+    n = snprintf(hdr, sizeof(hdr),
+                 "POST /.well-known/est/simpleenroll HTTP/1.1\r\n"
+                 "Host: 127.0.0.1\r\nContent-Type: application/pkcs10\r\n"
+                 "Content-Length: %u\r\nConnection: close\r\n\r\n",
+                 (unsigned)b64_len);
+    if (n <= 0 || (size_t)n >= sizeof(hdr) ||
+            test_tls_connect(&c, port, g_ca, g_ca_len) != 0)
+        return -1;
+    if (test_tls_write(&c, hdr, (size_t)n) != 0 ||
+            test_tls_write(&c, b64, b64_len) != 0 ||
+            test_tls_read(&c, resp, sizeof(resp) - 1) < 12) {
+        test_tls_close(&c);
+        return -1;
+    }
+    test_tls_close(&c);
+    return atoi(resp + 9);
+}
+
 static int pending_path(WolfCertServer* s)
 {
     char url[128];
@@ -188,6 +215,39 @@ static int pending_path(WolfCertServer* s)
     wolfSSL_CertManagerFree(cm);
 
     wolfcert_est_result_free(&r2);
+
+    /* ---- A malformed or forged CSR is rejected, never parked ---- */
+    static const uint8_t not_a_csr[] = "this is not a PKCS#10 request";
+    WolfCertEstResult bad = { 0 };
+    rc = wolfcert_est_simple_enroll_ex(&cli, not_a_csr, sizeof(not_a_csr),
+                                       &bad);
+    REQUIRE(rc == WOLFCERT_ERR_HTTP);
+    REQUIRE(bad.status == WOLFCERT_EST_STATUS_FAILURE);
+    wolfcert_est_result_free(&bad);
+
+    csr_ex.data[csr_ex.len - 1] ^= 0x01;
+    rc = wolfcert_est_simple_enroll_ex(&cli, csr_ex.data, csr_ex.len, &bad);
+    REQUIRE(rc == WOLFCERT_ERR_HTTP);
+    REQUIRE(bad.status == WOLFCERT_EST_STATUS_FAILURE);
+    wolfcert_est_result_free(&bad);
+
+    /* The queue matches the decoded CSR, whatever the base64 line wrapping. */
+    WolfCertKey* dk_wrap = NULL;
+    WolfCertBuffer csr_wrap = { 0 };
+    byte b64[4096];
+    word32 b64_len = sizeof(b64);
+    REQUIRE(make_csr("CN=device-est-pending-rewrap", &dk_wrap, &csr_wrap) == 0);
+    REQUIRE(Base64_Encode(csr_wrap.data, (word32)csr_wrap.len, b64,
+                          &b64_len) == 0);
+    REQUIRE(memchr(b64, '\n', b64_len - 1) != NULL);
+    REQUIRE(post_enroll_raw(wolfcert_server_port(s), b64, b64_len) == 202);
+    b64_len = sizeof(b64);
+    REQUIRE(Base64_Encode_NoNl(csr_wrap.data, (word32)csr_wrap.len, b64,
+                               &b64_len) == 0);
+    REQUIRE(post_enroll_raw(wolfcert_server_port(s), b64, b64_len) == 200);
+    wolfcert_buffer_free(&csr_wrap);
+    wolfcert_key_free(dk_wrap);
+
     wolfcert_buffer_free(&csr_ex);
     wolfcert_key_free(dk_ex);
 

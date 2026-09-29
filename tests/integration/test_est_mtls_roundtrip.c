@@ -24,7 +24,7 @@
  * then runs wolfcert-client through wolfcert_est_simple_enroll with
  *   client_cert / client_key set on WolfCertServerCfg.
  *
- * Six assertions:
+ * Seven assertions:
  *   1. mTLS works: a client that does NOT present a certificate is
  *      rejected by the TLS handshake.
  *   2. mTLS works: a client that DOES present a cert signed by the
@@ -36,6 +36,8 @@
  *   5. /simplereenroll accepts a renewal of a multi-SAN cert the server's
  *      own CA issued, but not one that changes a SAN entry or marks it critical.
  *   6. /simplereenroll answers a body that is not a PKCS#10 request with 400.
+ *   7. With manual approval on, a mismatched reenroll is refused at once
+ *      instead of being parked.
  *
  * Exercises the TLS 1.3 negotiation path (wolfTLS_client_method /
  * wolfTLS_server_method) and the new client_cert plumbing on
@@ -422,6 +424,68 @@ static int test_reenroll_server_issued(const uint8_t* tls_cert, size_t tls_cert_
     return 0;
 }
 
+/* The approval gate runs after the identity check, so a mismatched reenroll
+ * gets its 400 on the first POST rather than a 202. */
+static int test_reenroll_mismatch_not_parked(const uint8_t* tls_cert, size_t tls_cert_len,
+                                             const uint8_t* tls_key, size_t tls_key_len,
+                                             const uint8_t* cli_cert, size_t cli_cert_len,
+                                             const uint8_t* cli_key, size_t cli_key_len)
+{
+    const WolfCertCertMeta meta = { .subject_dn = "CN=someone-else" };
+    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertServerCfgSrv cfg = {
+        .protocol              = WOLFCERT_PROTO_EST,
+        .bind_host             = "127.0.0.1",
+        .bind_port             = 0,
+        .tls_cert_pem          = tls_cert, .tls_cert_pem_len       = tls_cert_len,
+        .tls_key_pem           = tls_key,  .tls_key_pem_len        = tls_key_len,
+        .tls_client_ca_pem     = cli_cert, .tls_client_ca_pem_len  = cli_cert_len,
+        .est_require_approval  = 1,
+    };
+    WolfCertServer* srv = NULL;
+    WolfCertKey* cur_key = NULL;
+    WolfCertKey* dk = NULL;
+    WolfCertBuffer csr = { 0 };
+    WolfCertBuffer issued = { 0 };
+    pthread_t tid;
+    char url[128];
+    int rc;
+
+    REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
+    REQUIRE(pthread_create(&tid, NULL, server_thread, srv) == 0);
+    snprintf(url, sizeof(url), "https://127.0.0.1:%u/.well-known/est",
+             wolfcert_server_port(srv));
+
+    WolfCertServerCfg cli = {
+        .protocol          = WOLFCERT_PROTO_EST,
+        .server_url        = url,
+        .trust_anchors     = tls_cert,
+        .trust_anchors_len = tls_cert_len,
+        .verify_server     = 1,
+    };
+
+    REQUIRE(wolfcert_key_from_pem(cli_key, cli_key_len, NULL, &cur_key) == WOLFCERT_OK);
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
+    REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
+    rc = wolfcert_est_simple_reenroll(&cli, cli_cert, cli_cert_len, cur_key,
+                                      csr.data, csr.len, &issued);
+    if (rc != WOLFCERT_ERR_HTTP)
+        fprintf(stderr, "mismatched reenroll under approval rc=%d (%s)\n", rc,
+                wolfcert_last_error_message());
+    REQUIRE(rc == WOLFCERT_ERR_HTTP);
+    REQUIRE(issued.data == NULL);
+    REQUIRE(strstr(wolfcert_last_error_message(), "HTTP 400") != NULL);
+
+    wolfcert_server_stop(srv);
+    pthread_join(tid, NULL);
+    wolfcert_server_free(srv);
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(dk);
+    wolfcert_key_free(cur_key);
+    return 0;
+}
+
 #endif /* KEEP_PEER_CERT */
 
 #ifndef KEEP_PEER_CERT
@@ -589,6 +653,12 @@ int main(void)
                                         tls_key, tls_key_len,
                                         cli_cert, cli_cert_len,
                                         cli_key, cli_key_len) == 0);
+
+    /* --- Case 7: under manual approval a mismatch is refused, not parked. */
+    REQUIRE(test_reenroll_mismatch_not_parked(tls_cert, tls_cert_len,
+                                              tls_key, tls_key_len,
+                                              cli_cert, cli_cert_len,
+                                              cli_key, cli_key_len) == 0);
 #endif
 
     free(tls_cert);

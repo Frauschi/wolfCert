@@ -102,11 +102,11 @@ typedef struct {
     /* EST manual-approval mode (RFC 7030 section 4.2.3). When set, the first
      * /simpleenroll or /simplereenroll POST for a given CSR returns
      * `202 Accepted` with a `Retry-After: <est_retry_after_sec>` header;
-     * the next POST with the same CSR body issues the certificate
-     * normally. Server-side state is keyed on the SHA-256 of the CSR
-     * body so the client must re-POST an identical request - which is
-     * what `wolfcert_est_simple_enroll_ex` does when a caller loops on
-     * the PENDING status.
+     * the next POST with the same CSR issues the certificate normally, so
+     * the client must re-POST the same CSR - which is what
+     * `wolfcert_est_simple_enroll_ex` does when a caller loops on the
+     * PENDING status. A CSR that does not decode or whose signature does
+     * not verify is answered with 400 and never parked.
      *
      * `est_retry_after_sec` is the value emitted in the `Retry-After`
      * header; defaults to 1 when zero. This is a test-server
