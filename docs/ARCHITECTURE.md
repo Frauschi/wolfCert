@@ -172,7 +172,7 @@ during the handshake, since TLS 1.2 has no PHA. On the first `/simpleenroll`
 or `/simplereenroll` without a peer cert, the server calls
 `wolfSSL_request_certificate()` and waits (5 s, capped at the per-request
 deadline) for the client's post-handshake Finished. Any TLS error, app data
-first, or an empty Certificate gets a 401; if the request deadline ends the
+first, or an empty Certificate gets a 403; if the request deadline ends the
 wait first, the connection is dropped like any request that misses it. The
 accept loop keeps the connection open across requests, so the anonymous
 `/cacerts` and the authenticated enroll land on one connection. The mode

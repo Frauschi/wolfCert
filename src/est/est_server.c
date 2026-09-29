@@ -510,59 +510,52 @@ static const char* conn_hdr(const WolfCertServer* s)
     return s->keep_alive ? "keep-alive" : "close";
 }
 
-static void send_status(WolfCertServer* s, int fd, int status, const char* phrase)
-{
-    char line[128];
-    int n = snprintf(line, sizeof(line),
-        "HTTP/1.1 %d %s\r\nContent-Length: 0\r\nConnection: %s\r\n\r\n",
-        status, phrase, conn_hdr(s));
+#define EST_TEXT_PLAIN "Content-Type: text/plain\r\n"
+#define EST_PKCS7_CERTS \
+    "Content-Type: application/pkcs7-mime; smime-type=certs-only\r\n" \
+    "Content-Transfer-Encoding: base64\r\n"
 
-    send_all(s, fd, line, (size_t)n);
+/* Send a response with body_len bytes of body; a NULL body sends only the
+ * headers, as for HEAD. `headers` holds CRLF-terminated header lines. */
+static void send_response(WolfCertServer* s, int fd, int status,
+                          const char* phrase, const char* headers,
+                          const void* body, size_t body_len)
+{
+    char hdr[320];
+    int n;
+
+    /* RFC 9110 section 8.6: a 204 carries no Content-Length. */
+    if (status == 204)
+        n = snprintf(hdr, sizeof(hdr), "HTTP/1.1 204 %s\r\n%s"
+                     "Connection: %s\r\n\r\n", phrase, headers, conn_hdr(s));
+    else
+        n = snprintf(hdr, sizeof(hdr), "HTTP/1.1 %d %s\r\n%s"
+                     "Content-Length: %zu\r\nConnection: %s\r\n\r\n",
+                     status, phrase, headers, body_len, conn_hdr(s));
+    if (n < 0 || (size_t)n >= sizeof(hdr))
+        return;
+
+    send_all(s, fd, hdr, (size_t)n);
+    if (body != NULL && body_len > 0)
+        send_all(s, fd, body, body_len);
 }
 
-/* RFC 7030 section 4.2.3: an untyped error body must be a plaintext reason. */
+/* RFC 7030 section 4.2.3: an error body is a plaintext reason. */
 static void send_error(WolfCertServer* s, int fd, int status,
                        const char* phrase, const char* why)
 {
-    char hdr[192];
-    size_t wl = strlen(why);
-    int n = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\n"
-        "Content-Length: %zu\r\nConnection: %s\r\n\r\n",
-        status, phrase, wl, conn_hdr(s));
-
-    send_all(s, fd, hdr, (size_t)n);
-    send_all(s, fd, why, wl);
-}
-
-static void send_pkcs7_b64(WolfCertServer* s, int fd, const uint8_t* b64, size_t b64_len)
-{
-    char hdr[256];
-    int n = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/pkcs7-mime; smime-type=certs-only\r\n"
-        "Content-Transfer-Encoding: base64\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: %s\r\n\r\n",
-        b64_len, conn_hdr(s));
-
-    send_all(s, fd, hdr, (size_t)n);
-    send_all(s, fd, b64, b64_len);
+    send_response(s, fd, status, phrase, EST_TEXT_PLAIN, why, strlen(why));
 }
 
 /* RFC 7030 section 4.2.3: 202 Accepted with `Retry-After` tells the client the
  * enrolment is pending manual approval and can be retried. */
 static void send_accepted_retry_after(WolfCertServer* s, int fd, int retry_after_sec)
 {
-    char hdr[192];
-    int n = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 202 Accepted\r\n"
-        "Retry-After: %d\r\n"
-        "Content-Length: 0\r\n"
-        "Connection: %s\r\n\r\n",
-        retry_after_sec > 0 ? retry_after_sec : 1, conn_hdr(s));
+    char ra[40];
 
-    send_all(s, fd, hdr, (size_t)n);
+    snprintf(ra, sizeof(ra), "Retry-After: %d\r\n",
+             retry_after_sec > 0 ? retry_after_sec : 1);
+    send_response(s, fd, 202, "Accepted", ra, NULL, 0);
 }
 
 /* HTTP Basic authentication scheme token, including its trailing space. */
@@ -615,10 +608,12 @@ static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
  *   - 204 No Content   -> server has no attributes to advertise.
  *   - 200 OK           -> CsrAttrs DER, base64-encoded, content-type
  *                         application/csrattrs. */
-static int handler_csr_attrs(WolfCertServer* s, int fd)
+static int handler_csr_attrs(WolfCertServer* s, int fd, int head)
 {
+    static const char why[] = "cannot encode the CSR attributes\n";
+
     if (s->cfg_csr_attrs == NULL || s->cfg_csr_attrs_len == 0) {
-        send_status(s, fd, 204, "No Content");
+        send_response(s, fd, 204, "No Content", "", NULL, 0);
         return WOLFCERT_OK;
     }
 
@@ -626,51 +621,40 @@ static int handler_csr_attrs(WolfCertServer* s, int fd)
     int rc = wolfcert_base64_encode_mime(s->cfg_csr_attrs, s->cfg_csr_attrs_len,
                                      &b64, s->heap);
     if (rc != WOLFCERT_OK) {
-        send_error(s, fd, 500, "Server Error",
-                   "cannot encode the CSR attributes\n");
+        send_response(s, fd, 500, "Server Error", EST_TEXT_PLAIN,
+                      head ? NULL : why, sizeof(why) - 1);
         return rc;
     }
 
-    char hdr[256];
-    int n = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: application/csrattrs\r\n"
-        "Content-Transfer-Encoding: base64\r\n"
-        "Content-Length: %zu\r\n"
-        "Connection: %s\r\n\r\n",
-        b64.len, conn_hdr(s));
-
-    send_all(s, fd, hdr, (size_t)n);
-    send_all(s, fd, b64.data, b64.len);
+    send_response(s, fd, 200, "OK",
+                  "Content-Type: application/csrattrs\r\n"
+                  "Content-Transfer-Encoding: base64\r\n",
+                  head ? NULL : b64.data, b64.len);
     wolfcert_buffer_free(&b64);
 
     return WOLFCERT_OK;
 }
 
-static int handler_cacerts(WolfCertServer* s, int fd)
+static int handler_cacerts(WolfCertServer* s, int fd, int head)
 {
+    static const char why[] = "cannot build the CA certificates response\n";
     const uint8_t* certs[1] = { s->ca.cert_der };
     size_t          clen[1]  = { s->ca.cert_der_len };
     WolfCertBuffer p7 = { 0 };
+    WolfCertBuffer b64 = { 0 };
 
     int rc = wolfcert_pkcs7_build_certs_only(certs, clen, 1, &p7, s->heap);
-    if (rc != WOLFCERT_OK) {
-        send_error(s, fd, 500, "Server Error",
-                   "cannot build the CA certificates response\n");
-        return rc;
-    }
-
-    WolfCertBuffer b64 = { 0 };
-    rc = wolfcert_base64_encode_mime(p7.data, p7.len, &b64, s->heap);
-
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_base64_encode_mime(p7.data, p7.len, &b64, s->heap);
     wolfcert_buffer_free(&p7);
     if (rc != WOLFCERT_OK) {
-        send_error(s, fd, 500, "Server Error",
-                   "cannot build the CA certificates response\n");
+        send_response(s, fd, 500, "Server Error", EST_TEXT_PLAIN,
+                      head ? NULL : why, sizeof(why) - 1);
         return rc;
     }
 
-    send_pkcs7_b64(s, fd,b64.data, b64.len);
+    send_response(s, fd, 200, "OK", EST_PKCS7_CERTS,
+                  head ? NULL : b64.data, b64.len);
     wolfcert_buffer_free(&b64);
 
     return WOLFCERT_OK;
@@ -1031,7 +1015,7 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
 {
     int pha = ensure_post_handshake_auth(s);
     if (pha != WOLFCERT_OK) {
-        send_error(s, fd, 401, "Unauthorized",
+        send_error(s, fd, 403, "Forbidden",
                    "client certificate authentication failed\n");
         return pha;
     }
@@ -1072,7 +1056,7 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
         rc = reenroll_identity_check(s, csr.data, csr.len);
         if (rc != WOLFCERT_OK) {
             if (rc == WOLFCERT_ERR_AUTH)
-                send_error(s, fd, 401, "Unauthorized",
+                send_error(s, fd, 403, "Forbidden",
                            "no client certificate to renew\n");
             else if (rc == WOLFCERT_ERR_PARSE)
                 send_error(s, fd, 400, "Bad Request",
@@ -1157,7 +1141,7 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
         return rc;
     }
 
-    send_pkcs7_b64(s, fd,b64.data, b64.len);
+    send_response(s, fd, 200, "OK", EST_PKCS7_CERTS, b64.data, b64.len);
     wolfcert_buffer_free(&b64);
 
     return WOLFCERT_OK;
@@ -1165,6 +1149,7 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
 
 static int handle_request(WolfCertServer* s, int fd)
 {
+    static const char unknown_op[] = "unknown EST operation\n";
     EstRequest req = { 0 };
 
     int rc = parse_request(s, fd, &req, s->heap);
@@ -1188,18 +1173,25 @@ static int handle_request(WolfCertServer* s, int fd)
         suffix = last ? last + 1 : req.path;
     }
 
-    if (strcmp(req.method, "GET") == 0 && strcmp(suffix, "cacerts") == 0) {
-        rc = handler_cacerts(s, fd);
+    /* RFC 9110 section 9.3.2: HEAD gets GET's headers without the content. */
+    int head = strcmp(req.method, "HEAD") == 0;
+    if ((head || strcmp(req.method, "GET") == 0) &&
+            strcmp(suffix, "cacerts") == 0) {
+        rc = handler_cacerts(s, fd, head);
     }
-    else if (strcmp(req.method, "GET") == 0 && strcmp(suffix, "csrattrs") == 0) {
-        rc = handler_csr_attrs(s, fd);
+    else if ((head || strcmp(req.method, "GET") == 0) &&
+             strcmp(suffix, "csrattrs") == 0) {
+        rc = handler_csr_attrs(s, fd, head);
     }
     else if (strcmp(req.method, "POST") == 0 &&
              (strcmp(suffix, "simpleenroll") == 0 ||
               strcmp(suffix, "simplereenroll") == 0)) {
         if (!check_basic_auth(s, req.auth_header)) {
-            send_error(s, fd, 401, "Unauthorized",
-                       "HTTP Basic authentication failed\n");
+            static const char why[] = "HTTP Basic authentication failed\n";
+
+            send_response(s, fd, 401, "Unauthorized",
+                          "WWW-Authenticate: Basic realm=\"estrealm\"\r\n"
+                          EST_TEXT_PLAIN, why, sizeof(why) - 1);
             rc = WOLFCERT_ERR_AUTH;
         }
         else {
@@ -1207,13 +1199,13 @@ static int handle_request(WolfCertServer* s, int fd)
                                 strcmp(suffix, "simplereenroll") == 0);
         }
     }
-    else if (strcmp(req.method, "HEAD") == 0) {
-        /* RFC 9110 section 9.3.2: a response to HEAD carries no content. */
-        send_error(s, fd, 404, "Not Found", "");
+    else if (head) {
+        send_response(s, fd, 404, "Not Found", EST_TEXT_PLAIN, NULL,
+                      sizeof(unknown_op) - 1);
         rc = WOLFCERT_ERR_NOT_FOUND;
     }
     else {
-        send_error(s, fd, 404, "Not Found", "unknown EST operation\n");
+        send_error(s, fd, 404, "Not Found", unknown_op);
         rc = WOLFCERT_ERR_NOT_FOUND;
     }
 

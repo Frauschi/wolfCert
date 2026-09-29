@@ -113,33 +113,45 @@ static int send_and_read_status(uint16_t port,
     return (int)n;
 }
 
-/* A 404 for HEAD must end at the headers, or its body would be read as the
- * next response on a kept-alive connection. */
-static int head_404_has_no_body(uint16_t port)
+static int fetch_whole(uint16_t port, const char* method, const char* op,
+                       char* resp, size_t cap)
 {
-    static const char req[] =
-        "HEAD /.well-known/est/nope HTTP/1.1\r\n"
-        "Host: 127.0.0.1\r\n"
-        "Connection: close\r\n"
-        "\r\n";
     TestTlsConn c;
-    char resp[512];
-    const char* eoh;
+    char req[160];
     size_t n = 0;
+    int len;
     int r;
 
+    len = snprintf(req, sizeof(req), "%s /.well-known/est/%s HTTP/1.1\r\n"
+                   "Host: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                   method, op);
+    REQUIRE(len > 0 && (size_t)len < sizeof(req));
     REQUIRE(test_tls_connect(&c, port, g_tls_cert, g_tls_cert_len) == 0);
-    REQUIRE(test_tls_write(&c, req, sizeof(req) - 1) == 0);
-    while (n + 1 < sizeof(resp) &&
-           (r = test_tls_read(&c, resp + n, sizeof(resp) - 1 - n)) > 0)
+    REQUIRE(test_tls_write(&c, req, (size_t)len) == 0);
+    while (n + 1 < cap && (r = test_tls_read(&c, resp + n, cap - 1 - n)) > 0)
         n += (size_t)r;
     test_tls_close(&c);
     resp[n] = '\0';
+    return 0;
+}
 
-    REQUIRE(strstr(resp, " 404 ") != NULL);
-    eoh = strstr(resp, "\r\n\r\n");
+/* HEAD must answer with GET's headers and end there, or its body would be read
+ * as the next response on a kept-alive connection. */
+static int head_matches_get(uint16_t port, const char* op, const char* status)
+{
+    char get[4096];
+    char head[4096];
+    const char* eoh;
+
+    REQUIRE(fetch_whole(port, "GET", op, get, sizeof(get)) == 0);
+    REQUIRE(fetch_whole(port, "HEAD", op, head, sizeof(head)) == 0);
+    if (strncmp(head, status, strlen(status)) != 0)
+        fprintf(stderr, "HEAD %s: %.40s\n", op, head);
+    REQUIRE(strncmp(head, status, strlen(status)) == 0);
+    eoh = strstr(head, "\r\n\r\n");
     REQUIRE(eoh != NULL);
     REQUIRE(eoh[4] == '\0');
+    REQUIRE(strncmp(get, head, (size_t)(eoh + 4 - head)) == 0);
     return 0;
 }
 
@@ -489,7 +501,11 @@ int main(void)
 
     uint16_t port = wolfcert_server_port(srv);
 
-    int rc = head_404_has_no_body(port);
+    int rc = head_matches_get(port, "nope", "HTTP/1.1 404");
+    if (rc == 0)
+        rc = head_matches_get(port, "cacerts", "HTTP/1.1 200");
+    if (rc == 0)
+        rc = head_matches_get(port, "csrattrs", "HTTP/1.1 204");
     if (rc == 0)
         rc = reject_oversized_chunk_size(port);
     if (rc == 0)

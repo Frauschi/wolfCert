@@ -34,7 +34,7 @@
  * Negative controls: a session without a client identity, and one with an
  * identity but no PHA opt-in, must both fail /simpleenroll while /cacerts
  * still succeeds, as it must for an anonymous TLS 1.2 client. A client that
- * never answers the CertificateRequest gets a 401 once the wait runs out.
+ * never answers the CertificateRequest gets a 403 once the wait runs out.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -306,7 +306,7 @@ int main(void)
     REQUIRE(pha_reenroll(wolfcert_server_port(srv), tls_cert, tls_cert_len,
                          cli_cert, cli_cert_len, cli_key, cli_key_len) == 0);
 
-    /* --- A PHA client that never answers the CertificateRequest gets a 401
+    /* --- A PHA client that never answers the CertificateRequest gets a 403
      * once the server stops waiting, well before the request deadline. */
     {
         static const char req[] =
@@ -331,7 +331,7 @@ int main(void)
         /* Drop the reply wolfSSL_read() sends to the CertificateRequest. */
         wolfSSL_SSLSetIOSend(c.ssl, discard_send);
         REQUIRE(test_tls_read(&c, resp, sizeof(resp) - 1) > 0);
-        REQUIRE(strncmp(resp, "HTTP/1.1 401", 12) == 0);
+        REQUIRE(strncmp(resp, "HTTP/1.1 403", 12) == 0);
         test_tls_close(&c);
     }
 #endif
