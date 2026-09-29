@@ -16,7 +16,7 @@
 #
 # Mapping onto the CLIs:
 #   wolfcert-server --tls-cert <alg>/server-cert.pem --tls-key <alg>/server-key.pem \
-#                   [--tls-client-ca <alg>/ca-cert.pem]
+#                   --tls-client-ca <alg>/ca-cert.pem | --est-allow-anonymous
 #   wolfcert-client ... --trust <alg>/ca-cert.pem \
 #                   [--client-cert <alg>/client-cert.pem --client-key <alg>/client-key.pem]
 #

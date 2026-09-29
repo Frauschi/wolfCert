@@ -138,7 +138,7 @@ four endpoints a typical device needs:
 | `GET  /cacerts`        | `wolfcert_est_get_cacerts`     | CA chain as degenerate PKCS#7; decoded to PEM for you. |
 | `GET  /csrattrs`       | `wolfcert_est_get_csr_attrs`   | Raw body (empty on HTTP 204); decode with `wolfcert_est_parse_csr_attrs`. |
 | `POST /simpleenroll`   | `wolfcert_est_simple_enroll`   | Body is base64-wrapped CSR DER; 200 returns the issued cert as PKCS#7. |
-| `POST /simplereenroll` | `wolfcert_est_simple_reenroll` | Same, with the cert being renewed used as the implicit client identity. |
+| `POST /simplereenroll` | `wolfcert_est_simple_reenroll` | Same, with the cert being renewed used as the implicit client identity. The test server's requirements for it are at `WolfCertServerCfgSrv.tls_client_ca_pem` in `wolfcert/server.h`. |
 
 A typical flow is: `wolfcert_key_generate` → `wolfcert_csr_build` →
 `wolfcert_est_simple_enroll` → persist the returned PEM. The keep-alive

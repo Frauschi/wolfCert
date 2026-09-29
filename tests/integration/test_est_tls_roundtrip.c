@@ -49,6 +49,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #define REQUIRE(cond) \
     do {                                                                    \
@@ -226,6 +228,43 @@ static int test_client_reenroll_keeps_identity(const uint8_t* tls_cert,
     return 0;
 }
 
+/* POST a junk CSR over serve_fd(), which carries no TLS, and expect `want`:
+ * " 403 " where the guard refuses it, " 400 " where the CA does. */
+static int serve_fd_enroll(const WolfCertServerCfgSrv* cfg, const char* auth,
+                           const char* want)
+{
+    WolfCertServer* srv = NULL;
+    char            req[512];
+    char            resp[512];
+    ssize_t         n;
+    int             len;
+    int             sv[2];
+    int             rc;
+
+    len = snprintf(req, sizeof(req),
+        "POST /.well-known/est/simpleenroll HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\nContent-Type: application/pkcs10\r\n%s"
+        "Content-Length: 4\r\nConnection: close\r\n\r\nAAAA", auth);
+    REQUIRE(len > 0 && (size_t)len < sizeof(req));
+    REQUIRE(wolfcert_server_start(cfg, &srv) == WOLFCERT_OK);
+    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    REQUIRE(write(sv[1], req, (size_t)len) == (ssize_t)len);
+
+    rc = wolfcert_server_serve_fd(srv, sv[0]);
+    n = read(sv[1], resp, sizeof(resp) - 1);
+    close(sv[0]);
+    close(sv[1]);
+    wolfcert_server_free(srv);
+
+    REQUIRE(n > 0);
+    resp[n] = '\0';
+    if (strstr(resp, want) == NULL)
+        fprintf(stderr, "serve_fd enroll: wanted%s, got %.40s\n", want, resp);
+    REQUIRE(strstr(resp, want) != NULL);
+    REQUIRE(strcmp(want, " 403 ") != 0 || rc == WOLFCERT_ERR_AUTH);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -258,12 +297,51 @@ int main(void)
             == WOLFCERT_ERR_NOT_FOUND);
     wolfcert_store_memory_close(plain_store);
 
+    /* Nor may it start with no way to authenticate an enrolling client. */
+    WolfCertServerCfgSrv open_cfg = {
+        .protocol         = WOLFCERT_PROTO_EST,
+        .bind_host        = "127.0.0.1",
+        .bind_port        = 0,
+        .tls_cert_pem     = tls_cert, .tls_cert_pem_len = tls_cert_len,
+        .tls_key_pem      = tls_key,  .tls_key_pem_len  = tls_key_len,
+    };
+    WolfCertServer* open_srv = NULL;
+    REQUIRE(wolfcert_server_start(&open_cfg, &open_srv) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(open_srv == NULL);
+
+    /* Empty Basic credentials would admit the public header "Basic Og==". */
+    open_cfg.http_basic_user = "";
+    open_cfg.http_basic_pass = "";
+    REQUIRE(wolfcert_server_start(&open_cfg, &open_srv) == WOLFCERT_ERR_BAD_ARG);
+    open_cfg.http_basic_user = "alice";
+    open_cfg.http_basic_pass = NULL;
+    REQUIRE(wolfcert_server_start(&open_cfg, &open_srv) == WOLFCERT_ERR_BAD_ARG);
+    open_cfg.http_basic_pass = "";
+    REQUIRE(wolfcert_server_start(&open_cfg, &open_srv) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(open_srv == NULL);
+
+    /* serve_fd() has no TLS: a client CA alone admits nobody, Basic or the
+     * anonymous opt-in let the request through to the CA. */
+    open_cfg.http_basic_pass = "secret";
+    REQUIRE(serve_fd_enroll(&open_cfg,
+                            "Authorization: Basic YWxpY2U6c2VjcmV0\r\n",
+                            " 400 ") == 0);
+    open_cfg.http_basic_user = NULL;
+    open_cfg.http_basic_pass = NULL;
+    open_cfg.est_allow_anonymous_enroll = 1;
+    REQUIRE(serve_fd_enroll(&open_cfg, "", " 400 ") == 0);
+    open_cfg.est_allow_anonymous_enroll = 0;
+    open_cfg.tls_client_ca_pem     = tls_cert;
+    open_cfg.tls_client_ca_pem_len = tls_cert_len;
+    REQUIRE(serve_fd_enroll(&open_cfg, "", " 403 ") == 0);
+
     WolfCertServerCfgSrv cfg = {
         .protocol         = WOLFCERT_PROTO_EST,
         .bind_host        = "127.0.0.1",
         .bind_port        = 0,
         .tls_cert_pem     = tls_cert, .tls_cert_pem_len = tls_cert_len,
         .tls_key_pem      = tls_key,  .tls_key_pem_len  = tls_key_len,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer* srv = NULL;
     REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);

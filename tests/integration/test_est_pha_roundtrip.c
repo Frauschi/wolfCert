@@ -197,6 +197,7 @@ int main(void)
     WolfCertServerCfgSrv bad = cfg;
     bad.tls_client_ca_pem = NULL;
     bad.tls_client_ca_pem_len = 0;
+    bad.est_allow_anonymous_enroll = 1;
     REQUIRE(wolfcert_server_start(&bad, &srv) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(srv == NULL);
 

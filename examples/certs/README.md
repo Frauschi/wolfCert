@@ -20,7 +20,8 @@ Two algorithm families, each a self-signed CA plus a server and a client leaf:
 
 ## Use with the CLIs
 
-Server-side TLS (optionally mutual TLS with `--tls-client-ca`):
+Server-side TLS with mutual TLS via `--tls-client-ca` (swap it for
+`--est-allow-anonymous` to issue to any client):
 
 ```sh
 build/wolfcert-server --proto est --listen 127.0.0.1:8443 \

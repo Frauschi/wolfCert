@@ -483,6 +483,7 @@ int main(void)
         .est_retry_after_sec    = 1,
         .tls_cert_pem           = tls_cert, .tls_cert_pem_len = tls_cert_len,
         .tls_key_pem            = tls_key,  .tls_key_pem_len  = tls_key_len,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer* s = NULL;
     REQUIRE(wolfcert_server_start(&cfg, &s) == WOLFCERT_OK);

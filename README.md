@@ -89,8 +89,11 @@ Start the bundled test server (issues from an auto-generated local CA):
 ```sh
 # EST is TLS-only (RFC 7030), so it needs a server identity for the
 # listen address; SCEP authenticates at the pkiMessage layer instead.
+# EST also needs --basic USER:PASS, --tls-client-ca PEM, or
+# --est-allow-anonymous to issue to any client; /simplereenroll
+# also needs --tls-client-ca and the KEEP_PEER_CERT build above.
 ./wolfcert-server --proto est  --listen 127.0.0.1:8443 \
-    --tls-cert server.crt --tls-key server.key
+    --tls-cert server.crt --tls-key server.key --est-allow-anonymous
 ./wolfcert-server --proto scep --listen 127.0.0.1:8088
 ```
 

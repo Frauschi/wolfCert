@@ -107,7 +107,7 @@ After a build with `-DWOLFCERT_ENABLE_CLI=ON` (the default):
 
 ```sh
 build/wolfcert-server --proto est --listen 127.0.0.1:8443 \
-    --tls-cert server.crt --tls-key server.key
+    --tls-cert server.crt --tls-key server.key --est-allow-anonymous
 build/wolfcert-client enroll --proto est \
     --url https://127.0.0.1:8443/.well-known/est --trust server.crt \
     --key-type ecc:256 --subject "CN=dev" \

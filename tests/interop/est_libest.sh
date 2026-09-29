@@ -124,7 +124,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -addext "subjectAltName=IP:127.0.0.1" >/dev/null 2>&1
 
 "$WC_SERVER" --proto est --listen "127.0.0.1:$EST_PORT" \
-             --tls-cert wc-srv.crt --tls-key wc-srv.key \
+             --tls-cert wc-srv.crt --tls-key wc-srv.key --est-allow-anonymous \
              >wc-server.log 2>&1 &
 WC_PID=$!
 trap 'kill_if "$WC_PID"' EXIT

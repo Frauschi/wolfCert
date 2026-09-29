@@ -72,6 +72,7 @@ static void ca_store_cfg(WolfCertServerCfgSrv* cfg, WolfCertStoreOps* store)
     cfg->tls_cert_pem_len = srv_cert_pem_len;
     cfg->tls_key_pem      = srv_key_pem;
     cfg->tls_key_pem_len  = srv_key_pem_len;
+    cfg->est_allow_anonymous_enroll = 1;
 #endif
     cfg->bind_host    = "127.0.0.1";
     cfg->ca_store     = store;
@@ -414,6 +415,78 @@ static int test_ca_persists_across_starts(void)
     wolfcert_store_memory_close(store);
     return 0;
 }
+
+#if defined(USE_WOLFSSL_MEMORY) && !defined(WOLFSSL_STATIC_MEMORY) && \
+    !defined(WOLFSSL_DEBUG_MEMORY)
+/* Index of the one allocation fail_one_malloc() refuses; -1 refuses none. */
+static int g_fail_at = -1;
+static int g_allocs;
+
+static void* fail_one_malloc(size_t sz)
+{
+    return g_allocs++ == g_fail_at ? NULL : malloc(sz);
+}
+
+static void fail_one_free(void* ptr)
+{
+    free(ptr);
+}
+
+static void* fail_one_realloc(void* ptr, size_t sz)
+{
+    return g_allocs++ == g_fail_at ? NULL : realloc(ptr, sz);
+}
+
+/* A start that survives any single failed allocation keeps every credential. */
+static int test_start_oom_keeps_credentials(void)
+{
+    WolfCertStoreOps* store = wolfcert_store_memory_open(NULL);
+    WolfCertServerCfgSrv cfg;
+    WolfCertServer* srv = NULL;
+    wolfSSL_Malloc_cb  mf;
+    wolfSSL_Free_cb    ff;
+    wolfSSL_Realloc_cb rf;
+    int fail_at;
+    int rc;
+
+    REQUIRE(store != NULL);
+    ca_store_cfg(&cfg, store);
+    cfg.http_basic_user    = "alice";
+    cfg.http_basic_pass    = "secret";
+    cfg.challenge_password = "otp";
+    REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
+    wolfcert_server_free(srv);
+
+    REQUIRE(wolfSSL_GetAllocators(&mf, &ff, &rf) == 0);
+    for (fail_at = 0; ; fail_at++) {
+        srv = NULL;
+        g_fail_at = fail_at;
+        g_allocs = 0;
+        REQUIRE(wolfSSL_SetAllocators(fail_one_malloc, fail_one_free,
+                                      fail_one_realloc) == 0);
+        rc = wolfcert_server_start(&cfg, &srv);
+        REQUIRE(wolfSSL_SetAllocators(mf, ff, rf) == 0);
+        if (rc != WOLFCERT_OK) {
+            REQUIRE(srv == NULL);
+            continue;
+        }
+        REQUIRE(srv->cfg_basic_user != NULL &&
+                strcmp(srv->cfg_basic_user, "alice") == 0);
+        REQUIRE(srv->cfg_basic_pass != NULL &&
+                strcmp(srv->cfg_basic_pass, "secret") == 0);
+        REQUIRE(srv->cfg_challenge != NULL &&
+                strcmp(srv->cfg_challenge, "otp") == 0);
+        wolfcert_server_free(srv);
+        if (g_allocs <= fail_at)
+            break;
+    }
+    g_fail_at = -1;
+    REQUIRE(fail_at > 4);
+
+    wolfcert_store_memory_close(store);
+    return 0;
+}
+#endif
 
 /* Fill `store` with a freshly generated CA of `type` by letting a server start
  * against it, then hand back copies of the stored pair. */
@@ -866,6 +939,11 @@ int main(void)
         return 1;
     if (test_ca_persists_across_starts())
         return 1;
+#if defined(USE_WOLFSSL_MEMORY) && !defined(WOLFSSL_STATIC_MEMORY) && \
+    !defined(WOLFSSL_DEBUG_MEMORY)
+    if (test_start_oom_keeps_credentials())
+        return 1;
+#endif
     if (test_every_alg_reloads())
         return 1;
     if (test_mismatched_ca_rejected())

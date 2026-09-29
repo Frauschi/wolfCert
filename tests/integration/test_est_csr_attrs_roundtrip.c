@@ -114,6 +114,7 @@ int main(void)
         .csr_attributes_len  = blob.len,
         .tls_cert_pem        = tls_cert, .tls_cert_pem_len = tls_cert_len,
         .tls_key_pem         = tls_key,  .tls_key_pem_len  = tls_key_len,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer* srv = NULL;
     REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
@@ -174,6 +175,7 @@ int main(void)
         .bind_host = "127.0.0.1", .bind_port = 0,
         .tls_cert_pem = tls_cert, .tls_cert_pem_len = tls_cert_len,
         .tls_key_pem  = tls_key,  .tls_key_pem_len  = tls_key_len,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer* srv2 = NULL;
     REQUIRE(wolfcert_server_start(&cfg2, &srv2) == WOLFCERT_OK);

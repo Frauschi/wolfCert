@@ -1020,6 +1020,16 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
         return pha;
     }
 
+    /* No TLS on this connection: only Basic or the anonymous opt-in admits
+     * an enroll. */
+    if (s->cfg_basic_user == NULL && !s->cfg.est_allow_anonymous_enroll &&
+            s->tls_current == NULL) {
+        send_error(s, fd, 403, "Forbidden",
+                   "client authentication required\n");
+        return WOLFCERT_ERR(WOLFCERT_ERR_AUTH, "est",
+            "enroll: no Basic credentials or TLS client on this connection");
+    }
+
     if (req->body == NULL || req->body_len == 0) {
         send_error(s, fd, 400, "Bad Request", "request body is empty\n");
         return WOLFCERT_ERR_HTTP;

@@ -46,7 +46,7 @@ typedef struct {
                                             to an ephemeral CA. */
     const char*      challenge_password; /* SCEP challengePassword to accept; NULL disables */
     const char*      http_basic_user;    /* EST HTTP Basic credentials to accept; NULL disables */
-    const char*      http_basic_pass;
+    const char*      http_basic_pass;    /* must be non-empty when http_basic_user is set */
 
     /* CA configuration. NULL/zero values fall back to library defaults. */
     WolfCertKeyType  ca_key_type;        /* WOLFCERT_KEY_RSA default */
@@ -56,6 +56,8 @@ typedef struct {
      * terminates TLS on every accepted connection before dispatching to
      * the protocol handler. tls_client_ca_pem, when set, enables mutual
      * TLS (WOLFSSL_VERIFY_PEER) against the supplied client-CA bundle.
+     * EST /simplereenroll needs it (else 403) and a wolfSSL built with
+     * KEEP_PEER_CERT (else 500).
      *
      * Mandatory for WOLFCERT_PROTO_EST, which RFC 7030 section 3.1 defines
      * over TLS only: wolfcert_server_start() returns WOLFCERT_ERR_TLS
@@ -145,6 +147,9 @@ typedef struct {
 
     /* Heap hint for server-internal allocations. */
     void*            heap;
+
+    /* Lets EST start with neither Basic nor tls_client_ca_pem. */
+    int              est_allow_anonymous_enroll;
 } WolfCertServerCfgSrv;
 
 WOLFCERT_API int  wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out);
@@ -160,7 +165,8 @@ WOLFCERT_API uint16_t wolfcert_server_port(const WolfCertServer* srv);
 /* Embed wolfCert's protocol handling in an existing event loop: hand the
  * library an already-accepted connection; it services exactly one request
  * and returns, leaving the caller to close the fd.
- * WOLFCERT_SERVER_REQUEST_TIMEOUT_MS does not apply. */
+ * WOLFCERT_SERVER_REQUEST_TIMEOUT_MS does not apply. The fd carries no TLS, so
+ * EST enrollment on it needs http_basic_user or est_allow_anonymous_enroll. */
 WOLFCERT_API int wolfcert_server_serve_fd(WolfCertServer* srv, int fd);
 
 #ifdef __cplusplus
