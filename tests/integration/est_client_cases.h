@@ -177,7 +177,7 @@ static inline int enroll_check_san(const WolfCertServerCfg* client_cfg)
 
 /* HTTP Basic (RFC 7030 section 3.2.3) must cover every request on a keep-alive
  * session: enroll with the credentials in `client_cfg`, then require a
- * rejection with a wrong password. */
+ * rejection with a wrong password from both the plain and `_ex` enroll. */
 static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
 {
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
@@ -189,6 +189,7 @@ static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
     WolfCertBuffer ca_pem = { 0 };
     WolfCertBuffer issued = { 0 };
     WolfCertBuffer bad_out = { 0 };
+    WolfCertEstResult bad_res = { 0 };
     WolfCertEstSession* s = NULL;
     WolfCertEstSession* bs = NULL;
     DerBuffer* issued_der = NULL;
@@ -237,8 +238,20 @@ static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
     }
     EST_CHECK(brc == WOLFCERT_ERR_AUTH);
     EST_CHECK(bad_out.data == NULL);
+    wolfcert_est_session_close(bs);
+    bs = NULL;
+
+    brc = WOLFCERT_OK;
+    EST_CHECK(wolfcert_est_session_open(&bad_cfg, &bs) == WOLFCERT_OK);
+    if (ret == 0)
+        brc = wolfcert_est_session_simple_enroll_ex(bs, csr.data, csr.len,
+                                                    &bad_res);
+    EST_CHECK(brc == WOLFCERT_ERR_AUTH);
+    EST_CHECK(bad_res.status == WOLFCERT_EST_STATUS_FAILURE);
+    EST_CHECK(bad_res.cert_pem.data == NULL);
 
     wolfcert_est_session_close(bs);
+    wolfcert_est_result_free(&bad_res);
     wolfcert_buffer_free(&bad_out);
     wolfcert_buffer_free(&csr);
     wolfcert_key_free(dk);

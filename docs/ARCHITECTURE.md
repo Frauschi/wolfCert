@@ -179,10 +179,10 @@ A client that holds a cert but does not opt into PHA is refused, since the
 server no longer asks for it during a TLS 1.3 handshake.
 
 **Manual approval.** A server may park an enrollment with `202 Accepted` +
-`Retry-After` (RFC 7030 §4.2.3), symmetrical to SCEP's PENDING. The
-`wolfcert_est_simple_enroll_ex` / `_simple_reenroll_ex` variants surface this
-as a `WolfCertEstResult` with `UNSET` / `SUCCESS` / `FAILURE` / `PENDING`
-status and a `retry_after_sec` hint; the simple-result calls flatten PENDING to
+`Retry-After` (RFC 7030 §4.2.3), symmetrical to SCEP's PENDING. The `_ex`
+enroll calls, one-shot and session, surface this as a `WolfCertEstResult`
+with `UNSET` / `SUCCESS` / `FAILURE` / `PENDING` status and a
+`retry_after_sec` hint; the simple-result calls flatten PENDING to
 `WOLFCERT_ERR_PENDING`.
 
 **`/csrattrs` key-policy pinning.** `wolfcert_est_parse_csr_attrs` decodes the

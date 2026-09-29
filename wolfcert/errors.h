@@ -45,9 +45,7 @@ enum {
      *     approval) - callers that used the richer `wolfcert_scep_*_ex`
      *     API see this through `WolfCertScepResult.status` instead.
      *   - EST /simpleenroll or /simplereenroll returned 202 Accepted
-     *     (RFC 7030 section 4.2.3) - `wolfcert_est_simple_enroll_ex` /
-     *     `_simple_reenroll_ex` surface the same state plus the
-     *     `Retry-After` hint through `WolfCertEstResult.status`.
+     *     (RFC 7030 section 4.2.3).
      * The error code is returned only by the simple-result entry points
      * that can't carry a richer result struct. */
     WOLFCERT_ERR_PENDING     = -13,
