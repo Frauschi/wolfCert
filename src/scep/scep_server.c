@@ -46,17 +46,9 @@
 
 /* Content-encryption cipher for the CertRep and its GetCACaps tokens. RFC 8894
  * section 3.5.2: "AES" names AES128-CBC, and "SCEPStandard" implies "AES". */
-#if defined(WOLFSSL_AES_128) && defined(HAVE_AES_CBC)
-    #define SCEP_SRV_ENC_OID    AES128CBCb
-    #define SCEP_SRV_CIPHER_CAP "AES\r\n"
-    #define SCEP_SRV_STD_CAP    "SCEPStandard\r\n"
-#elif !defined(NO_DES3)
-    #define SCEP_SRV_ENC_OID    DES3b
-    #define SCEP_SRV_CIPHER_CAP "DES3\r\n"
-    #define SCEP_SRV_STD_CAP    ""
-#else
-    #error "wolfCert's SCEP test server needs AES-128-CBC or 3DES-CBC; rebuild wolfSSL with one of them, or configure without the test server"
-#endif
+#define SCEP_SRV_ENC_OID    AES128CBCb
+#define SCEP_SRV_CIPHER_CAP "AES\r\n"
+#define SCEP_SRV_STD_CAP    "SCEPStandard\r\n"
 
 typedef struct {
     /* rawbuf owns the request-line + header bytes read off the wire. It is

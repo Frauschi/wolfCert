@@ -419,14 +419,6 @@ static int check_bad_csr_sig(const WolfCertServerCfg* cli,
     return rc;
 }
 
-/* The content-cipher checks force an AES-CBC cipher, so they only exist when
- * wolfSSL can supply one. */
-#if defined(HAVE_AES_CBC) && \
-        (defined(WOLFSSL_AES_128) || defined(WOLFSSL_AES_256))
-#define WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE
-#endif
-
-#ifdef WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE
 /* proto_opts.scep.content_cipher override: enrolling with an explicit
  * cipher must still issue a cert - the server de-envelops whatever OID the
  * request carries - proving AES-256 (and explicit AES-128) interoperate. */
@@ -459,7 +451,6 @@ static int check_content_cipher(const WolfCertServerCfg* cli,
     wolfcert_key_free(key);
     return rc;
 }
-#endif /* WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE */
 
 /* The listener canned_srv_thread() accepts on and the response it sends. */
 struct canned_ctx {
@@ -849,7 +840,6 @@ static void* msgtype_srv_thread(void* arg)
     return NULL;
 }
 
-#ifdef WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE
 /* The end-to-end cipher check above only proves the server de-enveloped
  * whatever arrived, which it does for any OID, so it would pass even if the
  * override were ignored. Read the algorithm off the wire instead. */
@@ -891,7 +881,6 @@ static int check_content_cipher_wire(const WolfCertScepCaps* caps,
     REQUIRE(strcmp(mc.cipher, expect) == 0);
     return 0;
 }
-#endif /* WOLFCERT_TEST_HAVE_CIPHER_OVERRIDE */
 
 /* proto_opts.scep.renewal_msg_type picks the messageType a renewal carries,
  * while the signer stays the certificate being replaced either way. Default is
@@ -1064,7 +1053,6 @@ static int check_getnextca_ca_id(const uint8_t* ca_der_buf, size_t ca_der_len)
     return 0;
 }
 
-#if defined(HAVE_AES_CBC) && defined(WOLFSSL_AES_128)
 /* RFC 8894 section 3.2.1 requires transactionID and a fresh senderNonce in every
  * pkiMessage; the client always sends both, so POST hand-built ones instead. */
 static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
@@ -1377,8 +1365,6 @@ static int check_malformed_dispatch(uint16_t port, const WolfCertKeyCfg* kcfg,
     return rc;
 }
 
-#endif /* HAVE_AES_CBC && WOLFSSL_AES_128 */
-
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -1406,13 +1392,8 @@ int main(void)
     REQUIRE(caps.post_pki_operation);
     REQUIRE(caps.sha256);
 
-#if defined(WOLFSSL_AES_128) && defined(HAVE_AES_CBC)
     REQUIRE(caps.aes == 1);
     REQUIRE(caps.scep_standard == 1);
-#else
-    REQUIRE(caps.aes == 0);
-    REQUIRE(caps.scep_standard == 0);
-#endif
     REQUIRE(caps.renewal);
 
     WolfCertBuffer ca_pem = { 0 };
@@ -1490,18 +1471,16 @@ int main(void)
     wolfcert_buffer_free(&issued_hash);
 
     /* ---- Content-cipher override: explicit AES-256 and AES-128 both enroll.
-     * Each half needs the cipher wolfSSL was actually built with; scep_prepare
-     * returns WOLFCERT_ERR_UNSUPPORTED for one the library cannot do. */
-#if defined(WOLFSSL_AES_256) && defined(HAVE_AES_CBC)
+     * AES-256 needs wolfSSL built with it; scep_prepare returns
+     * WOLFCERT_ERR_UNSUPPORTED otherwise. */
+#if defined(WOLFSSL_AES_256)
     REQUIRE(check_content_cipher(&cli, &caps, &kcfg, ca_der->buffer,
                                  ca_der->length, WOLFCERT_SCEP_CIPHER_AES256)
             == WOLFCERT_OK);
 #endif
-#if defined(WOLFSSL_AES_128) && defined(HAVE_AES_CBC)
     REQUIRE(check_content_cipher(&cli, &caps, &kcfg, ca_der->buffer,
                                  ca_der->length, WOLFCERT_SCEP_CIPHER_AES128)
             == WOLFCERT_OK);
-#endif
 
     /* ---- Renewal messageType. The signer is the certificate being replaced
      * in both cases; only the attribute changes, and the in-tree server routes
@@ -1567,18 +1546,16 @@ int main(void)
 
     /* ...and the same options read off the wire, since the server de-envelops
      * any OID and so cannot tell an honoured override from an ignored one. */
-#if defined(WOLFSSL_AES_256) && defined(HAVE_AES_CBC)
+#if defined(WOLFSSL_AES_256)
     REQUIRE(check_content_cipher_wire(&caps, &kcfg, ca_der->buffer,
                                       ca_der->length,
                                       WOLFCERT_SCEP_CIPHER_AES256,
                                       "aes256") == 0);
 #endif
-#if defined(WOLFSSL_AES_128) && defined(HAVE_AES_CBC)
     REQUIRE(check_content_cipher_wire(&caps, &kcfg, ca_der->buffer,
                                       ca_der->length,
                                       WOLFCERT_SCEP_CIPHER_AES128,
                                       "aes128") == 0);
-#endif
 
     /* The session captures the SCEP options at open, so that path needs its own
      * check rather than inheriting the one-shot coverage above. */
@@ -1625,17 +1602,12 @@ int main(void)
     REQUIRE(raw_http_status(wolfcert_server_port(s),
                 "/scep?operation=PKIOperation&message=QUJD", "XYZ") == 400); /* body freed */
 
-#if defined(HAVE_AES_CBC) && defined(WOLFSSL_AES_128)
     REQUIRE(check_required_attrs(s, &kcfg, ca_der->buffer,
                                  ca_der->length) == WOLFCERT_OK);
 
     REQUIRE(check_malformed_dispatch(wolfcert_server_port(s), &kcfg,
                                      ca_der->buffer, ca_der->length)
             == WOLFCERT_OK);
-#else
-    printf("SKIP required-attrs and malformed-dispatch "
-           "(wolfSSL built without AES-128-CBC)\n");
-#endif
 
 #ifdef WOLFCERT_HAVE_ED25519
     /* Ed25519 signer must be rejected cleanly (RFC 8894 requires RSA). */
