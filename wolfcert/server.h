@@ -35,8 +35,8 @@ typedef struct WolfCertServer WolfCertServer;
 
 typedef struct {
     WolfCertProtocol protocol;
-    const char*      bind_host;          /* e.g. "0.0.0.0"; ignored when
-                                          * serve_fd() is used directly */
+    const char*      bind_host;          /* numeric IPv4, NULL = all
+                                          * interfaces */
     uint16_t         bind_port;
     WolfCertStoreOps* ca_store;          /* optional: persist the local CA
                                             across runs; NULL = regen on

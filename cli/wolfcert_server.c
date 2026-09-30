@@ -58,7 +58,7 @@ static void print_usage(FILE* out)
 {
     fprintf(out,
         "wolfcert-server %s\n"
-        "Usage: wolfcert-server --proto est|scep [--listen HOST:PORT]\n"
+        "Usage: wolfcert-server --proto est|scep [--listen ADDR:PORT]\n"
         "                       [--basic USER:PASS] [--challenge PASS]\n"
         "                       [--tls-cert PEM --tls-key PEM [--tls-client-ca PEM]]\n"
         "                       [--scep-require-approval] [--scep-enable-next-ca]\n"
@@ -66,7 +66,7 @@ static void print_usage(FILE* out)
         "\n"
         "Options:\n"
         "  --proto est|scep         Protocol to serve (required)\n"
-        "  --listen HOST:PORT       Bind address (default 0.0.0.0:8080)\n"
+        "  --listen ADDR:PORT       Numeric IPv4 bind address (default 0.0.0.0:8080)\n"
         "  --basic USER:PASS        Require HTTP Basic auth (EST enroll); both non-empty\n"
         "  --challenge PASS         Require this SCEP challengePassword in the CSR\n"
         "  --tls-cert PEMFILE       Terminate TLS with this server certificate (PEM);\n"
@@ -394,7 +394,10 @@ int main(int argc, char** argv)
 
     int rc = wolfcert_server_start(&cfg, &g_server);
     if (rc != WOLFCERT_OK) {
+        const char* m = wolfcert_last_error_message();
         fprintf(stderr, "wolfcert-server: start failed (%s)\n", wolfcert_strerror(rc));
+        if (m != NULL && *m != '\0')
+            fprintf(stderr, "wolfcert-server: %s\n", m);
         goto out;
     }
 

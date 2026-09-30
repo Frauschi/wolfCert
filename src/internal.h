@@ -178,7 +178,6 @@ typedef struct {
 
 struct WolfCertServer {
     WolfCertServerCfgSrv    cfg;
-    char*                   cfg_bind_host;
     char*                   cfg_challenge;
     char*                   cfg_basic_user;
     char*                   cfg_basic_pass;
