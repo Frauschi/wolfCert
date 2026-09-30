@@ -213,6 +213,40 @@ else
     esac
 fi
 
+# Credentials on the client command line must not stay visible to ps. The client
+# parks opening a --trust FIFO that nobody writes, well after option parsing.
+ctmp="$(mktemp -d -t wolfcert-argv.XXXXXX)"
+mkfifo "$ctmp/trust"
+"$CLI" enroll --proto est --url "$EST_URL" --trust "$ctmp/trust" \
+    --subject CN=argv --user argvuser --pass argv-client-pass \
+    --challenge argv-client-challenge >/dev/null 2>&1 &
+cargv_pid=$!
+trap 'kill "$cargv_pid" 2>/dev/null; rm -rf "$ctmp"' EXIT
+i=0
+args=""
+while [ "$i" -lt 10 ]; do
+    args="$(ps -ww -o args= -p "$cargv_pid")"
+    case "$args" in
+        *argv-client-pass*|*argv-client-challenge*) ;;
+        *--trust*) break ;;
+    esac
+    sleep 1
+    i=$((i + 1))
+done
+case "$args" in
+    *argv-client-pass*|*argv-client-challenge*)
+        echo "FAIL: client secrets still visible in ps: $args"
+        fails=$((fails + 1))
+        ;;
+    *--trust*)  echo "ok   client scrubs --pass and --challenge from argv" ;;
+    *)
+        echo "FAIL: client did not stay parked on the --trust FIFO"
+        fails=$((fails + 1))
+        ;;
+esac
+kill "$cargv_pid" 2>/dev/null
+rm -rf "$ctmp"
+
 # The pinning itself, end to end against the in-tree test server. wolfcert-server
 # is built alongside wolfcert-client whenever the server is enabled; without it
 # there is nothing to enroll against, so skip just this group.
