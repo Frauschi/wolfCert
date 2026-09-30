@@ -29,6 +29,7 @@
 #include <wolfssl/ssl.h>
 #include <wolfssl/wolfcrypt/asn.h>          /* SHA256h */
 #include <wolfssl/wolfcrypt/asn_public.h>
+#include <wolfssl/wolfcrypt/pkcs7.h>
 #include <wolfssl/wolfcrypt/random.h>
 #include <wolfssl/wolfcrypt/rsa.h>
 
@@ -1081,7 +1082,7 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
         rc = wolfcert_scep_envelop(ca_der_buf, ca_der_len, csr.data, csr.len,
                                    AES128CBCb, &env, NULL);
 
-    memset(tid,    0x11, sizeof(tid));
+    memset(tid,    'A', sizeof(tid));
     memset(snonce, 0x22, sizeof(snonce));
 
     /* Each round omits one required attribute; the last is the control that
@@ -1192,6 +1193,134 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
 
     WOLFCERT_XFREE(signer, NULL);
     wolfcert_buffer_free(&env);
+    wolfcert_buffer_free(&kder);
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(key);
+
+    return rc;
+}
+
+/* Sign a PKCSReq whose transactionID value is `tid` and POST it. The
+ * transactionID is tagged PrintableString whatever its bytes, which
+ * wolfcert_scep_build_pki_message refuses to encode. */
+static int post_raw_tid(uint16_t port, const uint8_t* signer, size_t signer_len,
+                        const WolfCertBuffer* kder, const char* tid)
+{
+    static const byte oid_msg_type[] =
+        { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x02 };
+    static const byte oid_snonce[] =
+        { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x05 };
+    static const byte oid_tid[] =
+        { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x07 };
+    static const byte msg_type[] = { 0x13, 0x02, '1', '9' };
+    static const byte junk[] = { 0x04, 0x02, 0xAB, 0xCD };
+    byte        tid_val[2 + 16];
+    byte        snonce[2 + 16];
+    PKCS7Attrib attribs[3];
+    PKCS7*      p7 = NULL;
+    WC_RNG      rng;
+    uint8_t*    buf = NULL;
+    uint8_t*    rsp = NULL;
+    size_t      rsp_len = 0;
+    size_t      tid_len = strlen(tid);
+    int         n = 0;
+    int         st = -1;
+
+    if (tid_len > 16 || wc_InitRng(&rng) != 0)
+        return -1;
+
+    tid_val[0] = 0x13;
+    tid_val[1] = (byte)tid_len;
+    memcpy(tid_val + 2, tid, tid_len);
+    snonce[0] = 0x04;
+    snonce[1] = 16;
+    memset(snonce + 2, 0x22, 16);
+
+    attribs[0].oid     = oid_msg_type;
+    attribs[0].oidSz   = sizeof(oid_msg_type);
+    attribs[0].value   = msg_type;
+    attribs[0].valueSz = sizeof(msg_type);
+    attribs[1].oid     = oid_tid;
+    attribs[1].oidSz   = sizeof(oid_tid);
+    attribs[1].value   = tid_val;
+    attribs[1].valueSz = (word32)(2 + tid_len);
+    attribs[2].oid     = oid_snonce;
+    attribs[2].oidSz   = sizeof(oid_snonce);
+    attribs[2].value   = snonce;
+    attribs[2].valueSz = sizeof(snonce);
+
+    p7 = wc_PKCS7_New(NULL, INVALID_DEVID);
+    buf = (uint8_t*)malloc(8192);
+    if (p7 != NULL && buf != NULL &&
+            wc_PKCS7_InitWithCert(p7, (byte*)signer, (word32)signer_len) == 0) {
+        p7->rng             = &rng;
+        p7->privateKey      = kder->data;
+        p7->privateKeySz    = (word32)kder->len;
+        p7->encryptOID      = RSAk;
+        p7->hashOID         = SHA256h;
+        p7->content         = (byte*)junk;
+        p7->contentSz       = sizeof(junk);
+        p7->signedAttribs   = attribs;
+        p7->signedAttribsSz = 3;
+        n = wc_PKCS7_EncodeSignedData(p7, buf, 8192);
+    }
+
+    if (n > 0)
+        st = raw_http_req(port, "POST", "/scep?operation=PKIOperation",
+                          "application/x-pki-message", buf, (size_t)n, 0,
+                          &rsp, &rsp_len);
+
+    free(rsp);
+    free(buf);
+    if (p7 != NULL)
+        wc_PKCS7_Free(p7);
+    wc_FreeRng(&rng);
+    return st;
+}
+
+/* The server must reject a signed request whose transactionID is not a
+ * PrintableString; the same message with a valid one is the control. */
+static int check_unprintable_tid(uint16_t port, const WolfCertKeyCfg* kcfg)
+{
+    WolfCertCertMeta meta = { .subject_dn = "CN=scep-tid" };
+    WolfCertKey*   key  = NULL;
+    WolfCertBuffer csr  = { 0 };
+    WolfCertBuffer kder = { 0 };
+    uint8_t* signer = NULL;
+    size_t   signer_len = 0;
+    int      st;
+    int      rc;
+
+    rc = wolfcert_key_generate(kcfg, &key);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_csr_build(key, &meta, &csr);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_key_to_der(key, &kder);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_scep_self_signed_rsa((RsaKey*)key->impl, csr.data,
+                                           csr.len, &signer, &signer_len, NULL);
+
+    if (rc == WOLFCERT_OK) {
+        st = post_raw_tid(port, signer, signer_len, &kder, "tid@1");
+        if (st != 400) {
+            fprintf(stderr, "FAIL %s:%d '@' transactionID got status %d\n",
+                    __FILE__, __LINE__, st);
+            rc = -1;
+        }
+    }
+
+    /* The control reaches de-enveloping, which answers the junk content with
+     * a signed FAILURE. */
+    if (rc == WOLFCERT_OK) {
+        st = post_raw_tid(port, signer, signer_len, &kder, "tid-1");
+        if (st != 200) {
+            fprintf(stderr, "FAIL %s:%d control transactionID got status %d\n",
+                    __FILE__, __LINE__, st);
+            rc = -1;
+        }
+    }
+
+    WOLFCERT_XFREE(signer, NULL);
     wolfcert_buffer_free(&kder);
     wolfcert_buffer_free(&csr);
     wolfcert_key_free(key);
@@ -1605,6 +1734,9 @@ int main(void)
     REQUIRE(check_required_attrs(s, &kcfg, ca_der->buffer,
                                  ca_der->length) == WOLFCERT_OK);
 
+    REQUIRE(check_unprintable_tid(wolfcert_server_port(s), &kcfg)
+            == WOLFCERT_OK);
+
     REQUIRE(check_malformed_dispatch(wolfcert_server_port(s), &kcfg,
                                      ca_der->buffer, ca_der->length)
             == WOLFCERT_OK);
@@ -1728,7 +1860,8 @@ int main(void)
         uint8_t snonce[16], rnonce[16];
         memset(snonce, 0x5A, sizeof(snonce));
         memset(rnonce, 0xA5, sizeof(rnonce));
-        const uint8_t wtid[16] = { 0 };
+        const uint8_t wtid[16] =
+            { '0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F' };
         WolfCertScepAttrs wattrs = {
             .transaction_id  = wtid,   .transaction_id_len  = sizeof(wtid),
             .sender_nonce    = snonce, .sender_nonce_len    = sizeof(snonce),

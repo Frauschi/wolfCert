@@ -522,6 +522,9 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_next_ca_response(
 int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
                           uint8_t** out_spki, size_t* out_len, void* heap);
 
+/* 1 if every byte is in the X.680 PrintableString repertoire, else 0. */
+int wolfcert_is_printable_string(const uint8_t* s, size_t len);
+
 /* RFC 8894: a CertRep must be signed by the CA or its RA. Confirm the response
  * signer certificate shares a public key with some certificate in the trusted
  * GetCACert bundle (one or more concatenated DER certs). Returns WOLFCERT_OK on

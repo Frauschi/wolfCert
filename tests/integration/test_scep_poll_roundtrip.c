@@ -407,7 +407,7 @@ static int poll_path(WolfCertServer* s)
      * it, so a value far longer than the generated 32-hex one is sent on the
      * wire (FAILURE/badCertId again) instead of being rejected up front. */
     uint8_t long_tid[200];
-    memset(long_tid, 0x11, sizeof(long_tid));
+    memset(long_tid, 'A', sizeof(long_tid));
     WolfCertScepResult r4 = { 0 };
     rc = wolfcert_scep_get_cert_initial(&cli, &caps,
                                         ca_der->buffer, ca_der->length,
@@ -419,6 +419,38 @@ static int poll_path(WolfCertServer* s)
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(r4.status == WOLFCERT_SCEP_STATUS_FAILURE);
     REQUIRE(r4.fail_info == 4);
+
+    /* Step 5: '_', '@', control bytes and bytes above 0x7F are outside the
+     * PrintableString set; its punctuation goes on the wire. */
+    static const uint8_t ok_tid[] = { 'A', '-', ':', '.', ' ', '\'', '?' };
+    WolfCertScepResult r6 = { 0 };
+    rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
+                                        ca_der->buffer, ca_der->length,
+                                        NULL, 0,
+                                        dk, csr.data, csr.len,
+                                        ok_tid, sizeof(ok_tid), &r6);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(r6.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE(r6.fail_info == 4);
+    wolfcert_scep_result_free(&r6);
+
+    static const uint8_t bad_tid[][4] = {
+        { 'A', 'B', '_', 'C' }, { 'A', 'B', 0x11, 'C' }, { 'A', 'B', 0x00, 'C' },
+        { 'A', 'B', '@', 'C' }, { 'A', 'B', 0x80, 'C' }
+    };
+    for (size_t i = 0; i < sizeof(bad_tid) / sizeof(bad_tid[0]); i++) {
+        WolfCertScepResult r5 = { 0 };
+        rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                            ca_der->buffer, ca_der->length,
+                                            ca_der->buffer, ca_der->length,
+                                            NULL, 0,
+                                            dk, csr.data, csr.len,
+                                            bad_tid[i], sizeof(bad_tid[i]),
+                                            &r5);
+        wolfcert_scep_result_free(&r5);
+        REQUIRE(rc == WOLFCERT_ERR_BAD_ARG);
+    }
 
     wolfcert_scep_result_free(&r1);
     wolfcert_scep_result_free(&r2);
