@@ -76,11 +76,11 @@ typedef struct {
     size_t           tls_client_ca_pem_len;
 
     /* SCEP manual-approval mode. When set, PKCSReq/RenewalReq return
-     * pkiStatus=PENDING instead of issuing immediately; the client must
-     * poll with GetCertInitial. The test server's built-in policy auto-
-     * approves a pending request on the first poll that quotes its
-     * transactionID, which is enough to exercise the pending -> issued
-     * transition end-to-end without an admin UI. */
+     * pkiStatus=PENDING instead of issuing immediately, or FAILURE when the
+     * CSR signature does not verify; the client must poll with
+     * GetCertInitial. The test server's built-in policy auto-approves a
+     * pending request on the first poll that quotes its transactionID and
+     * is signed with the parked CSR's key. */
     int              scep_require_approval;
 
     /* SCEP CA roll-over. When set, the server advertises GetNextCACert
