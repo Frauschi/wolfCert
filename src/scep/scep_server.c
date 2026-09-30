@@ -816,11 +816,12 @@ static int handle_enroll(WolfCertServer* s, int fd, const char* mt,
 }
 
 /* Handle messageType=20 (GetCertInitial): poll for a pending enrollment.
- * Test-server policy: the first poll for a known transactionID issues
- * the cert and drains the queue entry; subsequent polls for unknown
- * transactionIDs return pkiStatus=2 (FAILURE) rather than pretending
- * to be pending forever. */
+ * Test-server policy: the first poll for a known transactionID, signed with
+ * the parked CSR's key, issues the cert and drains the queue entry. Any
+ * other poll gets pkiStatus=2 (FAILURE) and leaves the queue unchanged. */
 static int handle_get_cert_initial(WolfCertServer* s, int fd,
+                                   const uint8_t* signer_cert,
+                                   size_t signer_cert_len,
                                    const uint8_t* tid, size_t tid_len,
                                    const uint8_t* snonce, size_t snonce_len)
 {
@@ -829,6 +830,14 @@ static int handle_get_cert_initial(WolfCertServer* s, int fd,
     if (e == NULL) {
         return send_pki_failure(s, fd, tid, tid_len, snonce, snonce_len,
                                 "4" /* badCertId: no such transaction */);
+    }
+
+    /* Only the key that parked the request may release it. */
+    if (signer_cert == NULL ||
+            signer_matches_csr(signer_cert, signer_cert_len,
+                               e->csr_der, e->csr_len, s->heap) != WOLFCERT_OK) {
+        return send_pki_failure(s, fd, tid, tid_len, snonce, snonce_len,
+                                "4" /* badCertId */);
     }
 
     /* Approve on first poll. A production implementation would hold
@@ -953,9 +962,7 @@ static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
     rc = wolfcert_scep_deenvelop(s->ca.cert_der, s->ca.cert_der_len,
                                   s->ca.key_der,  s->ca.key_der_len,
                                   env.data, env.len, &csr, s->heap);
-    if (rc != WOLFCERT_OK && strcmp(mt, "20") != 0) {
-        /* Decryption matters for 19/17 (CSR inside); for 20 the payload
-         * is IssuerAndSubject which the server matches by txid anyway. */
+    if (rc != WOLFCERT_OK) {
         const char* fail_info = rc == WOLFCERT_ERR_UNSUPPORTED
                                     ? "0" /* badAlg */
                                     : "2" /* badRequest */;
@@ -975,7 +982,8 @@ static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
                            tid, tid_len, snonce, snonce_len);
     }
     else if (strcmp(mt, "20") == 0) {
-        rc = handle_get_cert_initial(s, fd, tid, tid_len, snonce, snonce_len);
+        rc = handle_get_cert_initial(s, fd, signer_cert, signer_cert_len,
+                                     tid, tid_len, snonce, snonce_len);
     }
     else if (strcmp(mt, "21") == 0 && s->cfg.scep_enable_get_cert) {
         const uint8_t* gc_signer     = signer_cert;
