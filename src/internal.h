@@ -359,6 +359,9 @@ int  wolfcert_transport_fd(const WolfCertTransport* t, void* conn);
 int  wolfcert_pem_cert_to_der(const uint8_t* pem, size_t pem_len,
                               WolfCertBuffer* out_der, void* heap);
 
+/* 1 when meta sets a Subject or SAN. */
+int wolfcert_csr_meta_sets_identity(const WolfCertCertMeta* meta);
+
 /* GeneralNames of the subjectAltName in dc, or *san NULL when there is
  * none. Returns WOLFCERT_OK or WOLFCERT_ERR_PARSE. */
 WOLFCERT_TEST_VIS int wolfcert_find_san(const DecodedCert* dc,

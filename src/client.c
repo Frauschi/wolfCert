@@ -232,6 +232,9 @@ int wolfcert_client_reenroll(WolfCertClient* client, const WolfCertServerCfg* sr
     if (srv == NULL || current_cert == NULL || current_key == NULL ||
         meta == NULL || out_key == NULL || out_cert_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
+    if (wolfcert_csr_meta_sets_identity(meta))
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "client",
+            "a renewal keeps the certificate's subject and SAN");
 
     WolfCertKey* nk = NULL;
     int rc;

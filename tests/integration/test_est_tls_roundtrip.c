@@ -152,6 +152,7 @@ static int test_client_reenroll_keeps_identity(const uint8_t* tls_cert,
         .tls_cert_pem     = tls_cert, .tls_cert_pem_len = tls_cert_len,
         .tls_key_pem      = tls_key,  .tls_key_pem_len  = tls_key_len,
     };
+    WolfCertKeyCfg no_kcfg = { .type = (WolfCertKeyType)0x7f };
     WolfCertServer* srv = NULL;
     pthread_t tid;
     char url[128];
@@ -193,6 +194,13 @@ static int test_client_reenroll_keeps_identity(const uint8_t* tls_cert,
     REQUIRE(wolfcert_client_reenroll(NULL, &cli, cur_cert, cur_cert_len,
                                      cur_key, NULL, &meta, &out_key, &issued)
             == WOLFCERT_ERR_BAD_ARG);
+
+    /* Refused before key generation, which would fail UNSUPPORTED here. */
+    memset(&meta, 0, sizeof(meta));
+    meta.subject_dn = "CN=impostor";
+    REQUIRE(wolfcert_client_reenroll(NULL, &cli, cur_cert, cur_cert_len,
+                                     cur_key, &no_kcfg, &meta, &out_key,
+                                     &issued) == WOLFCERT_ERR_BAD_ARG);
 
 #ifdef KEEP_PEER_CERT
     /* The caller's callback still runs but cannot rename the cert. */

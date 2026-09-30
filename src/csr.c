@@ -350,6 +350,13 @@ static int copy_cert_identity(Cert* cert, const uint8_t* renew_cert,
     return rc;
 }
 
+int wolfcert_csr_meta_sets_identity(const WolfCertCertMeta* meta)
+{
+    return meta->subject_dn != NULL || meta->san_dns_len != 0 ||
+           meta->san_ip_len != 0 || meta->san_uri_len != 0 ||
+           meta->san_email_len != 0;
+}
+
 int wolfcert_csr_build(const WolfCertKey* key, const WolfCertCertMeta* meta,
                        WolfCertBuffer* out_der)
 {
@@ -363,10 +370,7 @@ int wolfcert_csr_build_ex(const WolfCertKey* key, const WolfCertCertMeta* meta,
     if (key == NULL || meta == NULL || out_der == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    if (renew_cert != NULL &&
-            (meta->subject_dn != NULL || meta->san_dns_len != 0 ||
-             meta->san_ip_len != 0 || meta->san_uri_len != 0 ||
-             meta->san_email_len != 0))
+    if (renew_cert != NULL && wolfcert_csr_meta_sets_identity(meta))
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "csr",
             "a renewal keeps the certificate's subject and SAN");
 
