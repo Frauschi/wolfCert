@@ -588,8 +588,6 @@ static const char* scep_renewal_msg_type(WolfCertScepRenewalMsgType m)
     return (m == WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ) ? "19" : "17";
 }
 
-/* Shared SCEP round-trip sizes. */
-#define SCEP_NONCE_SZ 16
 /* A random transactionID is 16 RNG bytes expanded to 32 hex characters. */
 #define SCEP_TXID_RAND_SZ 16
 
