@@ -603,6 +603,10 @@ void wolfcert_server_free(WolfCertServer* srv)
         close(srv->listen_fd);
 
     wolfcert_ca_free(&srv->ca);
+    if (srv->cfg_challenge != NULL)
+        wc_ForceZero(srv->cfg_challenge, (word32)strlen(srv->cfg_challenge));
+    if (srv->cfg_basic_pass != NULL)
+        wc_ForceZero(srv->cfg_basic_pass, (word32)strlen(srv->cfg_basic_pass));
     WOLFCERT_XFREE(srv->cfg_challenge,  srv->heap);
     WOLFCERT_XFREE(srv->cfg_basic_user, srv->heap);
     WOLFCERT_XFREE(srv->cfg_basic_pass, srv->heap);
