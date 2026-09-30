@@ -194,8 +194,50 @@ static int poll_path(WolfCertServer* s)
     REQUIRE(rx.status == WOLFCERT_SCEP_STATUS_FAILURE);
     REQUIRE(rx.fail_info == 4);
     wolfcert_scep_result_free(&rx);
+
+    /* A CSR with a broken signature is refused on the PKCSReq, not parked. */
+    other_csr.data[other_csr.len - 1] ^= 0x01;
+    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   other, other_csr.data, other_csr.len, &rx);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(rx.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE(rx.fail_info == 2);
+    other_csr.data[other_csr.len - 1] ^= 0x01;
+    WolfCertScepResult ry = { 0 };
+    rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
+                                        ca_der->buffer, ca_der->length,
+                                        NULL, 0,
+                                        other, other_csr.data, other_csr.len,
+                                        rx.transaction_id, rx.transaction_id_len,
+                                        &ry);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(ry.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE(ry.fail_info == 4);
+    wolfcert_scep_result_free(&rx);
+    wolfcert_scep_result_free(&ry);
     wolfcert_buffer_free(&other_csr);
     wolfcert_key_free(other);
+
+    /* Out of memory in the signer check or the issuance answers 500 and
+     * keeps the entry. */
+    static const int oom_at[2] = { 3 /* signer check */, 1 /* issuance */ };
+    for (int i = 0; i < 2; i++) {
+        WolfCertScepResult rm = { 0 };
+        wolfcert_scep_server_set_oom_fault(s, oom_at[i]);
+        rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                            ca_der->buffer, ca_der->length,
+                                            ca_der->buffer, ca_der->length,
+                                            NULL, 0,
+                                            dk, csr.data, csr.len,
+                                            r1.transaction_id,
+                                            r1.transaction_id_len, &rm);
+        wolfcert_scep_server_set_oom_fault(s, 0);
+        REQUIRE(rc != WOLFCERT_OK);
+        wolfcert_scep_result_free(&rm);
+    }
 
     /* Step 2: GetCertInitial with the same transactionID -> SUCCESS.
      * signer_cert=NULL so the client regenerates the transient
@@ -227,6 +269,48 @@ static int poll_path(WolfCertServer* s)
                                             WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS);
     wc_FreeDer(&issued_der);
     wolfSSL_CertManagerFree(cm);
+
+    /* Out of memory after issuing must not leave the entry to issue again. */
+    WolfCertScepResult r7 = { 0 };
+    WolfCertScepResult r8 = { 0 };
+    WolfCertScepResult r9 = { 0 };
+    wolfcert_scep_server_set_oom_fault(s, 3);
+    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   dk, csr.data, csr.len, &r7);
+    wolfcert_scep_server_set_oom_fault(s, 0);
+    REQUIRE(rc != WOLFCERT_OK);
+    wolfcert_scep_result_free(&r7);
+    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   dk, csr.data, csr.len, &r7);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(r7.status == WOLFCERT_SCEP_STATUS_PENDING);
+    wolfcert_scep_server_set_oom_fault(s, 2);
+    rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
+                                        ca_der->buffer, ca_der->length,
+                                        NULL, 0,
+                                        dk, csr.data, csr.len,
+                                        r7.transaction_id, r7.transaction_id_len,
+                                        &r8);
+    wolfcert_scep_server_set_oom_fault(s, 0);
+    REQUIRE(rc != WOLFCERT_OK);
+    rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
+                                        ca_der->buffer, ca_der->length,
+                                        NULL, 0,
+                                        dk, csr.data, csr.len,
+                                        r7.transaction_id, r7.transaction_id_len,
+                                        &r9);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(r9.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE(r9.fail_info == 4);
+    wolfcert_scep_result_free(&r7);
+    wolfcert_scep_result_free(&r8);
+    wolfcert_scep_result_free(&r9);
 
     /* Step 3: Polling an unknown transactionID -> FAILURE. */
     uint8_t bogus_tid[32];

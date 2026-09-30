@@ -163,6 +163,7 @@ void wolfcert_buffer_free_secure(WolfCertBuffer* buf);
 
 /* Rebuild an issued certificate's subject from a decoded CSR. */
 WOLFCERT_TEST_VIS int  wolfcert_copy_csr_subject(const DecodedCert* dc, Cert* nc);
+int  wolfcert_csr_verify(const uint8_t* csr_der, size_t csr_len, void* heap);
 WOLFCERT_TEST_VIS int  wolfcert_ca_issue(WolfCertCa* ca, const uint8_t* csr_der,
                                          size_t csr_len, uint8_t** out_cert,
                                          size_t* out_len);
@@ -255,6 +256,11 @@ WOLFCERT_TEST_VIS void wolfcert_scep_server_set_getcert_fault(WolfCertServer* s,
 
 WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
     int omit_recipient_nonce, int sign_with_wrong_key, int rng_fail);
+
+/* Out of memory: 1 fails wolfcert_ca_issue, 2 the reply after issuing, 3 the
+ * signer/CSR key match; 0 clears it. */
+WOLFCERT_TEST_VIS void wolfcert_scep_server_set_oom_fault(WolfCertServer* s,
+                                                          int when);
 #endif
 
 /* ---- error reporting --------------------------------------------------- */

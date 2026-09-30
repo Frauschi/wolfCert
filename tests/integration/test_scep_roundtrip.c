@@ -385,6 +385,40 @@ static int check_pubkey_txid(const WolfCertServerCfg* cli,
     return rc;
 }
 
+/* A CSR whose self-signature is broken gets past the SPKI and challenge checks
+ * and is only refused at issuance, which must still answer with a CertRep. */
+static int check_bad_csr_sig(const WolfCertServerCfg* cli,
+                             const WolfCertScepCaps* caps,
+                             const WolfCertKey* key,
+                             const uint8_t* csr, size_t csr_len,
+                             const uint8_t* ca_der_buf, size_t ca_der_len)
+{
+    WolfCertScepResult r = { 0 };
+    uint8_t* bad = NULL;
+    int rc = WOLFCERT_OK;
+
+    bad = (uint8_t*)WOLFCERT_XMALLOC(csr_len, NULL);
+    if (bad == NULL)
+        rc = WOLFCERT_ERR_MEMORY;
+    if (rc == WOLFCERT_OK) {
+        memcpy(bad, csr, csr_len);
+        bad[csr_len - 1] ^= 0x01;
+        rc = wolfcert_scep_pkcs_req_ex(cli, caps, ca_der_buf, ca_der_len,
+                                       ca_der_buf, ca_der_len, key,
+                                       bad, csr_len, &r);
+        if (rc != WOLFCERT_OK)
+            fprintf(stderr, "bad CSR signature: rc=%d (%s)\n", rc,
+                    wolfcert_strerror(rc));
+    }
+    if (rc == WOLFCERT_OK && (r.status != WOLFCERT_SCEP_STATUS_FAILURE ||
+                              r.fail_info != 2))
+        rc = -1;
+
+    wolfcert_scep_result_free(&r);
+    WOLFCERT_XFREE(bad, NULL);
+    return rc;
+}
+
 /* The content-cipher checks force an AES-CBC cipher, so they only exist when
  * wolfSSL can supply one. */
 #if defined(HAVE_AES_CBC) && \
@@ -1426,6 +1460,9 @@ int main(void)
 
     /* ---- Public-key-hash transactionID (RFC 8894 section 3.2.1) ----------- */
     REQUIRE(check_pubkey_txid(&cli, &caps, &kcfg,
+                              ca_der->buffer, ca_der->length) == WOLFCERT_OK);
+
+    REQUIRE(check_bad_csr_sig(&cli, &caps, dk, csr.data, csr.len,
                               ca_der->buffer, ca_der->length) == WOLFCERT_OK);
 
     /* ---- RSA-4096 enrollment ---------------------------------------------- */
