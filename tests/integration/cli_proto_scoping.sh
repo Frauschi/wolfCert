@@ -347,6 +347,26 @@ else
             fails=$((fails + 1))
         fi
     fi
+
+    # A hostname --listen is refused, and the reason reaches stderr.
+    "$SERVER" --proto scep --listen localhost:18090 >"$tmp/listen.log" 2>&1 &
+    listen_pid=$!
+    i=0
+    while [ "$i" -lt "$poll_tries" ] && kill -0 "$listen_pid" 2>/dev/null; do
+        sleep "$poll_delay"
+        i=$((i + 1))
+    done
+    if kill -0 "$listen_pid" 2>/dev/null; then
+        kill "$listen_pid" 2>/dev/null
+        echo "FAIL: --listen localhost was accepted"
+        fails=$((fails + 1))
+    elif grep -q "not a numeric IPv4 address" "$tmp/listen.log"; then
+        echo "ok   --listen localhost names the reason it was refused"
+    else
+        echo "FAIL: --listen localhost refused without the reason"
+        cat "$tmp/listen.log"
+        fails=$((fails + 1))
+    fi
 fi
 
 if [ "$fails" -ne 0 ]; then
