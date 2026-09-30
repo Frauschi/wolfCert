@@ -115,9 +115,10 @@ typedef struct {
     int              est_retry_after_sec;
 
     /* TLS 1.3 post-handshake auth (RFC 8446 section 4.6.2) for EST enrollment,
-     * checked against `tls_client_ca_pem`, which it requires.
-     * wolfcert_server_start() returns WOLFCERT_ERR_UNSUPPORTED without
-     * KEEP_PEER_CERT and WOLFSSL_HAVE_TLS_UNIQUE; see docs/ARCHITECTURE.md. */
+     * checked against `tls_client_ca_pem`, which it requires. Other protocols
+     * reject it with WOLFCERT_ERR_BAD_ARG. wolfcert_server_start() returns
+     * WOLFCERT_ERR_UNSUPPORTED without KEEP_PEER_CERT and
+     * WOLFSSL_HAVE_TLS_UNIQUE; see docs/ARCHITECTURE.md. */
     int              tls_post_handshake_auth;
 
     /* EST /csrattrs body. When set, the EST server returns this
