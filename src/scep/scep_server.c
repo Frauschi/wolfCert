@@ -998,11 +998,13 @@ static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
         goto out;
     }
 
-    /* RFC 8894 section 3.2.1 requires all three in every message, so one that
-     * omits any of them is not a pkiMessage a CertRep could answer. */
+    /* RFC 8894 section 3.2.1 requires all three in every message, with a
+     * PrintableString transactionID and a 16-byte senderNonce, or no CertRep
+     * could answer it. */
     if (tid == NULL || tid_len == 0 ||
             !wolfcert_is_printable_string(tid, tid_len) ||
-            snonce == NULL || snonce_len == 0 || mt == NULL || mt[0] == '\0') {
+            snonce == NULL || snonce_len != SCEP_NONCE_SZ ||
+            mt == NULL || mt[0] == '\0') {
         s->keep_alive = 0;
         send_text(s, fd, 400, "Bad Message", "text/plain", "");
         rc = WOLFCERT_ERR_PROTOCOL;

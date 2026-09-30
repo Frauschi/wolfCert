@@ -1066,7 +1066,7 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
     WolfCertBuffer env  = { 0 };
     uint8_t* signer = NULL;
     size_t   signer_len = 0;
-    uint8_t  tid[16], snonce[16];
+    uint8_t  tid[16], snonce[16], snonce_long[17];
     size_t   i;
     int      rc;
 
@@ -1084,10 +1084,11 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
 
     memset(tid,    'A', sizeof(tid));
     memset(snonce, 0x22, sizeof(snonce));
+    memset(snonce_long, 0x33, sizeof(snonce_long));
 
-    /* Each round omits one required attribute; the last is the control that
-     * proves this raw-POST harness reaches the issuance path at all. */
-    for (i = 0; rc == WOLFCERT_OK && i < 7; ++i) {
+    /* Each round omits or mis-sizes one required attribute; the last is the
+     * control that proves this raw-POST harness reaches the issuance path. */
+    for (i = 0; rc == WOLFCERT_OK && i < 9; ++i) {
         WolfCertScepAttrs a = { .message_type = i == 4 ? NULL :
                                                 i == 5 ? ""   : "19" };
         WolfCertBuffer msg = { 0 };
@@ -1118,6 +1119,15 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
             a.transaction_id = tid;   a.transaction_id_len = sizeof(tid);
             a.sender_nonce = snonce;  a.sender_nonce_len = sizeof(snonce);
         }
+        else if (i == 6) {                  /* short senderNonce */
+            a.transaction_id = tid;   a.transaction_id_len = sizeof(tid);
+            a.sender_nonce = snonce;  a.sender_nonce_len = 8;
+        }
+        else if (i == 7) {                  /* long senderNonce */
+            a.transaction_id = tid;   a.transaction_id_len = sizeof(tid);
+            a.sender_nonce = snonce_long;
+            a.sender_nonce_len = sizeof(snonce_long);
+        }
         else {                              /* control: all three present */
             a.transaction_id = tid;   a.transaction_id_len = sizeof(tid);
             a.sender_nonce = snonce;  a.sender_nonce_len = sizeof(snonce);
@@ -1135,8 +1145,8 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
                           msg.data, msg.len, 0, &rsp, &rsp_len);
         wolfcert_buffer_free(&msg);
 
-        if (i < 6) {
-            /* An attribute that is absent or empty is not a pkiMessage. */
+        if (i < 8) {
+            /* An absent, empty or missized attribute is not a pkiMessage. */
             ok = (st == 400);
         }
         else {

@@ -410,6 +410,8 @@ WOLFCERT_TEST_VIS size_t wolfcert_oid_to_dotted(const uint8_t* oid, size_t oid_l
                                                 char* out, size_t out_cap);
 
 /* SCEP pkiMessage helpers. */
+#define SCEP_NONCE_SZ 16
+
 typedef struct {
     const uint8_t* transaction_id;
     size_t transaction_id_len;
