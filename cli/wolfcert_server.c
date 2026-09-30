@@ -126,14 +126,27 @@ static int parse_listen(const char* arg, char** host, uint16_t* port)
     return 0;
 }
 
-static int parse_basic(const char* arg, char** user, char** pass)
+static void free_secret(char* s)
 {
-    const char* colon = strchr(arg, ':');
+    if (s != NULL) {
+        wc_ForceZero(s, (word32)strlen(s));
+        free(s);
+    }
+}
+
+static int parse_basic(char* arg, char** user, char** pass)
+{
+    char* colon = strchr(arg, ':');
     if (colon == NULL || colon == arg || colon[1] == '\0')
         return -1;
 
+    free(*user);
+    free_secret(*pass);
     *user = strndup(arg, (size_t)(colon - arg));
     *pass = strdup(colon + 1);
+    wc_ForceZero(colon + 1, (word32)strlen(colon + 1));
+    if (*user == NULL || *pass == NULL)
+        return -2;
 
     return 0;
 }
@@ -211,6 +224,7 @@ int main(int argc, char** argv)
     size_t csr_attrs_blob_len = 0;
     int est_require_csr_attrs = 0;
     int est_allow_anonymous   = 0;
+    int basic_rc;
     int c;
 
     while ((c = getopt_long(argc, argv, "", opts, NULL)) != -1) {
@@ -225,13 +239,24 @@ int main(int argc, char** argv)
                 }
                 break;
             case 'b':
-                if (parse_basic(optarg, &user, &pass) != 0) {
+                basic_rc = parse_basic(optarg, &user, &pass);
+                if (basic_rc == -2) {
+                    fprintf(stderr, "out of memory copying --basic\n");
+                    return 1;
+                }
+                if (basic_rc != 0) {
                     fprintf(stderr, "invalid --basic (expected non-empty USER:PASS)\n");
                     return 1;
                 }
                 break;
             case 'X':
-                challenge = optarg;
+                free_secret(challenge);
+                challenge = strdup(optarg);
+                wc_ForceZero(optarg, (word32)strlen(optarg));
+                if (challenge == NULL) {
+                    fprintf(stderr, "out of memory copying --challenge\n");
+                    return 1;
+                }
                 break;
             case 'C':
                 tls_cert = slurp(optarg, &tls_cert_len);
@@ -357,7 +382,8 @@ int main(int argc, char** argv)
             free(csr_attrs_blob);
             free(host);
             free(user);
-            free(pass);
+            free_secret(pass);
+            free_secret(challenge);
             free(tls_cert);
             free(tls_key);
             free(tls_ca);
@@ -418,7 +444,8 @@ out:
     g_server = NULL;
     free(host);
     free(user);
-    free(pass);
+    free_secret(pass);
+    free_secret(challenge);
     free(tls_cert);
     free(tls_key);
     free(tls_ca);

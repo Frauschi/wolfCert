@@ -6,8 +6,8 @@
 # either and quietly doing nothing. Both were only ever checked by hand.
 #
 # Most cases here fail before any network access. The --ca-fingerprint pinning
-# group is the exception: it starts wolfcert-server, and skips itself when that
-# binary was not built.
+# and server argv groups are the exception: they start wolfcert-server, and skip
+# themselves when that binary was not built.
 
 set -u
 
@@ -251,7 +251,9 @@ if [ ! -x "$SERVER" ]; then
 else
     tmp="$(mktemp -d -t wolfcert-cli.XXXXXX)"
     srv_pid=""
-    trap '[ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
+    argv_pid=""
+    trap '[ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null;
+          [ -n "$argv_pid" ] && kill "$argv_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
 
     # Not every sleep(1) takes a fractional delay. Poll in whole seconds where
     # it does not, keeping the same ten-second budget.
@@ -367,6 +369,49 @@ else
         cat "$tmp/listen.log"
         fails=$((fails + 1))
     fi
+
+    # Secrets passed on the server command line must not stay visible to ps.
+    listening=0
+    for port in 18089 18189 18289 18389; do
+        "$SERVER" --proto scep --listen "127.0.0.1:$port" \
+            --basic argvuser:argv-basic-secret \
+            --challenge argv-challenge-secret >"$tmp/argv.log" 2>&1 &
+        argv_pid=$!
+        i=0
+        while [ "$i" -lt "$poll_tries" ] && kill -0 "$argv_pid" 2>/dev/null; do
+            if grep -q "listening" "$tmp/argv.log"; then
+                listening=1
+                break
+            fi
+            sleep "$poll_delay"
+            i=$((i + 1))
+        done
+        if [ "$listening" -eq 1 ]; then
+            break
+        fi
+        kill "$argv_pid" 2>/dev/null
+    done
+
+    if [ "$listening" -ne 1 ]; then
+        echo "skip server argv scrubbing (no test server would start)"
+        cat "$tmp/argv.log"
+    else
+        args="$(ps -ww -o args= -p "$argv_pid")"
+        case "$args" in
+            *argv-basic-secret*|*argv-challenge-secret*)
+                echo "FAIL: server secrets still visible in ps: $args"
+                fails=$((fails + 1))
+                ;;
+            *--basic*)
+                echo "ok   server scrubs --basic and --challenge from argv" ;;
+            *)
+                echo "FAIL: could not read the server argv from ps: $args"
+                fails=$((fails + 1))
+                ;;
+        esac
+    fi
+    kill "$argv_pid" 2>/dev/null
+    argv_pid=""
 fi
 
 if [ "$fails" -ne 0 ]; then
