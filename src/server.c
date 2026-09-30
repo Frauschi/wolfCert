@@ -301,6 +301,11 @@ int wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out)
             "EST enrollment needs http_basic_user or tls_client_ca_pem, "
             "or est_allow_anonymous_enroll");
 
+    /* Only EST requests the certificate that PHA defers past the handshake. */
+    if (cfg->protocol != WOLFCERT_PROTO_EST && cfg->tls_post_handshake_auth)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "server",
+            "post-handshake auth is supported only for EST");
+
     struct in_addr bind_addr = { .s_addr = htonl(INADDR_ANY) };
     if (cfg->bind_host != NULL &&
             inet_pton(AF_INET, cfg->bind_host, &bind_addr) != 1)
