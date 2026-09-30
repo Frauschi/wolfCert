@@ -105,11 +105,9 @@ typedef struct {
     void*           heap;        /* optional heap hint; NULL = default */
 } WolfCertKeyCfg;
 
-/* Callback invoked by wolfcert_csr_build() after the standard fields are
- * populated. `cert` is a wolfSSL `Cert*` cast to `void*` so that the
- * caller can reach into fields like custom extension OIDs or SAN types
- * that wolfCert doesn't expose directly. Returns WOLFCERT_OK on success
- * (build continues), any error (build aborts). */
+/* Called by wolfcert_csr_build() once the standard fields are set, with the
+ * wolfSSL Cert* to add what wolfCert does not expose; any error aborts.
+ * A renewal then overwrites Cert's subject and altNames from current_cert. */
 typedef int (*WolfCertCsrCustomizeCb)(void* wolfssl_cert, void* ctx);
 
 typedef struct {

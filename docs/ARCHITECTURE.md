@@ -107,8 +107,11 @@ The layering rules that matter to an integrator:
   can include it without caring whether EST or SCEP is present.
 - **`wolfcert_client_*` is the high-level orchestrator.**
   `wolfcert_client_enroll` / `_reenroll` route to EST or SCEP based on
-  `WolfCertServerCfg.protocol`. Callers that want finer control reach directly
-  into the `wolfcert_est_*` / `wolfcert_scep_*` primitives.
+  `WolfCertServerCfg.protocol`. `_reenroll` copies the Subject and SAN of the
+  certificate being renewed into its CSR byte for byte (RFC 7030 section
+  4.2.2) and refuses a `WolfCertCertMeta` that sets either. Callers that want
+  finer control reach directly into the `wolfcert_est_*` / `wolfcert_scep_*`
+  primitives.
 - **Protocol modules depend on subsystems, never the reverse**, and the test
   server lives below the public API — an embedder can hand it an
   already-accepted socket via `wolfcert_server_serve_fd()` instead of using
@@ -614,7 +617,8 @@ time `#error`s. See [`EMBEDDED.md`](EMBEDDED.md#configuring-wolfcert-without-its
 `WOLFSSL_BASE64_ENCODE`, `WOLFSSL_ALT_NAMES`, `WOLFSSL_CERT_NAME_ALL`. A
 `NO_RSA` build hard-fails unless SCEP is disabled. CMake and autoconf also
 link-probe the `WOLFSSL_ASN_API` helpers wolfCert calls (`wc_SetDNSEntry`,
-`wc_SetAltNamesFromList`, `FreeAltNames`, `SetLength`); a shared libwolfssl
+`wc_SetAltNamesFromList`, `FreeAltNames`, `SetLength`, `GetASNTag`,
+`GetLength`); a shared libwolfssl
 exports them only under one of `WOLFSSL_PUBLIC_ASN` / `OPENSSL_EXTRA` /
 `OPENSSL_EXTRA_X509_SMALL` / `WOLFSSL_TEST_CERT`, a static one always links
 them. `check_config.h` cannot test a link, so a header-only build that misses

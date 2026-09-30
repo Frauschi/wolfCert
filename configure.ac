@@ -233,14 +233,16 @@ AC_LINK_IFELSE(
 [[extern char FreeAltNames(void);
 extern char wc_SetDNSEntry(void);
 extern char wc_SetAltNamesFromList(void);
-extern char SetLength(void);]],
+extern char SetLength(void);
+extern char GetASNTag(void);
+extern char GetLength(void);]],
    [[return FreeAltNames() + wc_SetDNSEntry() + wc_SetAltNamesFromList() +
-       SetLength();]])],
+       SetLength() + GetASNTag() + GetLength();]])],
   [AC_MSG_RESULT([yes])],
   [AC_MSG_RESULT([no])
    AC_MSG_ERROR([wolfSSL does not export its ASN helpers (wc_SetDNSEntry,
-     wc_SetAltNamesFromList, FreeAltNames, SetLength). Rebuild wolfSSL with
-     CPPFLAGS="-DWOLFSSL_PUBLIC_ASN".])])
+     wc_SetAltNamesFromList, FreeAltNames, SetLength, GetASNTag, GetLength).
+     Rebuild wolfSSL with CPPFLAGS="-DWOLFSSL_PUBLIC_ASN".])])
 LIBS="$save_LIBS"
 
 # wolfSSL default-on features that wolfCert requires unconditionally: AES,

@@ -152,7 +152,10 @@ static void print_usage(FILE* out)
         "reenroll options:\n"
         "  --cert FILE                     Current certificate (PEM)\n"
         "  --key  FILE                     Current private key (PEM)\n"
-        "  plus the enroll options above to describe the renewed cert.\n"
+        "  --out-cert FILE                 Write renewed certificate (PEM;\n"
+        "                                  default stdout)\n"
+        "  The renewed cert keeps --cert's subject and SAN (RFC 7030\n"
+        "  section 4.2.2), so --subject and --san-* are rejected.\n"
         "  --cert/--key also authenticate the TLS connection, so\n"
         "  --client-cert/--client-key are rejected.\n"
         "\n"
@@ -1455,7 +1458,8 @@ static int cmd_reenroll(int argc, char** argv)
     uint8_t* cert_pem = NULL;
     uint8_t* key_pem = NULL;
     WolfCertKey* current_key = NULL;
-    WolfCertBuffer csr = { 0 };
+    WolfCertKey* new_key = NULL;
+    WolfCertCertMeta meta = { 0 };
     WolfCertBuffer issued = { 0 };
     WolfCertProtocol p = 0;
     size_t cert_len = 0, key_len = 0;
@@ -1485,8 +1489,16 @@ static int cmd_reenroll(int argc, char** argv)
     }
 
     if (ret == 0 &&
-        (opts.subject == NULL || opts.cert_file == NULL || opts.key_file == NULL)) {
-        fprintf(stderr, "reenroll: --subject, --cert, --key required\n");
+        (opts.subject != NULL || opts.san_dns_len != 0 ||
+         opts.san_ip_len != 0 || opts.san_uri_len != 0 ||
+         opts.san_email_len != 0)) {
+        fprintf(stderr, "reenroll: --subject/--san-* are not used; the renewed "
+                        "cert keeps --cert's subject and SAN\n");
+        ret = 1;
+    }
+
+    if (ret == 0 && (opts.cert_file == NULL || opts.key_file == NULL)) {
+        fprintf(stderr, "reenroll: --cert, --key required\n");
         ret = 1;
     }
 
@@ -1505,20 +1517,6 @@ static int cmd_reenroll(int argc, char** argv)
         ret = 2;
     }
 
-    if (ret == 0) {
-        WolfCertCertMeta meta = { .subject_dn = opts.subject,
-                                  .san_dns = opts.san_dns, .san_dns_len = opts.san_dns_len,
-                                  .san_ip = opts.san_ip, .san_ip_len = opts.san_ip_len,
-                                  .san_uri = opts.san_uri, .san_uri_len = opts.san_uri_len,
-                                  .san_email = opts.san_email, .san_email_len = opts.san_email_len,
-                                  .challenge_password = opts.challenge };
-        rc = wolfcert_csr_build(current_key, &meta, &csr);
-        if (rc != WOLFCERT_OK) {
-            fprintf(stderr, "reenroll csr: %s\n", wolfcert_strerror(rc));
-            ret = 2;
-        }
-    }
-
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url };
 
     if (ret == 0) {
@@ -1529,14 +1527,17 @@ static int cmd_reenroll(int argc, char** argv)
     }
 
     if (ret == 0) {
-#ifdef WOLFCERT_HAVE_EST
-        rc = wolfcert_est_simple_reenroll(&srv, cert_pem, cert_len, current_key,
-                                          csr.data, csr.len, &issued);
-#else
-        rc = WOLFCERT_ERR_UNSUPPORTED;
-#endif
+        meta.challenge_password = opts.challenge;
+        rc = wolfcert_client_reenroll(NULL, &srv, cert_pem, cert_len,
+                                      current_key, NULL, &meta, &new_key,
+                                      &issued);
         if (rc != WOLFCERT_OK) {
             fprintf(stderr, "reenroll: %s\n", wolfcert_strerror(rc));
+            const char* m = wolfcert_last_error_message();
+            if (m && *m) {
+                fprintf(stderr, "reenroll: detail (wolfssl_err=%d): %s\n",
+                    wolfcert_last_wolfssl_err(), m);
+            }
             ret = 2;
         }
     }
@@ -1553,8 +1554,9 @@ static int cmd_reenroll(int argc, char** argv)
         }
     }
 
-    wolfcert_buffer_free(&csr);
     wolfcert_buffer_free(&issued);
+    if (new_key != NULL)
+        wolfcert_key_free(new_key);
     if (current_key != NULL)
         wolfcert_key_free(current_key);
     free(cert_pem);

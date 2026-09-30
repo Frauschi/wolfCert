@@ -359,6 +359,14 @@ int  wolfcert_transport_fd(const WolfCertTransport* t, void* conn);
 int  wolfcert_pem_cert_to_der(const uint8_t* pem, size_t pem_len,
                               WolfCertBuffer* out_der, void* heap);
 
+/* wolfcert_csr_build() for a renewal: with renew_cert (PEM or DER) set, the
+ * CSR carries that certificate's Subject and SAN, and meta may not set them. */
+WOLFCERT_TEST_VIS int wolfcert_csr_build_ex(const WolfCertKey* key,
+                                            const WolfCertCertMeta* meta,
+                                            const uint8_t* renew_cert,
+                                            size_t renew_cert_len,
+                                            WolfCertBuffer* out_der);
+
 /* Heuristically classify a buffer as DER vs PEM. DER (ASN.1) starts with a
  * SEQUENCE tag (0x30) once any leading whitespace is skipped; PEM starts with
  * the "-----BEGIN" armor. Returns 1 if the buffer looks like DER, else 0. */

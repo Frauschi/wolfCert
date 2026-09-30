@@ -229,9 +229,6 @@ int wolfcert_client_reenroll(WolfCertClient* client, const WolfCertServerCfg* sr
                              WolfCertKey** out_key, WolfCertBuffer* out_cert_pem)
 {
     (void)client;
-#ifndef WOLFCERT_HAVE_EST
-    (void)current_cert_len;   /* only the EST reenroll path reads it */
-#endif
     if (srv == NULL || current_cert == NULL || current_key == NULL ||
         meta == NULL || out_key == NULL || out_cert_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -246,7 +243,8 @@ int wolfcert_client_reenroll(WolfCertClient* client, const WolfCertServerCfg* sr
     const WolfCertKey* signing_key = nk ? nk : current_key;
 
     WolfCertBuffer csr = { 0 };
-    rc = wolfcert_csr_build(signing_key, meta, &csr);
+    rc = wolfcert_csr_build_ex(signing_key, meta, current_cert,
+                               current_cert_len, &csr);
     if (rc != WOLFCERT_OK) {
         if (nk)
             wolfcert_key_free(nk);
