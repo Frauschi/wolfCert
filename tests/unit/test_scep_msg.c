@@ -368,7 +368,7 @@ static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
     static const uint8_t ENVELOPED_OID[] =
         { 0x06,0x09,0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x03 };
     static const uint8_t tid[16] =
-        { 0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15 };
+        { '0','1','2','3','4','5','6','7','8','9','A','B','C','D','E','F' };
     uint8_t sn[16];
     uint8_t rn[16];
 
