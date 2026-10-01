@@ -525,3 +525,70 @@ int wolfcert_pem_cert_to_der(const uint8_t* pem, size_t pem_len,
     wc_FreeDer(&der);
     return WOLFCERT_OK;
 }
+
+WOLFCERT_TEST_VIS int wolfcert_find_san(const DecodedCert* dc,
+                                        const byte** san, word32* san_len)
+{
+    static const byte san_oid[] = { ASN_OBJECT_ID, 0x03, 0x55, 0x1D, 0x11 };
+    const byte* ext = dc->extensions;
+    int ext_sz = dc->extensionsSz;
+    word32 idx = 0;
+    word32 end = 0;
+    word32 ext_end = 0;
+    int len = 0;
+    int rc = WOLFCERT_OK;
+    byte tag = 0;
+
+    *san = NULL;
+    *san_len = 0;
+    if (ext == NULL || ext_sz <= 0)
+        return WOLFCERT_OK;
+
+    if ((!dc->isCSR &&
+             (GetASNTag(ext, &idx, &tag, (word32)ext_sz) < 0 ||
+              tag != (ASN_CONTEXT_SPECIFIC | ASN_CONSTRUCTED | 3) ||
+              GetLength(ext, &idx, &len, (word32)ext_sz) < 0)) ||
+            GetASNTag(ext, &idx, &tag, (word32)ext_sz) < 0 ||
+            tag != (ASN_SEQUENCE | ASN_CONSTRUCTED) ||
+            GetLength(ext, &idx, &len, (word32)ext_sz) < 0)
+        rc = WOLFCERT_ERR_PARSE;
+    else
+        end = idx + (word32)len;
+
+    /* Extension ::= SEQUENCE { OID, critical BOOLEAN OPTIONAL, OCTET STRING } */
+    while (rc == WOLFCERT_OK && *san == NULL && idx < end) {
+        if (GetASNTag(ext, &idx, &tag, end) < 0 ||
+                tag != (ASN_SEQUENCE | ASN_CONSTRUCTED) ||
+                GetLength(ext, &idx, &len, end) < 0) {
+            rc = WOLFCERT_ERR_PARSE;
+        }
+        else {
+            ext_end = idx + (word32)len;
+            if (ext_end - idx < sizeof(san_oid) ||
+                    memcmp(ext + idx, san_oid, sizeof(san_oid)) != 0) {
+                idx = ext_end;
+            }
+            else {
+                idx += (word32)sizeof(san_oid);
+                if (idx < ext_end && ext[idx] == ASN_BOOLEAN) {
+                    if (GetASNTag(ext, &idx, &tag, ext_end) < 0 ||
+                            GetLength(ext, &idx, &len, ext_end) < 0)
+                        rc = WOLFCERT_ERR_PARSE;
+                    else
+                        idx += (word32)len;
+                }
+                if (rc == WOLFCERT_OK &&
+                        (GetASNTag(ext, &idx, &tag, ext_end) < 0 ||
+                         tag != ASN_OCTET_STRING ||
+                         GetLength(ext, &idx, &len, ext_end) < 0))
+                    rc = WOLFCERT_ERR_PARSE;
+                if (rc == WOLFCERT_OK) {
+                    *san = ext + idx;
+                    *san_len = (word32)len;
+                }
+            }
+        }
+    }
+
+    return rc;
+}

@@ -359,6 +359,11 @@ int  wolfcert_transport_fd(const WolfCertTransport* t, void* conn);
 int  wolfcert_pem_cert_to_der(const uint8_t* pem, size_t pem_len,
                               WolfCertBuffer* out_der, void* heap);
 
+/* GeneralNames of the subjectAltName in dc, or *san NULL when there is
+ * none. Returns WOLFCERT_OK or WOLFCERT_ERR_PARSE. */
+WOLFCERT_TEST_VIS int wolfcert_find_san(const DecodedCert* dc,
+                                        const byte** san, word32* san_len);
+
 /* wolfcert_csr_build() for a renewal: with renew_cert (PEM or DER) set, the
  * CSR carries that certificate's Subject and SAN, and meta may not set them. */
 WOLFCERT_TEST_VIS int wolfcert_csr_build_ex(const WolfCertKey* key,

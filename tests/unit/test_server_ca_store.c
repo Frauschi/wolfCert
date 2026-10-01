@@ -543,6 +543,88 @@ static int generate_ca_into(WolfCertStoreOps* store, WolfCertKeyType type,
     return 0;
 }
 
+/* Have the CA in store issue a CSR carrying san; *rc_out is the issue result. */
+static int issue_with_san(WolfCertStoreOps* store, const uint8_t* san,
+                          size_t san_len, int* rc_out, uint8_t** issued,
+                          size_t* issued_len)
+{
+    WolfCertCa ca;
+    WC_RNG rng;
+    test_signkey key;
+    Cert req;
+    uint8_t csr[4096];
+    int csr_len;
+
+    REQUIRE(wc_InitRng(&rng) == 0);
+    REQUIRE(test_signkey_make(&key, &rng) == 0);
+    REQUIRE(wc_InitCert(&req) == 0);
+    strncpy(req.subject.commonName, "san-leaf", CTC_NAME_SIZE - 1);
+    memcpy(req.altNames, san, san_len);
+    req.altNamesSz = (int)san_len;
+    req.sigType = TEST_CERT_SIGTYPE;
+    csr_len = test_sign_certreq(&req, csr, (int)sizeof(csr), &key, &rng);
+    test_signkey_free(&key);
+    wc_FreeRng(&rng);
+    REQUIRE(csr_len > 0);
+
+    REQUIRE(wolfcert_ca_load(&ca, store, NULL) == WOLFCERT_OK);
+    *rc_out = wolfcert_ca_issue(&ca, csr, (size_t)csr_len, issued, issued_len);
+    wolfcert_ca_free(&ca);
+    return 0;
+}
+
+/* The CA issues a CSR's SAN unchanged, entries in their order across types,
+ * and refuses the GeneralName forms it does not issue. */
+static int test_issued_san_verbatim(void)
+{
+    static const uint8_t san[] = {
+        0x30, 0x20,
+        0x82, 0x09, 'b', '.', 'e', 'x', 'a', 'm', 'p', 'l', 'e',
+        0x81, 0x0d, 'a', '@', 'e', 'x', 'a', 'm', 'p', 'l', 'e', '.', 'c', 'o',
+        'm',
+        0x87, 0x04, 127, 0, 0, 1
+    };
+    static const uint8_t dir_san[] = {
+        0x30, 0x12,
+        0xa4, 0x10, 0x30, 0x0e, 0x31, 0x0c, 0x30, 0x0a, 0x06, 0x03, 0x55, 0x04,
+        0x03, 0x0c, 0x03, 'd', 'i', 'r'
+    };
+    WolfCertStoreOps* store = wolfcert_store_memory_open(NULL);
+    WolfCertBuffer ca_cert = { 0 };
+    WolfCertBuffer ca_key = { 0 };
+    uint8_t* issued = NULL;
+    size_t issued_len = 0;
+    DecodedCert dc;
+    const byte* got = NULL;
+    word32 got_len = 0;
+    int rc = -1;
+
+    REQUIRE(store != NULL);
+    REQUIRE(generate_ca_into(store, CA_KEY_TYPES[0], &ca_cert, &ca_key) == 0);
+    wolfcert_buffer_free(&ca_cert);
+    wolfcert_buffer_free(&ca_key);
+
+    REQUIRE(issue_with_san(store, dir_san, sizeof(dir_san), &rc, &issued,
+                           &issued_len) == 0);
+    REQUIRE(rc == WOLFCERT_ERR_UNSUPPORTED);
+    REQUIRE(issue_with_san(store, san, sizeof(san), &rc, &issued,
+                           &issued_len) == 0);
+    wolfcert_store_memory_close(store);
+    REQUIRE(rc == WOLFCERT_OK);
+
+    wc_InitDecodedCert(&dc, issued, (word32)issued_len, NULL);
+    rc = wc_ParseCert(&dc, CERT_TYPE, NO_VERIFY, NULL);
+    if (rc == 0)
+        rc = wolfcert_find_san(&dc, &got, &got_len);
+    if (rc == 0 && (got_len != sizeof(san) ||
+                    memcmp(got, san, sizeof(san)) != 0))
+        rc = -1;
+    wc_FreeDecodedCert(&dc);
+    WOLFCERT_XFREE(issued, NULL);
+    REQUIRE(rc == 0);
+    return 0;
+}
+
 static int mismatched_ca_rejected(WolfCertKeyType type)
 {
     WolfCertStoreOps* src_a = wolfcert_store_memory_open(NULL);
@@ -789,6 +871,8 @@ int main(void)
     if (test_mismatched_ca_rejected())
         return 1;
     if (test_corrupt_ca_cert_rejected())
+        return 1;
+    if (test_issued_san_verbatim())
         return 1;
 #ifdef WOLFCERT_HAVE_ECC
     if (test_leaf_ca_rejected())

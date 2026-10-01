@@ -638,52 +638,59 @@ static void free_subject_pubkey(word32 keyOID, void* impl, void* heap)
     }
 }
 
-/* Carry the subjectAltName from the parsed CSR into the issued cert. wolfSSL
- * only transcribes the subject DN, and it also splits parsed alt names by type
- * (rfc822Name lands in altEmailNames, not altNames), so we recombine the
- * carriable lists -- DNS / URI / IP / registeredID in altNames and rfc822Name
- * in altEmailNames -- into one list and flatten it into the GeneralNames
- * SEQUENCE that Cert.altNames expects.
- *
- * directoryName and otherName cannot be faithfully re-encoded from a parsed
- * cert via wc_FlattenAltNames (the parser strips the directoryName SEQUENCE
- * wrapper, and wolfSSL's cert generator has no path to restore it). Rather
- * than silently issue a cert missing a SAN entry the requester asked for, we
- * reject such a CSR. The altDirNames / altOtherNamesRaw lists (and the
- * rfc822Name split) only exist when wolfSSL keeps name-constraint state. */
-static int flatten_csr_san(DecodedCert* dc, Cert* nc, void* heap)
+/* 1 when every GeneralName in san is an rfc822Name, dNSName, URI, iPAddress or
+ * registeredID, the forms the test CA issues. */
+static int san_types_issuable(const byte* san, word32 san_len)
 {
-    DNS_entry* merged = NULL;
-    int rc = 0;
+    word32 idx = 0;
+    word32 end;
+    int len = 0;
+    byte tag = 0;
 
-#ifndef IGNORE_NAME_CONSTRAINTS
-    if (dc->altDirNames != NULL || dc->altOtherNamesRaw != NULL)
+    if (GetASNTag(san, &idx, &tag, san_len) < 0 ||
+            tag != (ASN_SEQUENCE | ASN_CONSTRUCTED) ||
+            GetLength(san, &idx, &len, san_len) < 0)
+        return 0;
+
+    end = idx + (word32)len;
+    while (idx < end) {
+        if (GetASNTag(san, &idx, &tag, end) < 0 ||
+                GetLength(san, &idx, &len, end) < 0)
+            return 0;
+        if (tag != (ASN_CONTEXT_SPECIFIC | ASN_RFC822_TYPE) &&
+                tag != (ASN_CONTEXT_SPECIFIC | ASN_DNS_TYPE) &&
+                tag != (ASN_CONTEXT_SPECIFIC | ASN_URI_TYPE) &&
+                tag != (ASN_CONTEXT_SPECIFIC | ASN_IP_TYPE) &&
+                tag != (ASN_CONTEXT_SPECIFIC | ASN_RID_TYPE))
+            return 0;
+        idx += (word32)len;
+    }
+
+    return 1;
+}
+
+/* Copy the CSR's subjectAltName into the issued cert byte for byte. */
+static int copy_csr_san(const DecodedCert* dc, Cert* nc)
+{
+    const byte* san = NULL;
+    word32 san_len = 0;
+
+    if (wolfcert_find_san(dc, &san, &san_len) != WOLFCERT_OK)
+        return WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "ca",
+                            "CSR extensions do not parse");
+    if (san_len > sizeof(nc->altNames))
         return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "ca",
-            "CSR carries a directoryName/otherName SAN that cannot be issued");
-#endif
+                            "CSR SAN is %u bytes, limit %d", (unsigned)san_len,
+                            (int)sizeof(nc->altNames));
+    if (san != NULL && !san_types_issuable(san, san_len))
+        return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "ca",
+            "CSR carries an otherName, x400Address, directoryName or "
+            "ediPartyName SAN");
 
-    const DNS_entry* srcs[] = {
-        dc->altNames,
-#ifndef IGNORE_NAME_CONSTRAINTS
-        dc->altEmailNames,
-#endif
-    };
-
-    for (size_t i = 0; i < sizeof(srcs) / sizeof(srcs[0]) && rc == 0; ++i) {
-        for (const DNS_entry* e = srcs[i]; e != NULL && rc == 0; e = e->next)
-            rc = wc_SetDNSEntry(heap, e->name, e->len, e->type, &merged);
-    }
-    if (rc != 0) {
-        FreeAltNames(merged, heap);
-        return WOLFCERT_ERR_WC(rc, "ca", "SetDNSEntry(issue SAN)");
-    }
-
-    /* Encode straight into nc->altNames / altNamesSz (0 when no SAN). */
-    rc = wc_SetAltNamesFromList(nc, merged);
-
-    FreeAltNames(merged, heap);
-    if (rc != 0)
-        return WOLFCERT_ERR_WC(rc, "ca", "SetAltNamesFromList(issue)");
+    if (san != NULL)
+        memcpy(nc->altNames, san, san_len);
+    nc->altNamesSz = (int)san_len;
+    nc->altNamesCrit = dc->extSubjAltNameCrit;
     return WOLFCERT_OK;
 }
 
@@ -791,9 +798,7 @@ int wolfcert_ca_issue(WolfCertCa* ca,
         nc->daysValid = 365;
         nc->isCA      = 0;
 
-        /* Carry the requested subjectAltName from the CSR into the issued
-         * cert. */
-        rc = flatten_csr_san(&dc, nc, heap);
+        rc = copy_csr_san(&dc, nc);
     }
 
     if (rc == 0) {
