@@ -6,12 +6,21 @@ project(wolfcert_est_client)
 
 target_sources(app PRIVATE src/main.c)
 
-generate_inc_file_for_target(app
-  ${ZEPHYR_WOLFCERT_MODULE_DIR}/examples/certs/ecc/ca-cert.pem
-  ${ZEPHYR_BINARY_DIR}/include/generated/est_ca_cert.inc)
+if(CONFIG_WOLFCERT_SAMPLE_CA_CERT STREQUAL "")
+  set(wolfcert_ca_cert "${ZEPHYR_WOLFCERT_MODULE_DIR}/examples/certs/ecc/ca-cert.pem")
+else()
+  get_filename_component(wolfcert_ca_cert "${CONFIG_WOLFCERT_SAMPLE_CA_CERT}"
+    ABSOLUTE BASE_DIR "${CMAKE_CURRENT_SOURCE_DIR}")
+endif()
+if(NOT EXISTS "${wolfcert_ca_cert}" OR IS_DIRECTORY "${wolfcert_ca_cert}")
+  message(FATAL_ERROR
+    "trust anchor ${wolfcert_ca_cert} is not a file")
+endif()
 
-# qemu_x86 has no RTC; the sample sets the clock to when CMake last configured.
-# Run `west build -p` to refresh it.
+generate_inc_file_for_target(app "${wolfcert_ca_cert}"
+  "${ZEPHYR_BINARY_DIR}/include/generated/est_ca_cert.inc")
+
+# The sample sets the clock to when CMake last configured.
 string(TIMESTAMP wolfcert_build_epoch "%s" UTC)
 target_compile_definitions(app PRIVATE
   WOLFCERT_SAMPLE_EPOCH=${wolfcert_build_epoch})

@@ -1,0 +1,8 @@
+/* SPDX-License-Identifier: GPL-3.0-or-later */
+
+/* Take the MAC from the chip's unique ID, so the board keeps one DHCP lease
+ * across resets. */
+&enet_mac {
+	/delete-property/ zephyr,random-mac-address;
+	nxp,unique-mac;
+};

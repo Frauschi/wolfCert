@@ -19,13 +19,13 @@
 
 #include <wolfcert/wolfcert.h>
 
+#include <string.h>
 #include <time.h>
 
 #include <zephyr/kernel.h>
 
-#define EST_URL  "https://10.0.2.2:8443/.well-known/est"
-#define EST_USER "alice"
-#define EST_PASS "hunter2"
+/* An empty Kconfig string becomes NULL. */
+#define OPT_OR_NULL(s) (sizeof(s) > 1 ? (s) : NULL)
 
 /* The trust anchor is built in: an EST client must authenticate the server
  * (RFC 7030 section 3.3), so it needs one before it can talk to anybody. */
@@ -41,19 +41,40 @@ static void log_sink(WolfCertLogLevel level, const char* module,
     printk("wolfcert[%s]: %s\n", module, msg);
 }
 
+/* WolfCertBuffer is length-delimited; print it in NUL-terminated chunks. */
+static void print_pem(const WolfCertBuffer* pem)
+{
+    char chunk[65];
+    size_t off = 0;
+    size_t n;
+
+    while (off < pem->len) {
+        n = pem->len - off;
+        if (n > sizeof(chunk) - 1)
+            n = sizeof(chunk) - 1;
+        memcpy(chunk, pem->data + off, n);
+        chunk[n] = '\0';
+        printk("%s", chunk);
+        off += n;
+    }
+    printk("\n");
+}
+
 static int enroll(void)
 {
     WolfCertServerCfg srv = {
         .protocol          = WOLFCERT_PROTO_EST,
-        .server_url        = EST_URL,
-        .proto_opts.est    = { .username = EST_USER, .password = EST_PASS },
+        .server_url        = CONFIG_WOLFCERT_SAMPLE_EST_URL,
+        .proto_opts.est    = {
+            .username = OPT_OR_NULL(CONFIG_WOLFCERT_SAMPLE_EST_USER),
+            .password = OPT_OR_NULL(CONFIG_WOLFCERT_SAMPLE_EST_PASS) },
         .trust_anchors     = ca_cert_pem,
         .trust_anchors_len = sizeof(ca_cert_pem),
         .verify_server     = 1,
     };
     WolfCertKeyCfg key_cfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
                                .dev_id = WOLFCERT_DEVID_SOFTWARE };
-    WolfCertCertMeta meta = { .subject_dn = "CN=zephyr-device" };
+    WolfCertCertMeta meta = { .subject_dn = CONFIG_WOLFCERT_SAMPLE_SUBJECT };
     WolfCertClient* client = NULL;
     WolfCertKey* key = NULL;
     WolfCertBuffer cert = { 0 };
@@ -63,11 +84,14 @@ static int enroll(void)
     if (rc == WOLFCERT_OK)
         rc = wolfcert_client_enroll(client, &srv, &key_cfg, &meta, &key, &cert);
 
-    if (rc == WOLFCERT_OK)
+    if (rc == WOLFCERT_OK) {
         printk("enrolled: %u bytes\n", (unsigned)cert.len);
-    else
+        print_pem(&cert);
+    }
+    else {
         printk("enroll failed: %s (%s)\n", wolfcert_strerror(rc),
                wolfcert_last_error_message());
+    }
 
     wolfcert_buffer_free(&cert);
     wolfcert_key_free(key);
@@ -80,7 +104,7 @@ int main(void)
     struct timespec ts = { 0 };
     int rc;
 
-    /* No RTC here; a real device uses its own or SNTP. */
+    /* Set the clock from the build time. */
     ts.tv_sec = (time_t)WOLFCERT_SAMPLE_EPOCH;
     if (clock_settime(CLOCK_REALTIME, &ts) != 0) {
         printk("clock_settime failed\n");
