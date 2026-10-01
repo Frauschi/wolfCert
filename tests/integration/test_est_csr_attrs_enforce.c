@@ -270,6 +270,38 @@ static int reject_body_names_missing_oid(uint16_t port)
     return 0;
 }
 
+/* RFC 7030 section 4.2.3: an error response without a media type must carry a
+ * plaintext explanation, so neither a 404 nor an empty-body 400 may be empty. */
+static int reject_bodies_are_plaintext(uint16_t port)
+{
+    static const char* const reqs[] = {
+        "GET /.well-known/est/nosuchop HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        "POST /.well-known/est/simpleenroll HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: application/pkcs10\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    };
+    char resp[1024];
+    size_t i;
+
+    for (i = 0; i < sizeof(reqs) / sizeof(reqs[0]); ++i) {
+        const char* body;
+        int n = send_and_read_all(port, reqs[i], strlen(reqs[i]),
+                                  resp, sizeof(resp));
+        REQUIRE(n > 0);
+        REQUIRE(strstr(resp, i == 0 ? " 404 " : " 400 ") != NULL);
+        REQUIRE(strstr(resp, "Content-Type: text/plain\r\n") != NULL);
+        body = strstr(resp, "\r\n\r\n");
+        REQUIRE(body != NULL && body[4] != '\0');
+    }
+    return 0;
+}
+
 /* Client C - server advertises ONLY an Attribute-with-values item
  * (no bare OIDs). The CSR doesn't carry anything matching it.
  * Enforcement is presence-only on bare OIDs, so this must still
@@ -394,6 +426,8 @@ int main(void)
     REQUIRE(pthread_create(&tid_raw, NULL, server_thread, srv_raw) == 0);
 
     rc = reject_body_names_missing_oid(wolfcert_server_port(srv_raw));
+    if (rc == 0)
+        rc = reject_bodies_are_plaintext(wolfcert_server_port(srv_raw));
 
     wolfcert_server_stop(srv_raw);
     pthread_join(tid_raw, NULL);

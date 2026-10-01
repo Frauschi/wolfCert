@@ -113,6 +113,36 @@ static int send_and_read_status(uint16_t port,
     return (int)n;
 }
 
+/* A 404 for HEAD must end at the headers, or its body would be read as the
+ * next response on a kept-alive connection. */
+static int head_404_has_no_body(uint16_t port)
+{
+    static const char req[] =
+        "HEAD /.well-known/est/nope HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    TestTlsConn c;
+    char resp[512];
+    const char* eoh;
+    size_t n = 0;
+    int r;
+
+    REQUIRE(test_tls_connect(&c, port, g_tls_cert, g_tls_cert_len) == 0);
+    REQUIRE(test_tls_write(&c, req, sizeof(req) - 1) == 0);
+    while (n + 1 < sizeof(resp) &&
+           (r = test_tls_read(&c, resp + n, sizeof(resp) - 1 - n)) > 0)
+        n += (size_t)r;
+    test_tls_close(&c);
+    resp[n] = '\0';
+
+    REQUIRE(strstr(resp, " 404 ") != NULL);
+    eoh = strstr(resp, "\r\n\r\n");
+    REQUIRE(eoh != NULL);
+    REQUIRE(eoh[4] == '\0');
+    return 0;
+}
+
 /* Shape #1: a chunk-size line longer than 8 hex digits. The parser
  * must reject this rather than letting the shift-accumulate silently
  * wrap. */
@@ -459,7 +489,9 @@ int main(void)
 
     uint16_t port = wolfcert_server_port(srv);
 
-    int rc = reject_oversized_chunk_size(port);
+    int rc = head_404_has_no_body(port);
+    if (rc == 0)
+        rc = reject_oversized_chunk_size(port);
     if (rc == 0)
         rc = reject_corrupt_chunk_trailer(port);
     if (rc == 0)
