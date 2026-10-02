@@ -76,10 +76,8 @@ typedef struct {
     /* May be NULL when body_len is 0; check body_len, not body. */
     uint8_t*  body;
     size_t    body_len;
-    /* `Retry-After` header parsed as delta-seconds (RFC 7231 section 7.1.3).
-     * Populated for any response that carries the header; 0 means the
-     * header was absent or wasn't in the delta-seconds form. The HTTP
-     * date form is not supported. */
+    /* `Retry-After` in seconds, capped at 86400 (RFC 9110 10.2.3); 0 if absent,
+     * malformed, past, or a date under NO_ASN_TIME or an unset clock. */
     int       retry_after_sec;
     void*     heap;
 } WolfCertHttpResponse;

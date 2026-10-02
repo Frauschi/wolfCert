@@ -30,6 +30,7 @@
 #include <wolfssl/wolfcrypt/random.h>
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #define REQUIRE(cond) \
@@ -632,6 +633,224 @@ static int csr_carries_large_san(void)
     wolfcert_key_free(key);
     return 0;
 }
+
+/* Write a DER tag and length; returns the header size. */
+static word32 der_hdr(byte* out, byte tag, word32 len)
+{
+    word32 n = 0;
+
+    out[n++] = tag;
+    if (len >= 0x100) {
+        out[n++] = 0x82;
+        out[n++] = (byte)(len >> 8);
+    }
+    else if (len >= 0x80) {
+        out[n++] = 0x81;
+    }
+    out[n++] = (byte)len;
+    return n;
+}
+
+/* Wrap the len bytes at buf in a tag and length; returns the new length. */
+static word32 der_wrap(byte* buf, word32 len, byte tag)
+{
+    byte hdr[4];
+    word32 n = der_hdr(hdr, tag, len);
+
+    memmove(buf + n, buf, len);
+    memcpy(buf, hdr, n);
+    return n + len;
+}
+
+#define OU_VALUE_MAX 250
+
+/* Encoded size of one OU RDN holding v value bytes. */
+static word32 ou_rdn_len(word32 v)
+{
+    byte hdr[4];
+    word32 atv = 5 + der_hdr(hdr, ASN_UTF8STRING, v) + v;
+    word32 seq = der_hdr(hdr, ASN_SEQUENCE | ASN_CONSTRUCTED, atv) + atv;
+
+    return der_hdr(hdr, ASN_SET | ASN_CONSTRUCTED, seq) + seq;
+}
+
+/* The value size of the one OU RDN that encodes to exactly len bytes, or 0. */
+static word32 ou_value_for(word32 len)
+{
+    word32 v;
+
+    for (v = 1; v <= OU_VALUE_MAX; v++) {
+        if (ou_rdn_len(v) == len)
+            return v;
+    }
+    return 0;
+}
+
+/* OU RDNs whose encoding is exactly len (>= 12) bytes, in few enough RDNs for
+ * the 16 an OPENSSL_EXTRA wolfSSL parses. */
+static word32 put_ou_rdns(byte* out, word32 len)
+{
+    static const byte ou_oid[] = { 0x06, 0x03, 0x55, 0x04, 0x0b };
+    word32 p = 0;
+    word32 start;
+    word32 rest;
+    word32 v;
+    word32 w;
+
+    while (p < len) {
+        v = ou_value_for(len - p);
+        for (w = OU_VALUE_MAX; v == 0 && w > 0; w--) {
+            if (ou_rdn_len(w) + 12 <= len - p) {
+                rest = len - p - ou_rdn_len(w);
+                if (rest > ou_rdn_len(OU_VALUE_MAX) || ou_value_for(rest) != 0)
+                    v = w;
+            }
+        }
+        start = p;
+        memcpy(out + p, ou_oid, sizeof(ou_oid));
+        p += (word32)sizeof(ou_oid);
+        p += der_hdr(out + p, ASN_UTF8STRING, v);
+        memset(out + p, 'a', v);
+        p += v;
+        p = start + der_wrap(out + start, p - start,
+                             ASN_SEQUENCE | ASN_CONSTRUCTED);
+        p = start + der_wrap(out + start, p - start, ASN_SET | ASN_CONSTRUCTED);
+    }
+    return p;
+}
+
+/* A GeneralNames of dNSNames that is exactly len (>= 260) bytes; returns the
+ * number of names. */
+static int put_dns_names(byte* out, word32 len)
+{
+    word32 p = der_hdr(out, ASN_SEQUENCE | ASN_CONSTRUCTED, len - 4);
+    word32 v;
+    int n = 0;
+
+    while (p < len) {
+        v = (len - p >= 105) ? 100 : len - p - 2;
+        out[p++] = ASN_CONTEXT_SPECIFIC | ASN_DNS_TYPE;
+        out[p++] = (byte)v;
+        memset(out + p, 'a', v);
+        p += v;
+        n++;
+    }
+    return n;
+}
+
+/* An unsigned cert whose Subject contents are subj_len bytes and whose SAN,
+ * if san_len is not 0, is san_len bytes; *names gets the SAN's name count. */
+static int make_sized_cert(const WolfCertKey* key, word32 subj_len,
+                           word32 san_len, byte* out, int* names)
+{
+    static const byte tbs_head[] = {
+        0xa0, 0x03, 0x02, 0x01, 0x02, 0x02, 0x01, 0x01,
+        0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
+        0x30, 0x0c, 0x31, 0x0a, 0x30, 0x08, 0x06, 0x03, 0x55, 0x04, 0x03,
+        0x0c, 0x01, 'i',
+        0x30, 0x1e,
+        0x17, 0x0d, '2', '6', '0', '1', '0', '1', '0', '0', '0', '0', '0', '0',
+        'Z',
+        0x17, 0x0d, '3', '6', '0', '1', '0', '1', '0', '0', '0', '0', '0', '0',
+        'Z'
+    };
+    static const byte sig_tail[] = {
+        0x30, 0x0a, 0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x04, 0x03, 0x02,
+        0x03, 0x09, 0x00, 0x30, 0x06, 0x02, 0x01, 0x01, 0x02, 0x01, 0x01
+    };
+    static const byte san_oid[] = { 0x06, 0x03, 0x55, 0x1d, 0x11 };
+    word32 p = (word32)sizeof(tbs_head);
+    word32 start;
+    word32 ext;
+    int spki;
+
+    memcpy(out, tbs_head, sizeof(tbs_head));
+    start = p;
+    p += put_ou_rdns(out + p, subj_len);
+    p = start + der_wrap(out + start, p - start,
+                         ASN_SEQUENCE | ASN_CONSTRUCTED);
+    spki = wc_EccPublicKeyToDer((ecc_key*)key->impl, out + p, 512, 1);
+    if (spki <= 0)
+        return -1;
+    p += (word32)spki;
+
+    if (san_len != 0) {
+        ext = p;
+        memcpy(out + p, san_oid, sizeof(san_oid));
+        p += (word32)sizeof(san_oid);
+        *names = put_dns_names(out + p, san_len);
+        p += der_wrap(out + p, san_len, ASN_OCTET_STRING);
+        p = ext + der_wrap(out + ext, p - ext, ASN_SEQUENCE | ASN_CONSTRUCTED);
+        p = ext + der_wrap(out + ext, p - ext, ASN_SEQUENCE | ASN_CONSTRUCTED);
+        p = ext + der_wrap(out + ext, p - ext,
+                           ASN_CONTEXT_SPECIFIC | ASN_CONSTRUCTED | 3);
+    }
+
+    p = der_wrap(out, p, ASN_SEQUENCE | ASN_CONSTRUCTED);
+    memcpy(out + p, sig_tail, sizeof(sig_tail));
+    p += (word32)sizeof(sig_tail);
+    return (int)der_wrap(out, p, ASN_SEQUENCE | ASN_CONSTRUCTED);
+}
+
+/* The largest Subject and SAN a renewal carries, and one byte past each. */
+static int renewal_size_limits(void)
+{
+    const word32 name_max = (word32)sizeof(((Cert*)NULL)->sbjRaw) - 1;
+    const word32 san_max = (word32)sizeof(((Cert*)NULL)->altNames);
+    WolfCertKeyCfg cfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+                           .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* key = NULL;
+    WolfCertCertMeta meta = { 0 };
+    WolfCertBuffer csr = { 0 };
+    DecodedCert cc;
+    DecodedCert dc;
+    byte* cert;
+    int cert_len;
+    int names = 0;
+    int same;
+
+    REQUIRE(wolfcert_key_generate(&cfg, &key) == WOLFCERT_OK);
+    REQUIRE((cert = (byte*)malloc(name_max + san_max + 1024)) != NULL);
+
+    cert_len = make_sized_cert(key, name_max, 0, cert, &names);
+    REQUIRE(cert_len > 0);
+    REQUIRE(wolfcert_csr_build_ex(key, &meta, cert, (size_t)cert_len, &csr)
+            == WOLFCERT_OK);
+    wc_InitDecodedCert(&cc, cert, (word32)cert_len, NULL);
+    wc_InitDecodedCert(&dc, csr.data, (word32)csr.len, NULL);
+    same = wc_ParseCert(&cc, CERT_TYPE, NO_VERIFY, NULL) == 0 &&
+           wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL) == 0 &&
+           cc.subjectRawLen == (int)name_max &&
+           dc.subjectRawLen == (int)name_max &&
+           memcmp(cc.subjectRaw, dc.subjectRaw, name_max) == 0;
+    wc_FreeDecodedCert(&dc);
+    wc_FreeDecodedCert(&cc);
+    REQUIRE(same);
+    wolfcert_buffer_free(&csr);
+
+    cert_len = make_sized_cert(key, name_max + 1, 0, cert, &names);
+    REQUIRE(cert_len > 0);
+    REQUIRE(wolfcert_csr_build_ex(key, &meta, cert, (size_t)cert_len, &csr)
+            == WOLFCERT_ERR_UNSUPPORTED);
+    REQUIRE(csr.data == NULL);
+
+    cert_len = make_sized_cert(key, 12, san_max, cert, &names);
+    REQUIRE(cert_len > 0);
+    REQUIRE(wolfcert_csr_build_ex(key, &meta, cert, (size_t)cert_len, &csr)
+            == WOLFCERT_OK);
+    REQUIRE(count_csr_sans(&csr) == names);
+    wolfcert_buffer_free(&csr);
+
+    cert_len = make_sized_cert(key, 12, san_max + 1, cert, &names);
+    REQUIRE(cert_len > 0);
+    REQUIRE(wolfcert_csr_build_ex(key, &meta, cert, (size_t)cert_len, &csr)
+            == WOLFCERT_ERR_UNSUPPORTED);
+    REQUIRE(csr.data == NULL);
+
+    free(cert);
+    wolfcert_key_free(key);
+    return 0;
+}
 #endif
 
 int main(void)
@@ -661,6 +880,8 @@ int main(void)
     if (renewal_rejects_non_certificate())
         return 1;
     if (csr_carries_large_san())
+        return 1;
+    if (renewal_size_limits())
         return 1;
     if (build_and_reparse(WOLFCERT_KEY_ECC, 256))
         return 1;

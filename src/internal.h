@@ -359,6 +359,14 @@ int  wolfcert_transport_fd(const WolfCertTransport* t, void* conn);
 int  wolfcert_pem_cert_to_der(const uint8_t* pem, size_t pem_len,
                               WolfCertBuffer* out_der, void* heap);
 
+/* 1 when meta sets a Subject or SAN. */
+int wolfcert_csr_meta_sets_identity(const WolfCertCertMeta* meta);
+
+/* GeneralNames of the subjectAltName in dc, or *san NULL when there is
+ * none. Returns WOLFCERT_OK or WOLFCERT_ERR_PARSE. */
+WOLFCERT_TEST_VIS int wolfcert_find_san(const DecodedCert* dc,
+                                        const byte** san, word32* san_len);
+
 /* wolfcert_csr_build() for a renewal: with renew_cert (PEM or DER) set, the
  * CSR carries that certificate's Subject and SAN, and meta may not set them. */
 WOLFCERT_TEST_VIS int wolfcert_csr_build_ex(const WolfCertKey* key,
@@ -443,7 +451,8 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_serial(
 /* Does any certificate in `pem` carry `issuer` and `serial`? A CertRep is only
  * checked for signer and nonce, so without this a CA could answer a GetCert with
  * some other certificate and the caller would write it out as the one it named.
- * An entry that will not parse is skipped, not treated as the end of the list. */
+ * An entry that will not parse is skipped, not treated as the end of the list.
+ * Returns 1 if found, 0 if not, or WOLFCERT_ERR_MEMORY. */
 WOLFCERT_TEST_VIS int wolfcert_scep_pem_has_cert(const uint8_t* pem, size_t pem_len,
                                      const uint8_t* issuer, size_t issuer_len,
                                      const uint8_t* serial, size_t serial_len,
@@ -510,7 +519,7 @@ int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
 /* RFC 8894: a CertRep must be signed by the CA or its RA. Confirm the response
  * signer certificate shares a public key with some certificate in the trusted
  * GetCACert bundle (one or more concatenated DER certs). Returns WOLFCERT_OK on
- * match, WOLFCERT_ERR_AUTH otherwise. */
+ * match, WOLFCERT_ERR_MEMORY on OOM, WOLFCERT_ERR_AUTH otherwise. */
 WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(
     const uint8_t* signer_cert, size_t signer_cert_len,
     const uint8_t* ca_bundle, size_t ca_bundle_len, void* heap);

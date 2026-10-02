@@ -130,6 +130,7 @@ test_csr_LDADD      = libwolfcert.la $(WOLFSSL_LIBS)
 test_store_SOURCES  = tests/unit/test_store.c
 test_store_LDADD    = libwolfcert.la $(WOLFSSL_LIBS)
 test_transport_SOURCES = tests/unit/test_transport.c
+test_transport_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_transport_LDADD   = libwolfcert.la $(WOLFSSL_LIBS)
 
 test_net_SOURCES    = tests/unit/test_net.c

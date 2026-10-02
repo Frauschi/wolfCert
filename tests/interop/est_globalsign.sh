@@ -129,7 +129,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -batch >/dev/null 2>&1
 
 "$WC_SERVER" --proto est --listen "127.0.0.1:$WC_PORT" \
-             --tls-cert srv/wc.crt --tls-key srv/wc.key \
+             --tls-cert srv/wc.crt --tls-key srv/wc.key --est-allow-anonymous \
              >wc-server.log 2>&1 &
 WC_PID=$!
 trap 'kill_if "$WC_PID"' EXIT

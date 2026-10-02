@@ -49,6 +49,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <unistd.h>
 
 #define REQUIRE(cond) \
     do {                                                                    \
@@ -61,6 +63,7 @@
 
 static void* server_thread(void* arg) { wolfcert_server_run((WolfCertServer*)arg); return NULL; }
 
+#ifdef KEEP_PEER_CERT
 static int impostor_customize(void* wolfssl_cert, void* ctx)
 {
     Cert* c = (Cert*)wolfssl_cert;
@@ -124,12 +127,14 @@ static int same_public_key(const uint8_t* a, size_t a_len, const uint8_t* b,
     wc_FreeDecodedCert(&dc[1]);
     return ret;
 }
+#endif
 
 /* Reenroll with a mismatched meta, with a renaming customize callback, then
- * with a fresh key. */
-static int test_client_reenroll_keeps_identity(const char* url,
-                                               const uint8_t* tls_cert,
-                                               size_t tls_cert_len)
+ * with a fresh key, against a server that trusts the cert being renewed. */
+static int test_client_reenroll_keeps_identity(const uint8_t* tls_cert,
+                                               size_t tls_cert_len,
+                                               const uint8_t* tls_key,
+                                               size_t tls_key_len)
 {
     static const char* const impostor_dns[] = { "impostor.example" };
     uint8_t* cur_cert = NULL;
@@ -140,6 +145,17 @@ static int test_client_reenroll_keeps_identity(const char* url,
     WolfCertKey* out_key = NULL;
     WolfCertBuffer issued = { 0 };
     WolfCertCertMeta meta;
+    WolfCertServerCfgSrv scfg = {
+        .protocol         = WOLFCERT_PROTO_EST,
+        .bind_host        = "127.0.0.1",
+        .bind_port        = 0,
+        .tls_cert_pem     = tls_cert, .tls_cert_pem_len = tls_cert_len,
+        .tls_key_pem      = tls_key,  .tls_key_pem_len  = tls_key_len,
+    };
+    WolfCertKeyCfg no_kcfg = { .type = (WolfCertKeyType)0x7f };
+    WolfCertServer* srv = NULL;
+    pthread_t tid;
+    char url[128];
     WolfCertServerCfg cli = {
         .protocol          = WOLFCERT_PROTO_EST,
         .server_url        = url,
@@ -147,15 +163,24 @@ static int test_client_reenroll_keeps_identity(const char* url,
         .trust_anchors_len = tls_cert_len,
         .verify_server     = 1,
     };
+#ifdef KEEP_PEER_CERT
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE,
                             .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     int called = 0;
+#endif
 
     REQUIRE(mint_self_id("reenroll-device", 0, &cur_cert, &cur_cert_len,
                          &cur_key_pem, &cur_key_len) == 0);
     REQUIRE(wolfcert_key_from_pem(cur_key_pem, cur_key_len, NULL, &cur_key)
             == WOLFCERT_OK);
+
+    scfg.tls_client_ca_pem     = cur_cert;
+    scfg.tls_client_ca_pem_len = cur_cert_len;
+    REQUIRE(wolfcert_server_start(&scfg, &srv) == WOLFCERT_OK);
+    REQUIRE(pthread_create(&tid, NULL, server_thread, srv) == 0);
+    snprintf(url, sizeof(url), "https://127.0.0.1:%u/.well-known/est",
+             wolfcert_server_port(srv));
 
     memset(&meta, 0, sizeof(meta));
     meta.subject_dn = "CN=impostor";
@@ -170,6 +195,14 @@ static int test_client_reenroll_keeps_identity(const char* url,
                                      cur_key, NULL, &meta, &out_key, &issued)
             == WOLFCERT_ERR_BAD_ARG);
 
+    /* Refused before key generation, which would fail UNSUPPORTED here. */
+    memset(&meta, 0, sizeof(meta));
+    meta.subject_dn = "CN=impostor";
+    REQUIRE(wolfcert_client_reenroll(NULL, &cli, cur_cert, cur_cert_len,
+                                     cur_key, &no_kcfg, &meta, &out_key,
+                                     &issued) == WOLFCERT_ERR_BAD_ARG);
+
+#ifdef KEEP_PEER_CERT
     /* The caller's callback still runs but cannot rename the cert. */
     memset(&meta, 0, sizeof(meta));
     meta.customize     = impostor_customize;
@@ -190,12 +223,53 @@ static int test_client_reenroll_keeps_identity(const char* url,
     REQUIRE(check_renewed_identity(&issued) == 0);
     REQUIRE(same_public_key(issued.data, issued.len, cur_cert,
                             cur_cert_len) == 0);
+#endif
 
+    wolfcert_server_stop(srv);
+    pthread_join(tid, NULL);
+    wolfcert_server_free(srv);
     wolfcert_key_free(out_key);
     wolfcert_buffer_free(&issued);
     wolfcert_key_free(cur_key);
     free(cur_cert);
     free(cur_key_pem);
+    return 0;
+}
+
+/* POST a junk CSR over serve_fd(), which carries no TLS, and expect `want`:
+ * " 403 " where the guard refuses it, " 400 " where the CA does. */
+static int serve_fd_enroll(const WolfCertServerCfgSrv* cfg, const char* auth,
+                           const char* want)
+{
+    WolfCertServer* srv = NULL;
+    char            req[512];
+    char            resp[512];
+    ssize_t         n;
+    int             len;
+    int             sv[2];
+    int             rc;
+
+    len = snprintf(req, sizeof(req),
+        "POST /.well-known/est/simpleenroll HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\nContent-Type: application/pkcs10\r\n%s"
+        "Content-Length: 4\r\nConnection: close\r\n\r\nAAAA", auth);
+    REQUIRE(len > 0 && (size_t)len < sizeof(req));
+    REQUIRE(wolfcert_server_start(cfg, &srv) == WOLFCERT_OK);
+    REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
+    REQUIRE(write(sv[1], req, (size_t)len) == (ssize_t)len);
+
+    rc = wolfcert_server_serve_fd(srv, sv[0]);
+    n = read(sv[1], resp, sizeof(resp) - 1);
+    close(sv[0]);
+    close(sv[1]);
+    wolfcert_server_free(srv);
+
+    REQUIRE(n > 0);
+    resp[n] = '\0';
+    if (strstr(resp, want) == NULL)
+        fprintf(stderr, "serve_fd enroll: wanted%s, got %.40s\n", want, resp);
+    REQUIRE(strstr(resp, want) != NULL);
+    REQUIRE(strcmp(want, " 403 ") != 0 || rc == WOLFCERT_ERR_AUTH);
     return 0;
 }
 
@@ -231,12 +305,51 @@ int main(void)
             == WOLFCERT_ERR_NOT_FOUND);
     wolfcert_store_memory_close(plain_store);
 
+    /* Nor may it start with no way to authenticate an enrolling client. */
+    WolfCertServerCfgSrv open_cfg = {
+        .protocol         = WOLFCERT_PROTO_EST,
+        .bind_host        = "127.0.0.1",
+        .bind_port        = 0,
+        .tls_cert_pem     = tls_cert, .tls_cert_pem_len = tls_cert_len,
+        .tls_key_pem      = tls_key,  .tls_key_pem_len  = tls_key_len,
+    };
+    WolfCertServer* open_srv = NULL;
+    REQUIRE(wolfcert_server_start(&open_cfg, &open_srv) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(open_srv == NULL);
+
+    /* Empty Basic credentials would admit the public header "Basic Og==". */
+    open_cfg.http_basic_user = "";
+    open_cfg.http_basic_pass = "";
+    REQUIRE(wolfcert_server_start(&open_cfg, &open_srv) == WOLFCERT_ERR_BAD_ARG);
+    open_cfg.http_basic_user = "alice";
+    open_cfg.http_basic_pass = NULL;
+    REQUIRE(wolfcert_server_start(&open_cfg, &open_srv) == WOLFCERT_ERR_BAD_ARG);
+    open_cfg.http_basic_pass = "";
+    REQUIRE(wolfcert_server_start(&open_cfg, &open_srv) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(open_srv == NULL);
+
+    /* serve_fd() has no TLS: a client CA alone admits nobody, Basic or the
+     * anonymous opt-in let the request through to the CA. */
+    open_cfg.http_basic_pass = "secret";
+    REQUIRE(serve_fd_enroll(&open_cfg,
+                            "Authorization: Basic YWxpY2U6c2VjcmV0\r\n",
+                            " 400 ") == 0);
+    open_cfg.http_basic_user = NULL;
+    open_cfg.http_basic_pass = NULL;
+    open_cfg.est_allow_anonymous_enroll = 1;
+    REQUIRE(serve_fd_enroll(&open_cfg, "", " 400 ") == 0);
+    open_cfg.est_allow_anonymous_enroll = 0;
+    open_cfg.tls_client_ca_pem     = tls_cert;
+    open_cfg.tls_client_ca_pem_len = tls_cert_len;
+    REQUIRE(serve_fd_enroll(&open_cfg, "", " 403 ") == 0);
+
     WolfCertServerCfgSrv cfg = {
         .protocol         = WOLFCERT_PROTO_EST,
         .bind_host        = "127.0.0.1",
         .bind_port        = 0,
         .tls_cert_pem     = tls_cert, .tls_cert_pem_len = tls_cert_len,
         .tls_key_pem      = tls_key,  .tls_key_pem_len  = tls_key_len,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer* srv = NULL;
     REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
@@ -296,8 +409,8 @@ int main(void)
     wolfcert_buffer_free(&ca_pem_der);
     wc_FreeDer(&ta_der);
 
-    REQUIRE(test_client_reenroll_keeps_identity(url, tls_cert, tls_cert_len)
-            == 0);
+    REQUIRE(test_client_reenroll_keeps_identity(tls_cert, tls_cert_len,
+                                                tls_key, tls_key_len) == 0);
 
     wolfcert_server_stop(srv);
     pthread_join(tid, NULL);

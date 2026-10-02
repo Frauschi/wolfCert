@@ -26,6 +26,7 @@ endif()
 
 find_package(Threads REQUIRED)
 add_executable(test_transport unit/test_transport.c)
+target_include_directories(test_transport PRIVATE ${CMAKE_SOURCE_DIR}/src)
 target_link_libraries(test_transport PRIVATE wolfcert)
 add_test(NAME transport COMMAND test_transport)
 # A lost never-0 guard spins the read-until-close loop, so bound the run.

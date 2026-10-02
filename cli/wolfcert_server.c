@@ -62,17 +62,21 @@ static void print_usage(FILE* out)
         "                       [--basic USER:PASS] [--challenge PASS]\n"
         "                       [--tls-cert PEM --tls-key PEM [--tls-client-ca PEM]]\n"
         "                       [--scep-require-approval] [--scep-enable-next-ca]\n"
-        "                       [--scep-enable-get-cert]\n"
+        "                       [--scep-enable-get-cert] [--est-allow-anonymous]\n"
         "\n"
         "Options:\n"
         "  --proto est|scep         Protocol to serve (required)\n"
         "  --listen HOST:PORT       Bind address (default 0.0.0.0:8080)\n"
-        "  --basic USER:PASS        Require HTTP Basic auth (EST enroll)\n"
+        "  --basic USER:PASS        Require HTTP Basic auth (EST enroll); both non-empty\n"
         "  --challenge PASS         Require this SCEP challengePassword in the CSR\n"
         "  --tls-cert PEMFILE       Terminate TLS with this server certificate (PEM);\n"
         "                           required for --proto est (RFC 7030)\n"
         "  --tls-key  PEMFILE       Private key for --tls-cert (PEM)\n"
         "  --tls-client-ca PEMFILE  Require mutual TLS; verify clients against this CA\n"
+        "  --est-allow-anonymous    Issue EST certificates to any client; --proto est\n"
+        "                           needs this, --basic or --tls-client-ca.\n"
+        "                           /simplereenroll also needs --tls-client-ca and a\n"
+        "                           KEEP_PEER_CERT wolfSSL\n"
         "  --scep-require-approval  Defer SCEP PKCSReq/RenewalReq (pkiStatus=PENDING); issue\n"
         "                           on first GetCertInitial with the same transactionID\n"
         "  --scep-enable-next-ca    Advertise + answer GetNextCACert (RFC 8894 section 4.7),\n"
@@ -123,7 +127,7 @@ static int parse_listen(const char* arg, char** host, uint16_t* port)
 static int parse_basic(const char* arg, char** user, char** pass)
 {
     const char* colon = strchr(arg, ':');
-    if (colon == NULL)
+    if (colon == NULL || colon == arg || colon[1] == '\0')
         return -1;
 
     *user = strndup(arg, (size_t)(colon - arg));
@@ -177,6 +181,7 @@ int main(int argc, char** argv)
         { "tls-post-handshake-auth", no_argument,       NULL, 'H' },
         { "csrattrs-file",            required_argument, NULL, 'F' },
         { "est-require-csrattrs",    no_argument,       NULL, 'Q' },
+        { "est-allow-anonymous",     no_argument,       NULL, 'Y' },
         { "help",                    no_argument,       NULL, 'h' },
         { "version",                 no_argument,       NULL, 'V' },
         { 0 }
@@ -203,6 +208,7 @@ int main(int argc, char** argv)
     uint8_t* csr_attrs_blob   = NULL;
     size_t csr_attrs_blob_len = 0;
     int est_require_csr_attrs = 0;
+    int est_allow_anonymous   = 0;
     int c;
 
     while ((c = getopt_long(argc, argv, "", opts, NULL)) != -1) {
@@ -218,7 +224,7 @@ int main(int argc, char** argv)
                 break;
             case 'b':
                 if (parse_basic(optarg, &user, &pass) != 0) {
-                    fprintf(stderr, "invalid --basic (expected USER:PASS)\n");
+                    fprintf(stderr, "invalid --basic (expected non-empty USER:PASS)\n");
                     return 1;
                 }
                 break;
@@ -274,6 +280,9 @@ int main(int argc, char** argv)
             case 'Q':
                 est_require_csr_attrs = 1;
                 break;
+            case 'Y':
+                est_allow_anonymous   = 1;
+                break;
             case 'V':
                 printf("wolfcert-server %s\n", wolfcert_version_string());
                 return 0;
@@ -307,6 +316,13 @@ int main(int argc, char** argv)
     if (sel == WOLFCERT_PROTO_EST && tls_cert == NULL) {
         fprintf(stderr, "wolfcert-server: --proto est requires --tls-cert and "
                 "--tls-key (RFC 7030 has no plaintext mode)\n");
+        return 1;
+    }
+
+    if (sel == WOLFCERT_PROTO_EST && user == NULL && tls_ca == NULL &&
+            !est_allow_anonymous) {
+        fprintf(stderr, "wolfcert-server: --proto est requires --basic, "
+                "--tls-client-ca or --est-allow-anonymous\n");
         return 1;
     }
 
@@ -372,6 +388,7 @@ int main(int argc, char** argv)
         .csr_attributes_der         = csr_attrs_blob,
         .csr_attributes_len         = csr_attrs_blob_len,
         .est_require_csr_attributes = est_require_csr_attrs,
+        .est_allow_anonymous_enroll = est_allow_anonymous,
     };
 
     int rc = wolfcert_server_start(&cfg, &g_server);

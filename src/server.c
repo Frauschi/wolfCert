@@ -287,6 +287,20 @@ int wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out)
         return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "server",
             "EST requires TLS: set tls_cert_pem and tls_key_pem (RFC 7030)");
 
+    if (cfg->http_basic_user != NULL &&
+            (cfg->http_basic_user[0] == '\0' ||
+             cfg->http_basic_pass == NULL || cfg->http_basic_pass[0] == '\0'))
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "server",
+            "http_basic_user and http_basic_pass must both be non-empty");
+
+    if (cfg->protocol == WOLFCERT_PROTO_EST && cfg->http_basic_user == NULL &&
+            (cfg->tls_client_ca_pem == NULL ||
+             cfg->tls_client_ca_pem_len == 0) &&
+            !cfg->est_allow_anonymous_enroll)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "server",
+            "EST enrollment needs http_basic_user or tls_client_ca_pem, "
+            "or est_allow_anonymous_enroll");
+
     void* heap = cfg->heap ? cfg->heap : wolfcert_default_heap();
     WolfCertServer* s = (WolfCertServer*)WOLFCERT_XMALLOC(sizeof(*s), heap);
     if (s == NULL)
@@ -313,6 +327,14 @@ int wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out)
 
     if (cfg->http_basic_pass)
         s->cfg_basic_pass = wolfcert_strdup(cfg->http_basic_pass, heap);
+
+    if (s->cfg_bind_host == NULL ||
+            (cfg->challenge_password && s->cfg_challenge == NULL) ||
+            (cfg->http_basic_user && s->cfg_basic_user == NULL) ||
+            (cfg->http_basic_pass && s->cfg_basic_pass == NULL)) {
+        wolfcert_server_free(s);
+        return WOLFCERT_ERR_MEMORY;
+    }
 
     if (cfg->csr_attributes_der != NULL && cfg->csr_attributes_len > 0) {
         s->cfg_csr_attrs = (uint8_t*)WOLFCERT_XMALLOC(cfg->csr_attributes_len, heap);

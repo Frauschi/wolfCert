@@ -31,9 +31,11 @@
 #include <wolfcert/wolfcert.h>
 #include <wolfcert/http.h>
 #include "../test_static_mem.h"
+#include "internal.h"
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define REQUIRE(cond) \
     do {                                                                    \
@@ -662,6 +664,196 @@ static int test_nb_204_keeps_retry_after(void)
     return 0;
 }
 
+static int retry_after_of(const char* value, int nb, int* out)
+{
+    WolfCertHttpResponse resp = { 0 };
+    Peer p = { 0 };
+    char raw[256];
+    int rc;
+
+    snprintf(raw, sizeof(raw),
+             "HTTP/1.1 503 Service Unavailable\r\nRetry-After: %s\r\n"
+             "Content-Length: 0\r\nConnection: keep-alive\r\n\r\n", value);
+    p.open_rc = WOLFCERT_ERR_IO;
+    rc = nb ? nb_fetch(&p, raw, &resp) : fetch(&p, raw, sizeof(raw), &resp);
+    *out = resp.retry_after_sec;
+    wolfcert_http_response_free(&resp);
+
+    return rc;
+}
+
+/* delay-seconds is digits alone, apart from trailing whitespace. */
+static int test_retry_after_delay_seconds(void)
+{
+    static const char* const bad[] = { "120junk", "12 0", "120s", "1.5" };
+    size_t i;
+    int nb;
+    int sec;
+
+    for (nb = 0; nb <= 1; nb++) {
+        REQUIRE(retry_after_of("120 \t", nb, &sec) == WOLFCERT_OK);
+        REQUIRE(sec == 120);
+        REQUIRE(retry_after_of("99999999999999999999999", nb, &sec)
+                == WOLFCERT_OK);
+        REQUIRE(sec == 86400);
+        for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            REQUIRE(retry_after_of(bad[i], nb, &sec) == WOLFCERT_OK);
+            if (sec != 0)
+                fprintf(stderr, "accepted malformed delay \"%s\"\n", bad[i]);
+            REQUIRE(sec == 0);
+        }
+    }
+
+    return 0;
+}
+
+#ifndef NO_ASN_TIME
+/* RFC 9110 section 5.6.7: IMF-fixdate, obsolete RFC 850 and asctime. */
+static void retry_after_date(char* out, size_t sz, time_t t, int form)
+{
+    static const char* const wd[] = {
+        "Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"
+    };
+    static const char* const wdl[] = {
+        "Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday",
+        "Saturday"
+    };
+    static const char* const mon[] = {
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun",
+        "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"
+    };
+    struct tm* g = gmtime(&t);
+
+    if (form == 0) {
+        snprintf(out, sz, "%s, %02d %s %04d %02d:%02d:%02d GMT",
+                 wd[g->tm_wday], g->tm_mday, mon[g->tm_mon],
+                 g->tm_year + 1900, g->tm_hour, g->tm_min, g->tm_sec);
+    }
+    else if (form == 1) {
+        snprintf(out, sz, "%s, %02d-%s-%02d %02d:%02d:%02d GMT",
+                 wdl[g->tm_wday], g->tm_mday, mon[g->tm_mon],
+                 g->tm_year % 100, g->tm_hour, g->tm_min, g->tm_sec);
+    }
+    else {
+        snprintf(out, sz, "%s %s %2d %02d:%02d:%02d %04d",
+                 wd[g->tm_wday], mon[g->tm_mon], g->tm_mday,
+                 g->tm_hour, g->tm_min, g->tm_sec, g->tm_year + 1900);
+    }
+}
+
+static int test_retry_after_http_date(void)
+{
+    static const char* const bad[] = {
+        "Sun, 06 Nov 2095 08:49",
+        "Sun, 06 Nov 2095 08:49:37",
+        "Sun, 06 Nov 2095 08:49:37 UTC",
+        "Sun, 06 Nov 2095 08:49:37 GMTx",
+        "Sun, 06 Nov 2095 08:49:37 GMT extra",
+        "Sun, 06 Nov 2095 24:00:00 GMT",
+        "Sun, 06 Foo 2095 08:49:37 GMT",
+        "Sun, 6 Nov 2095 08:49:37 GMT",
+        "Tue, 29 Feb 2095 08:49:37 GMT",
+        "Mon, 29 Feb 2100 08:49:37 GMT",
+        "Sunday, 06-Nov-95 08:49",
+        "Sun Nov  6 08:49:37",
+        "Sunday",
+        "",
+    };
+    char date[64];
+    size_t i;
+    time_t t = time(NULL);
+    int cy = gmtime(&t)->tm_year + 1900;
+    int form;
+    int nb;
+    int sec;
+
+    for (nb = 0; nb <= 1; nb++) {
+        for (form = 0; form <= 2; form++) {
+            retry_after_date(date, sizeof(date), time(NULL) + 120, form);
+            REQUIRE(retry_after_of(date, nb, &sec) == WOLFCERT_OK);
+            REQUIRE(sec >= 110 && sec <= 120);
+
+            retry_after_date(date, sizeof(date), time(NULL) - 120, form);
+            REQUIRE(retry_after_of(date, nb, &sec) == WOLFCERT_OK);
+            REQUIRE(sec == 0);
+        }
+
+        /* RFC 850 years resolve against now, not a fixed 1970 pivot. */
+        snprintf(date, sizeof(date), "Monday, 01-Jan-%02d 00:00:00 GMT",
+                 (cy + 45) % 100);
+        REQUIRE(retry_after_of(date, nb, &sec) == WOLFCERT_OK);
+        REQUIRE(sec == 86400);
+        snprintf(date, sizeof(date), "Monday, 01-Jan-%02d 00:00:00 GMT",
+                 (cy + 55) % 100);
+        REQUIRE(retry_after_of(date, nb, &sec) == WOLFCERT_OK);
+        REQUIRE(sec == 0);
+
+        /* Exactly 50 calendar years ahead is still the future. */
+        for (i = 0; i < 2; i++) {
+            time_t at = time(NULL) + (i == 0 ? -60 : 120);
+            struct tm g = *gmtime(&at);
+
+            if (g.tm_mon == 1 && g.tm_mday == 29)
+                break;
+            strftime(date, sizeof(date), "Monday, %d-%b-", &g);
+            snprintf(date + strlen(date), sizeof(date) - strlen(date),
+                     "%02d %02d:%02d:%02d GMT", (g.tm_year + 1900 + 50) % 100,
+                     g.tm_hour, g.tm_min, g.tm_sec);
+            REQUIRE(retry_after_of(date, nb, &sec) == WOLFCERT_OK);
+            REQUIRE(sec == (i == 0 ? 86400 : 0));
+        }
+
+        /* Future years throughout, so 0 can only mean the value was rejected. */
+        for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+            REQUIRE(retry_after_of(bad[i], nb, &sec) == WOLFCERT_OK);
+            if (sec != 0)
+                fprintf(stderr, "accepted malformed date \"%s\"\n", bad[i]);
+            REQUIRE(sec == 0);
+        }
+        REQUIRE(retry_after_of("Thu, 29 Feb 2096 08:49:37 GMT", nb, &sec)
+                == WOLFCERT_OK);
+        REQUIRE(sec == 86400);
+
+        REQUIRE(retry_after_of("Sun, 06 Nov 2094 08:49:37 GMT", nb, &sec)
+                == WOLFCERT_OK);
+        REQUIRE(sec == 86400);
+        REQUIRE(retry_after_of("172800", nb, &sec) == WOLFCERT_OK);
+        REQUIRE(sec == 86400);
+        REQUIRE(retry_after_of("Sun, 31 Nov 2094 08:49:37 GMT", nb, &sec)
+                == WOLFCERT_OK);
+        REQUIRE(sec == 0);
+    }
+
+    return 0;
+}
+
+static time_t unset_clock(time_t* t)
+{
+    if (t != NULL)
+        *t = 1000;
+    return 1000;
+}
+
+/* A device clock still near 1970 must not turn every date into a day's wait. */
+static int test_retry_after_unset_clock(void)
+{
+    int sec = -1;
+    int rc;
+
+    REQUIRE(wc_SetTimeCb(unset_clock) == 0);
+    rc = retry_after_of("Sun, 06 Nov 2094 08:49:37 GMT", 0, &sec);
+    wc_SetTimeCb(NULL);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(sec == 0);
+    REQUIRE(wc_SetTimeCb(unset_clock) == 0);
+    rc = retry_after_of("120", 1, &sec);
+    wc_SetTimeCb(NULL);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(sec == 120);
+    return 0;
+}
+#endif
+
 static int test_nb_interim_then_final(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -965,6 +1157,14 @@ int main(void)
         return 1;
     if (test_nb_204_keeps_retry_after())
         return 1;
+    if (test_retry_after_delay_seconds())
+        return 1;
+#ifndef NO_ASN_TIME
+    if (test_retry_after_http_date())
+        return 1;
+    if (test_retry_after_unset_clock())
+        return 1;
+#endif
     if (test_nb_interim_then_final())
         return 1;
     if (test_eof_empty_body_is_null())

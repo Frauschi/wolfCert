@@ -237,7 +237,8 @@ WOLFCERT_API int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
  * trip that verifies but answers with no certificate carrying the requested
  * issuer and serial is the one outcome that is neither: it returns
  * WOLFCERT_ERR_PROTOCOL and leaves out->status UNSET, so a substituted bundle
- * is never mistaken for the certificate that was asked for.
+ * is never mistaken for the certificate that was asked for. Running out of
+ * memory while searching the reply returns WOLFCERT_ERR_MEMORY instead.
  *
  * Despite the name, wolfcert_scep_get_cert_initial is not an "initial" variant
  * of this call: it is messageType 20, polling a pending enrollment. There is no

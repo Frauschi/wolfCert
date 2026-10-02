@@ -271,72 +271,6 @@ static int choose_sig_type(const WolfCertKey* key, const WolfCertKeyAlg* alg,
     return alg->ctc_sig_default;
 }
 
-/* Find the subjectAltName extension in a certificate's [3] Extensions and
- * return its GeneralNames bytes; *san stays NULL when there is none. */
-static int find_san(const byte* ext, int ext_sz, const byte** san,
-                    word32* san_len)
-{
-    static const byte san_oid[] = { ASN_OBJECT_ID, 0x03, 0x55, 0x1D, 0x11 };
-    word32 idx = 0;
-    word32 end = 0;
-    word32 ext_end = 0;
-    int len = 0;
-    int rc = WOLFCERT_OK;
-    byte tag = 0;
-
-    *san = NULL;
-    *san_len = 0;
-    if (ext == NULL || ext_sz <= 0)
-        return WOLFCERT_OK;
-
-    if (GetASNTag(ext, &idx, &tag, (word32)ext_sz) < 0 ||
-            tag != (ASN_CONTEXT_SPECIFIC | ASN_CONSTRUCTED | 3) ||
-            GetLength(ext, &idx, &len, (word32)ext_sz) < 0 ||
-            GetASNTag(ext, &idx, &tag, (word32)ext_sz) < 0 ||
-            tag != (ASN_SEQUENCE | ASN_CONSTRUCTED) ||
-            GetLength(ext, &idx, &len, (word32)ext_sz) < 0)
-        rc = WOLFCERT_ERR_PARSE;
-    else
-        end = idx + (word32)len;
-
-    /* Extension ::= SEQUENCE { OID, critical BOOLEAN OPTIONAL, OCTET STRING } */
-    while (rc == WOLFCERT_OK && *san == NULL && idx < end) {
-        if (GetASNTag(ext, &idx, &tag, end) < 0 ||
-                tag != (ASN_SEQUENCE | ASN_CONSTRUCTED) ||
-                GetLength(ext, &idx, &len, end) < 0) {
-            rc = WOLFCERT_ERR_PARSE;
-        }
-        else {
-            ext_end = idx + (word32)len;
-            if (ext_end - idx < sizeof(san_oid) ||
-                    memcmp(ext + idx, san_oid, sizeof(san_oid)) != 0) {
-                idx = ext_end;
-            }
-            else {
-                idx += (word32)sizeof(san_oid);
-                if (idx < ext_end && ext[idx] == ASN_BOOLEAN) {
-                    if (GetASNTag(ext, &idx, &tag, ext_end) < 0 ||
-                            GetLength(ext, &idx, &len, ext_end) < 0)
-                        rc = WOLFCERT_ERR_PARSE;
-                    else
-                        idx += (word32)len;
-                }
-                if (rc == WOLFCERT_OK &&
-                        (GetASNTag(ext, &idx, &tag, ext_end) < 0 ||
-                         tag != ASN_OCTET_STRING ||
-                         GetLength(ext, &idx, &len, ext_end) < 0))
-                    rc = WOLFCERT_ERR_PARSE;
-                if (rc == WOLFCERT_OK) {
-                    *san = ext + idx;
-                    *san_len = (word32)len;
-                }
-            }
-        }
-    }
-
-    return rc;
-}
-
 /* Copy renew_cert's Subject and SAN into cert */
 static int copy_cert_identity(Cert* cert, const uint8_t* renew_cert,
                               size_t renew_cert_len, void* heap)
@@ -394,8 +328,7 @@ static int copy_cert_identity(Cert* cert, const uint8_t* renew_cert,
     }
 
     if (rc == WOLFCERT_OK &&
-            find_san(dc->extensions, dc->extensionsSz, &san, &san_len) !=
-            WOLFCERT_OK)
+            wolfcert_find_san(dc, &san, &san_len) != WOLFCERT_OK)
         rc = WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "csr",
                           "certificate extensions do not parse");
     if (rc == WOLFCERT_OK && san_len > sizeof(cert->altNames))
@@ -417,6 +350,13 @@ static int copy_cert_identity(Cert* cert, const uint8_t* renew_cert,
     return rc;
 }
 
+int wolfcert_csr_meta_sets_identity(const WolfCertCertMeta* meta)
+{
+    return meta->subject_dn != NULL || meta->san_dns_len != 0 ||
+           meta->san_ip_len != 0 || meta->san_uri_len != 0 ||
+           meta->san_email_len != 0;
+}
+
 int wolfcert_csr_build(const WolfCertKey* key, const WolfCertCertMeta* meta,
                        WolfCertBuffer* out_der)
 {
@@ -430,10 +370,7 @@ int wolfcert_csr_build_ex(const WolfCertKey* key, const WolfCertCertMeta* meta,
     if (key == NULL || meta == NULL || out_der == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    if (renew_cert != NULL &&
-            (meta->subject_dn != NULL || meta->san_dns_len != 0 ||
-             meta->san_ip_len != 0 || meta->san_uri_len != 0 ||
-             meta->san_email_len != 0))
+    if (renew_cert != NULL && wolfcert_csr_meta_sets_identity(meta))
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "csr",
             "a renewal keeps the certificate's subject and SAN");
 

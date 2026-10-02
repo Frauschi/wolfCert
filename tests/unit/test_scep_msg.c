@@ -789,6 +789,103 @@ static int check_result_defined(const char* what, int rc, const WolfCertScepResu
     return 0;
 }
 
+/* OPENSSL_EXTRA's GetCertName reports a failed X509_NAME allocation as
+ * ASN_PARSE_E, indistinguishable from a bad certificate. */
+#if defined(USE_WOLFSSL_MEMORY) && !defined(WOLFSSL_STATIC_MEMORY) && \
+    !defined(WOLFSSL_DEBUG_MEMORY) && !defined(OPENSSL_EXTRA) && \
+    !defined(OPENSSL_EXTRA_X509_SMALL)
+#define TEST_ALLOC_FAILURES
+#endif
+
+#ifdef TEST_ALLOC_FAILURES
+/* Allocations left before failing_malloc() returns NULL; -1 never fails. */
+static int g_allocs_left = -1;
+
+static void* failing_malloc(size_t sz)
+{
+    if (g_allocs_left == 0)
+        return NULL;
+    if (g_allocs_left > 0)
+        g_allocs_left--;
+    return malloc(sz);
+}
+
+static void failing_free(void* ptr)
+{
+    free(ptr);
+}
+
+static void* failing_realloc(void* ptr, size_t sz)
+{
+    if (g_allocs_left == 0)
+        return NULL;
+    if (g_allocs_left > 0)
+        g_allocs_left--;
+    return realloc(ptr, sz);
+}
+
+/* Failing each allocation in turn must give WOLFCERT_ERR_MEMORY, never a
+ * "not found" that GetCert would blame on the CA. */
+static int pem_has_cert_reports_oom(const char* pem, size_t pem_len,
+                                    const DecodedCert* lc)
+{
+    wolfSSL_Malloc_cb  mf;
+    wolfSSL_Free_cb    ff;
+    wolfSSL_Realloc_cb rf;
+    int fails;
+    int rc = 0;
+
+    REQUIRE(wolfSSL_GetAllocators(&mf, &ff, &rf) == 0);
+    for (fails = 0; rc != 1; fails++) {
+        g_allocs_left = fails;
+        REQUIRE(wolfSSL_SetAllocators(failing_malloc, failing_free,
+                                      failing_realloc) == 0);
+        rc = wolfcert_scep_pem_has_cert((const uint8_t*)pem, pem_len,
+                                        lc->issuerRaw,
+                                        (size_t)lc->issuerRawLen, lc->serial,
+                                        (size_t)lc->serialSz, NULL);
+        REQUIRE(wolfSSL_SetAllocators(mf, ff, rf) == 0);
+        g_allocs_left = -1;
+        if (rc != 1 && rc != WOLFCERT_ERR_MEMORY) {
+            fprintf(stderr, "FAIL pem_has_cert with allocation %d failing: "
+                    "%d\n", fails, rc);
+            return 1;
+        }
+    }
+    REQUIRE(fails > 1);
+    return 0;
+}
+
+/* Running out of memory while checking a CertRep signer is not a forgery. */
+static int rep_signer_reports_oom(const uint8_t* signer, size_t signer_len,
+                                  const uint8_t* bundle, size_t bundle_len)
+{
+    wolfSSL_Malloc_cb  mf;
+    wolfSSL_Free_cb    ff;
+    wolfSSL_Realloc_cb rf;
+    int fails;
+    int rc = WOLFCERT_ERR_MEMORY;
+
+    REQUIRE(wolfSSL_GetAllocators(&mf, &ff, &rf) == 0);
+    for (fails = 0; rc != WOLFCERT_OK; fails++) {
+        g_allocs_left = fails;
+        REQUIRE(wolfSSL_SetAllocators(failing_malloc, failing_free,
+                                      failing_realloc) == 0);
+        rc = wolfcert_scep_verify_rep_signer(signer, signer_len, bundle,
+                                             bundle_len, NULL);
+        REQUIRE(wolfSSL_SetAllocators(mf, ff, rf) == 0);
+        g_allocs_left = -1;
+        if (rc != WOLFCERT_OK && rc != WOLFCERT_ERR_MEMORY) {
+            fprintf(stderr, "FAIL verify_rep_signer with allocation %d "
+                    "failing: %d\n", fails, rc);
+            return 1;
+        }
+    }
+    REQUIRE(fails > 1);
+    return 0;
+}
+#endif
+
 /* The GetCert response check walks a PEM bundle: a certificate that will not
  * parse is skipped, so one ahead of the target cannot hide it. */
 static int test_pem_has_cert(void)
@@ -821,6 +918,9 @@ static int test_pem_has_cert(void)
     REQUIRE(wolfcert_scep_pem_has_cert((const uint8_t*)pem, (size_t)n,
                                        lc.issuerRaw, (size_t)lc.issuerRawLen,
                                        lc.serial, (size_t)lc.serialSz, NULL) == 1);
+#ifdef TEST_ALLOC_FAILURES
+    REQUIRE(pem_has_cert_reports_oom(pem, (size_t)n, &lc) == 0);
+#endif
 
     /* Behind an unparseable entry it must still be found. */
     REQUIRE((size_t)n + sizeof(JUNK) < sizeof(bundle));
@@ -1592,6 +1692,9 @@ static int test_signer_matches_any_bundle_cert(void)
     REQUIRE(wolfcert_scep_verify_rep_signer(u_der, u_len,
                                             bundle, bundle_len, NULL)
             != WOLFCERT_OK);
+#ifdef TEST_ALLOC_FAILURES
+    REQUIRE(rep_signer_reports_oom(b_der, b_len, bundle, bundle_len) == 0);
+#endif
 
     free(bundle);
     free(a_der);

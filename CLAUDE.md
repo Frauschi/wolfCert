@@ -35,15 +35,15 @@ configure time if the installed wolfSSL lacks any of `HAVE_PKCS7`,
 It also link-probes the `WOLFSSL_ASN_API` helpers it calls, which a shared
 libwolfssl exports only under one of `WOLFSSL_PUBLIC_ASN` (the lean choice),
 `OPENSSL_EXTRA`, `OPENSSL_EXTRA_X509_SMALL` or `WOLFSSL_TEST_CERT`; a static
-one links them regardless. The test server's post-handshake-auth mode
-additionally needs `KEEP_PEER_CERT` and `WOLFSSL_HAVE_TLS_UNIQUE`; without
-them it returns `WOLFCERT_ERR_UNSUPPORTED`. The OpenSSL compatibility layer
+one links them regardless. The OpenSSL compatibility layer
 itself is not required. With ML-DSA enabled it additionally needs
 `WOLFSSL_MLDSA_CHECK_KEY` (`wc_MlDsaKey_CheckKey()`), which reloading an
 ML-DSA CA from a store calls -- checked when `src/key_algs.c` compiles,
 since only `dilithium.h` resolves that macro. `--enable-mldsa` gives it by
 default; it is lost only if wolfSSL is built with
 `WOLFSSL_DILITHIUM_NO_CHECK_KEY` or `WOLFSSL_MLDSA_VERIFY_ONLY`.
+
+The in-tree test server needs `KEEP_PEER_CERT` for post-handshake auth and `/simplereenroll`, and `WOLFSSL_HAVE_TLS_UNIQUE` for post-handshake auth; `README.md` has the details below its configure line.
 
 **Key algorithms are gated** by `WOLFCERT_HAVE_<ALG>` (RSA, ECC,
 ED25519, ED448, MLDSA). RSA, ECC, Ed25519, Ed448 and ML-DSA are each
@@ -107,7 +107,7 @@ After a build with `-DWOLFCERT_ENABLE_CLI=ON` (the default):
 
 ```sh
 build/wolfcert-server --proto est --listen 127.0.0.1:8443 \
-    --tls-cert server.crt --tls-key server.key
+    --tls-cert server.crt --tls-key server.key --est-allow-anonymous
 build/wolfcert-client enroll --proto est \
     --url https://127.0.0.1:8443/.well-known/est --trust server.crt \
     --key-type ecc:256 --subject "CN=dev" \

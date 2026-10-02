@@ -113,6 +113,48 @@ static int send_and_read_status(uint16_t port,
     return (int)n;
 }
 
+static int fetch_whole(uint16_t port, const char* method, const char* op,
+                       char* resp, size_t cap)
+{
+    TestTlsConn c;
+    char req[160];
+    size_t n = 0;
+    int len;
+    int r;
+
+    len = snprintf(req, sizeof(req), "%s /.well-known/est/%s HTTP/1.1\r\n"
+                   "Host: 127.0.0.1\r\nConnection: close\r\n\r\n",
+                   method, op);
+    REQUIRE(len > 0 && (size_t)len < sizeof(req));
+    REQUIRE(test_tls_connect(&c, port, g_tls_cert, g_tls_cert_len) == 0);
+    REQUIRE(test_tls_write(&c, req, (size_t)len) == 0);
+    while (n + 1 < cap && (r = test_tls_read(&c, resp + n, cap - 1 - n)) > 0)
+        n += (size_t)r;
+    test_tls_close(&c);
+    resp[n] = '\0';
+    return 0;
+}
+
+/* HEAD must answer with GET's headers and end there, or its body would be read
+ * as the next response on a kept-alive connection. */
+static int head_matches_get(uint16_t port, const char* op, const char* status)
+{
+    char get[4096];
+    char head[4096];
+    const char* eoh;
+
+    REQUIRE(fetch_whole(port, "GET", op, get, sizeof(get)) == 0);
+    REQUIRE(fetch_whole(port, "HEAD", op, head, sizeof(head)) == 0);
+    if (strncmp(head, status, strlen(status)) != 0)
+        fprintf(stderr, "HEAD %s: %.40s\n", op, head);
+    REQUIRE(strncmp(head, status, strlen(status)) == 0);
+    eoh = strstr(head, "\r\n\r\n");
+    REQUIRE(eoh != NULL);
+    REQUIRE(eoh[4] == '\0');
+    REQUIRE(strncmp(get, head, (size_t)(eoh + 4 - head)) == 0);
+    return 0;
+}
+
 /* Shape #1: a chunk-size line longer than 8 hex digits. The parser
  * must reject this rather than letting the shift-accumulate silently
  * wrap. */
@@ -227,6 +269,43 @@ static int accept_multisegment_chunked_body(uint16_t port)
     test_tls_close(&c);
 
     REQUIRE(strstr(status, "Bad CSR") != NULL);
+    return 0;
+}
+
+/* Authorization is a singleton field, so a second one is a malformed request. */
+static int reject_duplicate_authorization(uint16_t port)
+{
+    const char* req =
+        "GET /.well-known/est/cacerts HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Authorization: Basic AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\r\n"
+        "Authorization: Basic AA==\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    /* A field that only starts with "Authorization" is a different field. */
+    const char* other =
+        "GET /.well-known/est/cacerts HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Authorization-Foo: x\r\n"
+        "Authorization: Basic AA==\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    /* RFC 9112 section 5.1: whitespace before a colon is a 400. */
+    const char* spaced =
+        "GET /.well-known/est/cacerts HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Length : 0\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    char status[128] = { 0 };
+    send_and_read_status(port, req, strlen(req), status, sizeof(status));
+    REQUIRE(strstr(status, "400") != NULL);
+    memset(status, 0, sizeof(status));
+    send_and_read_status(port, other, strlen(other), status, sizeof(status));
+    REQUIRE(strstr(status, "200") != NULL);
+    memset(status, 0, sizeof(status));
+    send_and_read_status(port, spaced, strlen(spaced), status, sizeof(status));
+    REQUIRE(strstr(status, "400") != NULL);
     return 0;
 }
 
@@ -386,6 +465,7 @@ static int no_sigpipe_on_response(void)
     WolfCertServerCfgSrv cfg = {
         .protocol = WOLFCERT_PROTO_EST,
         .bind_host = "127.0.0.1", .bind_port = 0,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer*  srv = NULL;
     struct sigaction sa, old;
@@ -451,6 +531,7 @@ int main(void)
         .bind_host = "127.0.0.1", .bind_port = 0,
         .tls_cert_pem = g_tls_cert, .tls_cert_pem_len = g_tls_cert_len,
         .tls_key_pem  = tls_key,    .tls_key_pem_len  = tls_key_len,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer* srv = NULL;
     REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
@@ -459,7 +540,13 @@ int main(void)
 
     uint16_t port = wolfcert_server_port(srv);
 
-    int rc = reject_oversized_chunk_size(port);
+    int rc = head_matches_get(port, "nope", "HTTP/1.1 404");
+    if (rc == 0)
+        rc = head_matches_get(port, "cacerts", "HTTP/1.1 200");
+    if (rc == 0)
+        rc = head_matches_get(port, "csrattrs", "HTTP/1.1 204");
+    if (rc == 0)
+        rc = reject_oversized_chunk_size(port);
     if (rc == 0)
         rc = reject_corrupt_chunk_trailer(port);
     if (rc == 0)
@@ -468,6 +555,8 @@ int main(void)
         rc = accept_multisegment_chunked_body(port);
     if (rc == 0)
         rc = keepalive_after_split_trailer(port);
+    if (rc == 0)
+        rc = reject_duplicate_authorization(port);
     if (rc == 0)
         rc = no_sigpipe_on_response();
 

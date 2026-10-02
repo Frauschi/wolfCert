@@ -49,7 +49,7 @@ echo "[1] EST /cacerts -> OpenSSL pkcs7 parse"
 PORT=$(free_port)
 "$WC_SERVER" --proto est --listen "127.0.0.1:$PORT" \
              --tls-cert tls-server.crt --tls-key tls-server.key \
-             >wc-server.log 2>&1 &
+             --est-allow-anonymous >wc-server.log 2>&1 &
 WC_PID=$!
 trap 'kill_if "$WC_PID"' EXIT
 wait_port 127.0.0.1 "$PORT"
@@ -122,7 +122,7 @@ echo "[3] OpenSSL-generated CSR -> wolfcert-server EST enroll"
 PORT=$(free_port)
 "$WC_SERVER" --proto est --listen "127.0.0.1:$PORT" \
              --tls-cert tls-server.crt --tls-key tls-server.key \
-             >wc-server3.log 2>&1 &
+             --est-allow-anonymous >wc-server3.log 2>&1 &
 WC_PID=$!
 trap 'kill_if "$WC_PID"' EXIT
 wait_port 127.0.0.1 "$PORT"

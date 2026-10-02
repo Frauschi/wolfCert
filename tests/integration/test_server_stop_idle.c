@@ -294,6 +294,7 @@ int main(void)
     cfg.tls_cert_pem_len = tls_cert_len;
     cfg.tls_key_pem      = tls_key;
     cfg.tls_key_pem_len  = tls_key_len;
+    cfg.est_allow_anonymous_enroll = 1;
 
     /* 1. Parked in wolfSSL_accept(): TCP is up, no ClientHello follows. */
     memset(&ctx, 0, sizeof(ctx));
@@ -414,6 +415,7 @@ int main(void)
     cfg.tls_cert_pem_len = tls_cert_len;
     cfg.tls_key_pem      = tls_key;
     cfg.tls_key_pem_len  = tls_key_len;
+    cfg.est_allow_anonymous_enroll = 1;
 
     memset(&ctx, 0, sizeof(ctx));
     REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);

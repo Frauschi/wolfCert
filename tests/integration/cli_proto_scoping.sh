@@ -217,6 +217,35 @@ fi
 # is built alongside wolfcert-client whenever the server is enabled; without it
 # there is nothing to enroll against, so skip just this group.
 SERVER="$(dirname "$CLI")/wolfcert-server"
+
+# wolfcert-server refuses an EST listener that could not authenticate anyone.
+# Any readable file passes as --tls-cert: these checks run before it is parsed.
+expect_server_reject() {
+    local saved="$CLI"
+    CLI="$SERVER"
+    expect_reject "$@"
+    CLI="$saved"
+}
+if [ -x "$SERVER" ]; then
+    expect_server_reject "est server with no client auth" "--est-allow-anonymous" \
+        --proto est --tls-cert "$0" --tls-key "$0"
+    for b in ":pw" "alice:" "alice"; do
+        expect_server_reject "--basic $b" "non-empty USER:PASS" \
+            --proto est --tls-cert "$0" --tls-key "$0" --basic "$b"
+    done
+    # $0 is no PEM, so start fails in TLS setup, before anything binds.
+    out="$("$SERVER" --proto est --listen 127.0.0.1:18099 --tls-cert "$0" \
+            --tls-key "$0" --est-allow-anonymous 2>&1)"
+    case "$out" in
+        *"start failed"*)
+            echo "ok   --est-allow-anonymous passes the auth check" ;;
+        *)
+            echo "FAIL: --est-allow-anonymous did not reach server start"
+            echo "      got: $out"
+            fails=$((fails + 1))
+            ;;
+    esac
+fi
 if [ ! -x "$SERVER" ]; then
     echo "skip --ca-fingerprint pinning (wolfcert-server not built)"
 else

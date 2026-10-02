@@ -278,6 +278,7 @@ int main(void)
         .csr_attributes_len = policy.len,
         .tls_cert_pem = tls_cert, .tls_cert_pem_len = tls_cert_len,
         .tls_key_pem  = tls_key,  .tls_key_pem_len  = tls_key_len,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer* srv = NULL;
     REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);

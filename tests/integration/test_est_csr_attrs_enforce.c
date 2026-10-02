@@ -270,6 +270,83 @@ static int reject_body_names_missing_oid(uint16_t port)
     return 0;
 }
 
+/* RFC 7030 section 4.2.3: an error response without a media type must carry a
+ * plaintext explanation, so neither a 404 nor an empty-body 400 may be empty. */
+static int reject_bodies_are_plaintext(uint16_t port)
+{
+    static const char* const reqs[] = {
+        "GET /.well-known/est/nosuchop HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Connection: close\r\n"
+        "\r\n",
+        "POST /.well-known/est/simpleenroll HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: application/pkcs10\r\n"
+        "Content-Length: 0\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+    };
+    char resp[1024];
+    size_t i;
+
+    for (i = 0; i < sizeof(reqs) / sizeof(reqs[0]); ++i) {
+        const char* body;
+        int n = send_and_read_all(port, reqs[i], strlen(reqs[i]),
+                                  resp, sizeof(resp));
+        REQUIRE(n > 0);
+        REQUIRE(strstr(resp, i == 0 ? " 404 " : " 400 ") != NULL);
+        REQUIRE(strstr(resp, "Content-Type: text/plain\r\n") != NULL);
+        body = strstr(resp, "\r\n\r\n");
+        REQUIRE(body != NULL && body[4] != '\0');
+    }
+    return 0;
+}
+
+/* RFC 9110: a 204 carries no Content-Length, a 401 carries a challenge, and a
+ * missing client certificate is a 403 since HTTP auth cannot supply one. */
+static int bare_status_headers(uint16_t port)
+{
+    static const char get_attrs[] =
+        "GET /.well-known/est/csrattrs HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Connection: close\r\n"
+        "\r\n";
+    static const char enroll_noauth[] =
+        "POST /.well-known/est/simpleenroll HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: application/pkcs10\r\n"
+        "Content-Length: 4\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "AAAA";
+    static const char reenroll_nocert[] =
+        "POST /.well-known/est/simplereenroll HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Authorization: Basic YWxpY2U6c2VjcmV0\r\n"   /* alice:secret */
+        "Content-Type: application/pkcs10\r\n"
+        "Content-Length: 4\r\n"
+        "Connection: close\r\n"
+        "\r\n"
+        "AAAA";
+    char resp[1024];
+
+    REQUIRE(send_and_read_all(port, get_attrs, sizeof(get_attrs) - 1,
+                              resp, sizeof(resp)) > 0);
+    REQUIRE(strstr(resp, " 204 ") != NULL);
+    REQUIRE(strstr(resp, "Content-Length") == NULL);
+
+    REQUIRE(send_and_read_all(port, enroll_noauth, sizeof(enroll_noauth) - 1,
+                              resp, sizeof(resp)) > 0);
+    REQUIRE(strstr(resp, " 401 ") != NULL);
+    REQUIRE(strstr(resp, "WWW-Authenticate: Basic realm=") != NULL);
+
+    REQUIRE(send_and_read_all(port, reenroll_nocert,
+                              sizeof(reenroll_nocert) - 1,
+                              resp, sizeof(resp)) > 0);
+    REQUIRE(strstr(resp, " 403 ") != NULL);
+    return 0;
+}
+
 /* Client C - server advertises ONLY an Attribute-with-values item
  * (no bare OIDs). The CSR doesn't carry anything matching it.
  * Enforcement is presence-only on bare OIDs, so this must still
@@ -329,6 +406,7 @@ int main(void)
         .est_require_csr_attributes = 1,
         .tls_cert_pem = tls_cert, .tls_cert_pem_len = tls_cert_len,
         .tls_key_pem  = tls_key,  .tls_key_pem_len  = tls_key_len,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer* srv = NULL;
     REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
@@ -357,6 +435,7 @@ int main(void)
         .est_require_csr_attributes = 1,
         .tls_cert_pem = tls_cert, .tls_cert_pem_len = tls_cert_len,
         .tls_key_pem  = tls_key,  .tls_key_pem_len  = tls_key_len,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer* srv2 = NULL;
     REQUIRE(wolfcert_server_start(&cfg2, &srv2) == WOLFCERT_OK);
@@ -387,6 +466,7 @@ int main(void)
         .est_require_csr_attributes = 1,
         .tls_cert_pem = tls_cert, .tls_cert_pem_len = tls_cert_len,
         .tls_key_pem  = tls_key,  .tls_key_pem_len  = tls_key_len,
+        .est_allow_anonymous_enroll = 1,
     };
     WolfCertServer* srv_raw = NULL;
     REQUIRE(wolfcert_server_start(&cfg_raw, &srv_raw) == WOLFCERT_OK);
@@ -394,11 +474,34 @@ int main(void)
     REQUIRE(pthread_create(&tid_raw, NULL, server_thread, srv_raw) == 0);
 
     rc = reject_body_names_missing_oid(wolfcert_server_port(srv_raw));
+    if (rc == 0)
+        rc = reject_bodies_are_plaintext(wolfcert_server_port(srv_raw));
 
     wolfcert_server_stop(srv_raw);
     pthread_join(tid_raw, NULL);
     wolfcert_server_free(srv_raw);
     wolfcert_buffer_free(&policy_raw);
+    if (rc != 0)
+        return rc;
+
+    /* Fourth server with no policy and Basic auth on, for bodiless replies. */
+    WolfCertServerCfgSrv cfg_bare = {
+        .protocol = WOLFCERT_PROTO_EST,
+        .bind_host = "127.0.0.1", .bind_port = 0,
+        .http_basic_user = "alice", .http_basic_pass = "secret",
+        .tls_cert_pem = tls_cert, .tls_cert_pem_len = tls_cert_len,
+        .tls_key_pem  = tls_key,  .tls_key_pem_len  = tls_key_len,
+    };
+    WolfCertServer* srv_bare = NULL;
+    REQUIRE(wolfcert_server_start(&cfg_bare, &srv_bare) == WOLFCERT_OK);
+    pthread_t tid_bare;
+    REQUIRE(pthread_create(&tid_bare, NULL, server_thread, srv_bare) == 0);
+
+    rc = bare_status_headers(wolfcert_server_port(srv_bare));
+
+    wolfcert_server_stop(srv_bare);
+    pthread_join(tid_bare, NULL);
+    wolfcert_server_free(srv_bare);
     free(tls_cert);
     free(tls_key);
     if (rc != 0)
