@@ -773,7 +773,7 @@ int wolfcert_ca_issue(WolfCertCa* ca,
     const WolfCertKeyAlg* ca_alg;
     uint8_t* der = NULL;
     void* heap;
-    size_t der_cap = 8192;
+    size_t der_cap = 0;
     int body_sz = 0;
     int sig_sz = 0;
     int rng_ok = 0;
@@ -826,6 +826,9 @@ int wolfcert_ca_issue(WolfCertCa* ca,
     }
 
     if (rc == 0) {
+        /* The CSR bounds the subject, key and SAN, the CA cert the issuer, and
+         * the CA key's DER size hint its signature. */
+        der_cap = csr_len + ca->cert_der_len + ca_alg->der_cap_hint + 1024;
         der = (uint8_t*)WOLFCERT_XMALLOC(der_cap, heap);
         if (der == NULL)
             rc = WOLFCERT_ERR_MEMORY;
