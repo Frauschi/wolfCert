@@ -1195,6 +1195,7 @@ typedef struct {
     size_t         client_cert_len;
     const uint8_t* client_key;
     size_t         client_key_len;
+    const WolfCertKey* client_key_handle;
     int            allow_post_handshake_auth;
 } TlsDials;
 
@@ -1203,6 +1204,34 @@ static int buf_filetype(const uint8_t* buf, size_t len)
 {
     return wolfcert_buffer_is_der(buf, len) ? WOLFSSL_FILETYPE_ASN1
                                             : WOLFSSL_FILETYPE_PEM;
+}
+
+/* Load a WolfCertKey as the TLS client key. A key with a key_id is passed to
+ * wolfSSL by id so the handshake signature runs in its CryptoCb backend. */
+static int use_key_handle(WOLFSSL_CTX* ctx, const WolfCertKey* key)
+{
+    int rc;
+
+    if (key->id_len > 0) {
+        rc = wolfSSL_CTX_use_PrivateKey_Id(ctx, key->id, (long)key->id_len,
+                                           key->dev_id);
+        if (rc != WOLFSSL_SUCCESS)
+            return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "http",
+                                "use_PrivateKey_Id failed (%d)", rc);
+        return WOLFCERT_OK;
+    }
+
+    uint8_t* der = NULL;
+    int      der_len = 0;
+    rc = wolfcert_key_export_der(key, &der, &der_len, key->heap);
+    if (rc != WOLFCERT_OK)
+        return rc;
+
+    rc = wolfSSL_CTX_use_PrivateKey_buffer(ctx, der, der_len,
+                                           WOLFSSL_FILETYPE_ASN1);
+    wc_ForceZero(der, (word32)der_len);
+    WOLFCERT_XFREE(der, key->heap);
+    return rc == WOLFSSL_SUCCESS ? WOLFCERT_OK : WOLFCERT_ERR_TLS;
 }
 
 static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
@@ -1253,7 +1282,8 @@ static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
     wolfSSL_CTX_set_verify(ctx,
         dials->verify_server ? WOLFSSL_VERIFY_PEER : WOLFSSL_VERIFY_NONE, NULL);
 
-    if (dials->client_cert != NULL && dials->client_key != NULL) {
+    if (dials->client_cert != NULL &&
+        (dials->client_key != NULL || dials->client_key_handle != NULL)) {
         /* Load the identity on the CTX so a PHA request can still use it. */
         int rc = wolfSSL_CTX_use_certificate_buffer(ctx, dials->client_cert,
                 (long)dials->client_cert_len,
@@ -1263,12 +1293,21 @@ static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
             return WOLFCERT_ERR_TLS;
         }
 
-        rc = wolfSSL_CTX_use_PrivateKey_buffer(ctx, dials->client_key,
-                (long)dials->client_key_len,
-                buf_filetype(dials->client_key, dials->client_key_len));
-        if (rc != WOLFSSL_SUCCESS) {
-            wolfSSL_CTX_free(ctx);
-            return WOLFCERT_ERR_TLS;
+        if (dials->client_key_handle != NULL) {
+            rc = use_key_handle(ctx, dials->client_key_handle);
+            if (rc != WOLFCERT_OK) {
+                wolfSSL_CTX_free(ctx);
+                return rc;
+            }
+        }
+        else {
+            rc = wolfSSL_CTX_use_PrivateKey_buffer(ctx, dials->client_key,
+                    (long)dials->client_key_len,
+                    buf_filetype(dials->client_key, dials->client_key_len));
+            if (rc != WOLFSSL_SUCCESS) {
+                wolfSSL_CTX_free(ctx);
+                return WOLFCERT_ERR_TLS;
+            }
         }
     }
 
@@ -1354,6 +1393,7 @@ static int setup_tls(WolfCertConn* c, const WolfCertHttpRequest* req,
         .client_cert_len   = req->client_cert_len,
         .client_key        = req->client_key,
         .client_key_len    = req->client_key_len,
+        .client_key_handle = req->client_key_handle,
     };
 
     return setup_tls_ex(c, &dials, sni_host, out_ctx);
@@ -1661,6 +1701,7 @@ int wolfcert_http_session_open(const WolfCertHttpSessionCfg* cfg,
             .client_cert_len           = cfg->client_cert_len,
             .client_key                = cfg->client_key,
             .client_key_len            = cfg->client_key_len,
+            .client_key_handle         = cfg->client_key_handle,
             .allow_post_handshake_auth = cfg->allow_post_handshake_auth,
         };
 

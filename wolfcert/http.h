@@ -68,6 +68,10 @@ typedef struct {
     void*          heap;           /* NULL -> default */
 
     WolfCertTransport transport;
+
+    /* TLS client key as a handle; wins over client_key. Only a key with a
+     * key_id signs in its CryptoCb backend. */
+    const struct WolfCertKey* client_key_handle;
 } WolfCertHttpRequest;
 
 typedef struct {
@@ -128,6 +132,10 @@ typedef struct {
     void*          heap;
 
     WolfCertTransport transport;
+
+    /* TLS client key as a handle; wins over client_key. Only a key with a
+     * key_id signs in its CryptoCb backend. */
+    const struct WolfCertKey* client_key_handle;
 } WolfCertHttpSessionCfg;
 
 WOLFCERT_API int  wolfcert_http_session_open (const WolfCertHttpSessionCfg* cfg,

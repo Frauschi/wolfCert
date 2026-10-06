@@ -62,6 +62,7 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
     req->client_cert_len   = srv->client_cert_len;
     req->client_key        = srv->client_key;
     req->client_key_len    = srv->client_key_len;
+    req->client_key_handle = srv->client_key_handle;
     req->transport         = srv->transport;
 }
 
@@ -210,7 +211,7 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
                           const char* suffix,
                           const uint8_t* csr_der, size_t csr_der_len,
                           const uint8_t* renew_cert_pem, size_t renew_cert_len,
-                          const uint8_t* renew_key_pem,  size_t renew_key_len,
+                          const WolfCertKey* renew_key,
                           WolfCertEstResult* out)
 {
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
@@ -254,8 +255,9 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
     if (renew_cert_pem != NULL) {
         req.client_cert     = renew_cert_pem;
         req.client_cert_len = renew_cert_len;
-        req.client_key      = renew_key_pem;
-        req.client_key_len  = renew_key_len;
+        req.client_key        = NULL;
+        req.client_key_len    = 0;
+        req.client_key_handle = renew_key;
     }
 
     WolfCertHttpResponse resp = { 0 };
@@ -311,7 +313,7 @@ int wolfcert_est_simple_enroll_ex(const WolfCertServerCfg* srv,
         return WOLFCERT_ERR_BAD_ARG;
 
     return post_enroll_ex(srv, "simpleenroll", csr_der, csr_der_len,
-                          NULL, 0, NULL, 0, out);
+                          NULL, 0, NULL, out);
 }
 
 int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
@@ -329,18 +331,8 @@ int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
         csr_der == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    WolfCertBuffer key_pem = { 0 };
-    int rc = wolfcert_key_to_pem(current_key, &key_pem);
-    if (rc != WOLFCERT_OK)
-        return rc;
-
-    rc = post_enroll_ex(srv, "simplereenroll", csr_der, csr_der_len,
-                        current_cert, current_cert_len,
-                        key_pem.data, key_pem.len, out);
-
-    wc_ForceZero(key_pem.data, (word32)key_pem.len);
-    wolfcert_buffer_free(&key_pem);
-    return rc;
+    return post_enroll_ex(srv, "simplereenroll", csr_der, csr_der_len,
+                          current_cert, current_cert_len, current_key, out);
 }
 
 int wolfcert_est_simple_enroll(const WolfCertServerCfg* srv,
@@ -352,7 +344,7 @@ int wolfcert_est_simple_enroll(const WolfCertServerCfg* srv,
 
     WolfCertEstResult r = { 0 };
     int rc = post_enroll_ex(srv, "simpleenroll", csr_der, csr_der_len,
-                            NULL, 0, NULL, 0, &r);
+                            NULL, 0, NULL, &r);
     return est_result_flatten(rc, &r, out_cert_pem);
 }
 
@@ -482,6 +474,7 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
         .client_cert_len           = srv->client_cert_len,
         .client_key                = srv->client_key,
         .client_key_len            = srv->client_key_len,
+        .client_key_handle         = srv->client_key_handle,
         .allow_post_handshake_auth = srv->proto_opts.est.allow_post_handshake_auth,
         .nonblocking               = nonblocking,
         .transport                 = srv->transport,

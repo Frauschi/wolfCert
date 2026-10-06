@@ -303,6 +303,11 @@ typedef struct {
     void*            heap;
 
     WolfCertTransport transport;
+
+    /* mTLS key as a handle, used instead of `client_key` when set. A key with
+     * a key_id signs in its CryptoCb backend; any other key signs the
+     * handshake in software, whatever its dev_id. */
+    const struct WolfCertKey* client_key_handle;
 } WolfCertServerCfg;
 
 /* A caller-owned byte buffer produced by the library. Free with
