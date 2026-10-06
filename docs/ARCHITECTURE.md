@@ -316,29 +316,53 @@ hosts.
 ### 4.2 CryptoCb offload (TPM / HSM / PKCS#11 / custom)
 
 wolfCert uses wolfSSL's CryptoCb `devId` as an opaque token. The application
-registers the backend; wolfCert threads the devId through every crypto call:
+registers the backend; wolfCert threads the devId into every key it creates:
 
 ```c
 /* Application startup: register the CryptoCb with wolfSSL. */
 wolfCrypt_CryptoCb_RegisterDevice(MY_DEVID, my_callback, my_ctx);
 
-/* Generate a key that lives behind the CryptoCb. */
+/* Generate a key inside the backend, under an id the backend defines. */
+static const uint8_t id[] = { 0x01, 0x80, 0x00, 0x01 };
 WolfCertKeyCfg cfg = {
-    .type      = WOLFCERT_KEY_ECC,
-    .param     = 256,
-    .dev_id    = MY_DEVID,
-    .key_label = "tpm:/handles/0x01800001",  /* optional */
+    .type       = WOLFCERT_KEY_ECC,
+    .param      = 256,
+    .dev_id     = MY_DEVID,
+    .key_id     = id,
+    .key_id_len = sizeof(id),
 };
 WolfCertKey* key;
 wolfcert_key_generate(&cfg, &key);
 ```
 
-From there, every wolfSSL crypto call on the key — CSR signing, TLS handshake
-client-auth, SCEP pkiMessage signing — routes through `my_callback`. Pass
-`WOLFCERT_DEVID_SOFTWARE` (`-1`) to force software operation. CryptoCb-resident
-keys typically can't be exported in PEM, so `wolfcert_key_to_pem` will fail;
-persist the key by its `key_label` instead and resolve it against your backend
-on the next boot. See `examples/enroll_cryptocb.c` for a full example.
+The `key_id` bytes are opaque to wolfCert. They reach the backend in the
+wolfCrypt key's `id` field, the same way wolfPKCS11, wolfHSM and the hardware
+ports name their keys, and the backend decides what they mean (a PKCS#11
+`CKA_ID`, a TPM handle, a key-store slot). The backend generates the key there
+and returns only its public half.
+
+From there, every private-key operation on the key routes through
+`my_callback`: CSR signing, and TLS client authentication when the key is set
+as `WolfCertServerCfg.client_key_handle` or used for EST `/simplereenroll`.
+wolfSSL also hands the backend public-key operations on that id, such as the
+check of its own RSA signature in TLS, so the backend must serve those too.
+A key with a `dev_id` but no `key_id` signs its CSR through the callback, but
+TLS client authentication exports it and signs in software. Pass
+`WOLFCERT_DEVID_SOFTWARE` (`-1`) to force software operation.
+
+A key with a `key_id` never leaves the backend: `wolfcert_key_to_pem` and
+`wolfcert_key_to_der` fail with `WOLFCERT_ERR_UNSUPPORTED`. Persist the id and
+the issued certificate instead, and on the next boot rebuild the handle with
+`wolfcert_key_from_id(&cfg, cert, cert_len, &key)`; the certificate supplies
+the public half, which a backend need not be able to return.
+`wolfcert_key_public_to_der` exports that public half on its own.
+
+Ed25519 and Ed448 keys cannot take a `key_id`, since wolfSSL has no id-based
+init for them. ML-DSA keys take one through `wc_MlDsaKey_InitId`, but no
+backend has been tested with an ML-DSA key yet. SCEP does not support a
+`key_id` key yet: its PKCS#7 signing and decryption take the private key as
+DER, so the SCEP calls return `WOLFCERT_ERR_UNSUPPORTED`. See
+`examples/enroll_cryptocb.c` for the registration pattern.
 
 ### 4.3 Non-blocking I/O in a caller-owned event loop
 
@@ -525,7 +549,8 @@ wolfcert_set_log_cb(my_log, NULL);
 /* 2. Key generation (stays in hardware) */
 WolfCertKey* key;
 WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
-                        .dev_id = MY_DEVID };
+                        .dev_id = MY_DEVID,
+                        .key_id = my_key_id, .key_id_len = my_key_id_len };
 wolfcert_key_generate(&kcfg, &key);
 
 /* 3. CSR build */
@@ -554,7 +579,7 @@ wolfcert_est_session_close(s);
 
 /* 5. Persist to flash through our storage backend */
 wolfcert_store_write_cert(&flash_ops, "device.crt", cert.data, cert.len);
-/* key stays behind the CryptoCb; persist its label instead */
+/* key stays behind the CryptoCb; wolfcert_key_from_id rebuilds the handle */
 
 /* 6. Shutdown */
 wolfcert_key_free(key);

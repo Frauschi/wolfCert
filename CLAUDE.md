@@ -156,7 +156,9 @@ Minimal orientation:
 - **CryptoCb devId, never direct registration.** wolfCert never calls
   `wolfCrypt_CryptoCb_RegisterDevice`. The application registers its
   backend and passes the resulting `dev_id` via `WolfCertKeyCfg.dev_id`;
-  wolfCert threads it into every `wc_*_init_ex` call.
+  wolfCert threads it into every `wc_*_init_ex` call. A backend-resident key
+  is named by `WolfCertKeyCfg.key_id` (`wc_*_init_id`), never by a label, and
+  is never exported.
 - **Error codes are small and closed.** See `wolfcert/errors.h`.
   Extended per-thread diagnostics live behind
   `wolfcert_last_error_message()` / `wolfcert_last_wolfssl_err()`. Use
