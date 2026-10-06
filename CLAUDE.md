@@ -154,7 +154,7 @@ Minimal orientation:
   or via a config struct - an optional `heap` field; fall back to
   `wolfcert_default_heap()` when it's NULL.
 - **CryptoCb devId, never direct registration.** wolfCert never calls
-  `wolfCrypt_CryptoCb_RegisterDevice`. The application registers its
+  `wc_CryptoCb_RegisterDevice`. The application registers its
   backend and passes the resulting `dev_id` via `WolfCertKeyCfg.dev_id`;
   wolfCert threads it into every `wc_*_init_ex` call.
 - **Error codes are small and closed.** See `wolfcert/errors.h`.

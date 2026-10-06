@@ -244,7 +244,10 @@ EXTRA_DIST = \
     README.md           \
     LICENSE             \
     docs/ARCHITECTURE.md \
+    docs/CI.md          \
     docs/EMBEDDED.md    \
+    docs/INTEROP.md     \
+    docs/MIGRATING-FROM-WOLFSCEP.md \
     autogen.sh          \
     CMakeLists.txt      \
     wolfcert/options.h.in \
