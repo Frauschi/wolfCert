@@ -84,6 +84,13 @@ typedef enum {
 /* Matches wolfSSL's ECC_MAX_ID_LEN / RSA_MAX_ID_LEN. */
 #define WOLFCERT_KEY_ID_MAX_LEN 32
 
+/* What a TLS client_key holds and where its operations run. */
+typedef enum {
+    WOLFCERT_CLIENT_KEY_BUFFER     = 0, /* PEM or DER, in software */
+    WOLFCERT_CLIENT_KEY_BUFFER_DEV = 1, /* PEM or DER, on client_key_dev_id */
+    WOLFCERT_CLIENT_KEY_ID         = 2  /* key id held by client_key_dev_id */
+} WolfCertClientKeySrc;
+
 typedef struct {
     WolfCertKeyType type;
     int             param;       /* RSA 2048/3072/4096 or ECC 256/384/521 bits */
@@ -239,6 +246,11 @@ typedef struct {
     void*            heap;
 
     WolfCertTransport transport;
+
+    /* What client_key holds, and the CryptoCb device for the _DEV and _ID
+     * sources, which need client_cert and client_key set. */
+    WolfCertClientKeySrc client_key_src;
+    int                  client_key_dev_id;
 } WolfCertServerCfg;
 
 /* Caller-owned byte buffer filled by the library. wolfcert_buffer_free()

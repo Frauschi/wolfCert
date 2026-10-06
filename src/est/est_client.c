@@ -62,6 +62,8 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
     req->client_cert_len   = srv->client_cert_len;
     req->client_key        = srv->client_key;
     req->client_key_len    = srv->client_key_len;
+    req->client_key_src    = srv->client_key_src;
+    req->client_key_dev_id = srv->client_key_dev_id;
     req->transport         = srv->transport;
 }
 
@@ -196,7 +198,9 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
                           const char* suffix,
                           const uint8_t* csr_der, size_t csr_der_len,
                           const uint8_t* renew_cert_pem, size_t renew_cert_len,
-                          const uint8_t* renew_key_pem,  size_t renew_key_len,
+                          const uint8_t* renew_key, size_t renew_key_len,
+                          WolfCertClientKeySrc renew_key_src,
+                          int renew_key_dev_id,
                           WolfCertEstResult* out)
 {
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
@@ -234,8 +238,10 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
     if (renew_cert_pem != NULL) {
         req.client_cert     = renew_cert_pem;
         req.client_cert_len = renew_cert_len;
-        req.client_key      = renew_key_pem;
-        req.client_key_len  = renew_key_len;
+        req.client_key        = renew_key;
+        req.client_key_len    = renew_key_len;
+        req.client_key_src    = renew_key_src;
+        req.client_key_dev_id = renew_key_dev_id;
     }
 
     WolfCertHttpResponse resp = { 0 };
@@ -291,7 +297,7 @@ int wolfcert_est_simple_enroll_ex(const WolfCertServerCfg* srv,
         return WOLFCERT_ERR_BAD_ARG;
 
     return post_enroll_ex(srv, "simpleenroll", csr_der, csr_der_len,
-                          NULL, 0, NULL, 0, out);
+                          NULL, 0, NULL, 0, WOLFCERT_CLIENT_KEY_BUFFER, 0, out);
 }
 
 int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
@@ -309,17 +315,29 @@ int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
         csr_der == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    WolfCertBuffer key_pem = { 0 };
-    int rc = wolfcert_key_to_pem(current_key, &key_pem);
-    if (rc != WOLFCERT_OK)
-        return rc;
+    WolfCertBuffer key_der = { 0 };
+    const uint8_t* key = current_key->id;
+    size_t key_len = current_key->id_len;
+    WolfCertClientKeySrc src = WOLFCERT_CLIENT_KEY_ID;
+    if (key_len == 0) {
+        int rc = wolfcert_key_to_der(current_key, &key_der);
+        if (rc != WOLFCERT_OK)
+            return rc;
+        key = key_der.data;
+        key_len = key_der.len;
+#ifdef WOLF_CRYPTO_CB
+        if (wolfcert_devid_is_cb(current_key->dev_id))
+            src = WOLFCERT_CLIENT_KEY_BUFFER_DEV;
+        else
+#endif
+            src = WOLFCERT_CLIENT_KEY_BUFFER;
+    }
 
-    rc = post_enroll_ex(srv, "simplereenroll", csr_der, csr_der_len,
-                        current_cert, current_cert_len,
-                        key_pem.data, key_pem.len, out);
+    int rc = post_enroll_ex(srv, "simplereenroll", csr_der, csr_der_len,
+                            current_cert, current_cert_len, key, key_len, src,
+                            current_key->dev_id, out);
 
-    wc_ForceZero(key_pem.data, (word32)key_pem.len);
-    wolfcert_buffer_free(&key_pem);
+    wolfcert_buffer_free_secure(&key_der);
     return rc;
 }
 
@@ -332,7 +350,7 @@ int wolfcert_est_simple_enroll(const WolfCertServerCfg* srv,
 
     WolfCertEstResult r = { 0 };
     int rc = post_enroll_ex(srv, "simpleenroll", csr_der, csr_der_len,
-                            NULL, 0, NULL, 0, &r);
+                            NULL, 0, NULL, 0, WOLFCERT_CLIENT_KEY_BUFFER, 0, &r);
     return est_result_flatten(rc, &r, out_cert_pem);
 }
 
@@ -449,6 +467,8 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
         .client_cert_len           = srv->client_cert_len,
         .client_key                = srv->client_key,
         .client_key_len            = srv->client_key_len,
+        .client_key_src            = srv->client_key_src,
+        .client_key_dev_id         = srv->client_key_dev_id,
         .allow_post_handshake_auth = srv->proto_opts.est.allow_post_handshake_auth,
         .nonblocking               = nonblocking,
         .transport                 = srv->transport,
