@@ -64,6 +64,17 @@ typedef struct WolfCertKeyAlg {
      * carries an unverified public half and must be freed. */
     int  (*pub_check) (struct WolfCertKey* key,
                        const uint8_t* pub, word32 pub_len);
+    /* Decode a SubjectPublicKeyInfo into the backing struct, for a key whose
+     * private half lives behind a key_id. NULL if the type cannot take one. */
+    int  (*pub_decode)(struct WolfCertKey* key,
+                       const uint8_t* der, word32 len);
+    /* Serialize the public key as a SubjectPublicKeyInfo. Same return
+     * convention as priv_to_der. */
+    int  (*pub_to_der)(const struct WolfCertKey* key,
+                       uint8_t* buf, word32 cap);
+    /* Non-zero if the private half sits in host memory. NULL if the type
+     * cannot take a key_id. */
+    int  (*host_priv) (const struct WolfCertKey* key);
     /* wc_*_free + free(key->impl). */
     void (*free_)     (struct WolfCertKey* key);
 } WolfCertKeyAlg;
@@ -73,5 +84,8 @@ const WolfCertKeyAlg* wolfcert_key_alg(WolfCertKeyType t);
 
 /* Iterate all registered algorithms (NULL-terminated). */
 const WolfCertKeyAlg* const* wolfcert_key_algs_all(void);
+
+/* Non-zero for an RSA modulus size wolfCert generates and accepts. */
+int wolfcert_rsa_bits_ok(int bits);
 
 #endif /* WOLFCERT_KEY_ALGS_H */

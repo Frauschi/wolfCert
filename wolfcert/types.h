@@ -97,12 +97,18 @@ typedef enum {
  * pure software operations. The library never registers a CryptoCb itself. */
 #define WOLFCERT_DEVID_SOFTWARE (-1)
 
+/* Matches wolfSSL's ECC_MAX_ID_LEN / RSA_MAX_ID_LEN. */
+#define WOLFCERT_KEY_ID_MAX_LEN 32
+
 typedef struct {
     WolfCertKeyType type;
     int             param;       /* RSA bits (2048/3072/4096) or ECC curve id */
     int             dev_id;      /* wolfSSL CryptoCb devId; -1 for software */
-    const char*     key_label;   /* optional backend identifier for persistent keys */
     void*           heap;        /* optional heap hint; NULL = default */
+    /* Backend key id, opaque to wolfCert; needs dev_id. Up to
+     * WOLFCERT_KEY_ID_MAX_LEN bytes. */
+    const uint8_t*  key_id;
+    size_t          key_id_len;
 } WolfCertKeyCfg;
 
 /* Called by wolfcert_csr_build() once the standard fields are set, with the

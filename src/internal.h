@@ -133,7 +133,8 @@ struct WolfCertKey {
     int             dev_id;
     int             curve_id;     /* ECC only */
     int             rsa_bits;     /* RSA only */
-    char*           label;
+    uint8_t         id[WOLFCERT_KEY_ID_MAX_LEN];
+    size_t          id_len;
     void*           heap;
     /* Backing wolfSSL key struct (RsaKey* / ecc_key* / ed25519_key* / ...).
      * Allocated + freed by the algorithm's dispatch entry. */
@@ -384,6 +385,11 @@ WOLFCERT_TEST_VIS int wolfcert_csr_build_ex(const WolfCertKey* key,
  * SEQUENCE tag (0x30) once any leading whitespace is skipped; PEM starts with
  * the "-----BEGIN" armor. Returns 1 if the buffer looks like DER, else 0. */
 WOLFCERT_TEST_VIS int wolfcert_buffer_is_der(const uint8_t* buf, size_t len);
+
+/* Private key DER of a software key; fails for a key with a key_id. The
+ * caller zeroizes and frees *out_der. */
+int wolfcert_key_export_der(const WolfCertKey* key, uint8_t** out_der,
+                            int* out_len, void* heap);
 
 /* Degenerate (certs-only) PKCS#7 helpers. */
 WOLFCERT_TEST_VIS int wolfcert_pkcs7_certs_to_pem(const uint8_t* p7_der, size_t p7_der_len,

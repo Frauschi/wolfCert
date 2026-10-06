@@ -114,6 +114,9 @@
 #ifndef WOLF_CRYPTO_CB
 #error "wolfSSL is missing WOLF_CRYPTO_CB; rebuild wolfSSL with --enable-cryptocb."
 #endif
+#ifndef WOLF_PRIVATE_KEY_ID
+#error "wolfSSL is missing WOLF_PRIVATE_KEY_ID; rebuild wolfSSL without NO_WOLF_PRIVATE_KEY_ID."
+#endif
 #ifndef WOLFSSL_BASE64_ENCODE
 #error "wolfSSL is missing WOLFSSL_BASE64_ENCODE; rebuild wolfSSL with --enable-base64encode."
 #endif
