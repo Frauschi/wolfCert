@@ -242,6 +242,8 @@ AM_TESTS_ENVIRONMENT = WOLFCERT_CLI=$(abs_builddir)/wolfcert-client; \
 
 EXTRA_DIST = \
     README.md           \
+    AGENTS.md           \
+    CLAUDE.md           \
     LICENSE             \
     docs/ARCHITECTURE.md \
     docs/CI.md          \

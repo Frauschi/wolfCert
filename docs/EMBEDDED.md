@@ -149,7 +149,7 @@ Trade-offs:
   fails with `WOLFCERT_ERR_UNSUPPORTED`.
 - Disabling `WOLFSSL_CERT_NAME_ALL` and/or `WOLFSSL_CERT_EXT` in wolfSSL
   removes the less-common `CertName` fields entirely - but wolfCert's
-  build requires both (see `CLAUDE.md` / `CMakeLists.txt`), so prefer
+  build requires both (see `AGENTS.md` / `CMakeLists.txt`), so prefer
   shrinking `WC_CTC_NAME_SIZE` over dropping these.
 
 ## 2. wolfCert HTTP stack buffers
@@ -256,7 +256,7 @@ wolfCert holds no locks of its own (init/cleanup delegate refcounting to
 Strip unused key algorithms and protocols at configure time so their code
 and tables drop out entirely - see the `WOLFCERT_HAVE_*` /
 `WOLFCERT_ENABLE_*` options in `CMakeLists.txt` / `configure.ac` and the
-gating discussion in `CLAUDE.md`. SCEP is RSA-only; if you only need EST
+gating discussion in `AGENTS.md`. SCEP is RSA-only; if you only need EST
 with ECC or a PQC algorithm, disabling SCEP avoids pulling in RSA.
 
 ## 7. Targets without BSD sockets or a filesystem

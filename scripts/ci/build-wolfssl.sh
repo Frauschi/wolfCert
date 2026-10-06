@@ -26,7 +26,7 @@ WOLFSSL_REPO="${WOLFSSL_REPO:-https://github.com/wolfSSL/wolfssl.git}"
 # Config-name -> wolfSSL ./configure argument array.
 #
 # The canonical base (satisfies every hard wolfCert requirement plus all
-# optional key algorithms) mirrors README.md / CLAUDE.md. Each variant layers
+# optional key algorithms) mirrors README.md / AGENTS.md. Each variant layers
 # a delta onto that base. VAR=VALUE assignments are passed to configure as
 # single argv elements so embedded spaces survive word-splitting.
 # ----------------------------------------------------------------------------
