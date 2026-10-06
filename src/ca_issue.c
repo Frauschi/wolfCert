@@ -743,6 +743,24 @@ WOLFCERT_TEST_VIS int wolfcert_copy_csr_subject(const DecodedCert* dc, Cert* nc)
 #undef COPY_SUBJ_E
 #undef COPY_SUBJ
 
+/* Parse the PKCS#10 request and check its self-signature. */
+int wolfcert_csr_verify(const uint8_t* csr_der, size_t csr_len, void* heap)
+{
+    DecodedCert dc;
+    int rc;
+
+    wc_InitDecodedCert(&dc, (byte*)csr_der, (word32)csr_len, heap);
+    rc = wc_ParseCert(&dc, CERTREQ_TYPE, VERIFY, NULL);
+    wc_FreeDecodedCert(&dc);
+    if (rc == MEMORY_E)
+        return WOLFCERT_ERR_WC(rc, "ca", "ParseCert(CSR)");
+    if (rc != 0)
+        return WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "ca",
+            "CSR does not parse or verify (%d)", rc);
+
+    return WOLFCERT_OK;
+}
+
 int wolfcert_ca_issue(WolfCertCa* ca,
                       const uint8_t* csr_der, size_t csr_len,
                       uint8_t** out_cert, size_t* out_len)
@@ -755,7 +773,7 @@ int wolfcert_ca_issue(WolfCertCa* ca,
     const WolfCertKeyAlg* ca_alg;
     uint8_t* der = NULL;
     void* heap;
-    size_t der_cap = 8192;
+    size_t der_cap = 0;
     int body_sz = 0;
     int sig_sz = 0;
     int rng_ok = 0;
@@ -808,6 +826,9 @@ int wolfcert_ca_issue(WolfCertCa* ca,
     }
 
     if (rc == 0) {
+        /* The CSR bounds the subject, key and SAN, the CA cert the issuer, and
+         * the CA key's DER size hint its signature. */
+        der_cap = csr_len + ca->cert_der_len + ca_alg->der_cap_hint + 1024;
         der = (uint8_t*)WOLFCERT_XMALLOC(der_cap, heap);
         if (der == NULL)
             rc = WOLFCERT_ERR_MEMORY;

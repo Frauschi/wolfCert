@@ -36,9 +36,11 @@
 #include <wolfcert/wolfcert.h>
 #include <wolfcert/scep.h>
 #include <wolfcert/server.h>
+#include "internal.h"
 
 #include <wolfssl/ssl.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
+#include <wolfssl/wolfcrypt/rsa.h>
 
 #include <pthread.h>
 #include <stdio.h>
@@ -57,6 +59,90 @@ static void* server_thread(void* arg)
 {
     wolfcert_server_run((WolfCertServer*)arg);
     return NULL;
+}
+
+/* POST a pkiMessage of type `mt` for `tid`, signed by `dk`, with `content`
+ * as its signed content, and return the CertRep's pkiStatus and failInfo. */
+static int post_signed(const char* url, WolfCertKey* dk,
+                       const WolfCertBuffer* csr, const char* mt,
+                       const uint8_t* tid, size_t tid_len,
+                       const uint8_t* content, size_t content_len,
+                       char** out_status, char** out_fail_info)
+{
+    uint8_t* signer = NULL;
+    size_t signer_len = 0;
+    uint8_t key_der[4096];
+    int key_len;
+    uint8_t snonce[16];
+    char pki_url[160];
+    WolfCertScepAttrs attrs;
+    WolfCertBuffer pki = { 0 };
+    WolfCertBuffer env = { 0 };
+    WolfCertHttpResponse resp = { 0 };
+
+    REQUIRE(wolfcert_scep_self_signed_rsa((RsaKey*)dk->impl, csr->data,
+                                          csr->len, &signer, &signer_len,
+                                          NULL) == WOLFCERT_OK);
+    key_len = wc_RsaKeyToDer((RsaKey*)dk->impl, key_der, sizeof(key_der));
+    REQUIRE(key_len > 0);
+
+    memset(snonce, 0xC3, sizeof(snonce));
+    memset(&attrs, 0, sizeof(attrs));
+    attrs.transaction_id     = tid;
+    attrs.transaction_id_len = tid_len;
+    attrs.sender_nonce       = snonce;
+    attrs.sender_nonce_len   = sizeof(snonce);
+    attrs.message_type       = mt;
+    REQUIRE(wolfcert_scep_build_pki_message(content, content_len,
+                                            signer, signer_len,
+                                            key_der, (size_t)key_len, 0,
+                                            &attrs, &pki, NULL) == WOLFCERT_OK);
+
+    snprintf(pki_url, sizeof(pki_url), "%s?operation=PKIOperation", url);
+    WolfCertHttpRequest req = { .method = "POST", .url = pki_url,
+                                .content_type = "application/x-pki-message",
+                                .body = pki.data, .body_len = pki.len };
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_OK);
+    REQUIRE(resp.status_code == 200);
+    REQUIRE(wolfcert_scep_parse_pki_message(resp.body, resp.body_len, &env,
+                NULL, NULL, NULL, NULL, NULL, NULL, NULL, out_status,
+                NULL, NULL, out_fail_info, NULL) == WOLFCERT_OK);
+
+    wolfcert_buffer_free(&env);
+    wolfcert_http_response_free(&resp);
+    wolfcert_buffer_free(&pki);
+    wc_ForceZero(key_der, sizeof(key_der));
+    WOLFCERT_XFREE(signer, NULL);
+    return 0;
+}
+
+/* Sign with dk a CSR that verifies but carries a directoryName SAN, which the
+ * CA refuses to issue. Returns the DER length, or <= 0 on error. */
+static int dir_san_csr(WolfCertKey* dk, uint8_t* der, int der_sz)
+{
+    static const uint8_t dir_san[] = {
+        0x30, 0x12,
+        0xa4, 0x10, 0x30, 0x0e, 0x31, 0x0c, 0x30, 0x0a, 0x06, 0x03, 0x55, 0x04,
+        0x03, 0x0c, 0x03, 'd', 'i', 'r'
+    };
+    Cert req;
+    WC_RNG rng;
+    int sz = -1;
+
+    if (wc_InitRng(&rng) != 0)
+        return -1;
+    if (wc_InitCert(&req) == 0) {
+        strncpy(req.subject.commonName, "device-poll-dir", CTC_NAME_SIZE - 1);
+        memcpy(req.altNames, dir_san, sizeof(dir_san));
+        req.altNamesSz = (int)sizeof(dir_san);
+        req.sigType = CTC_SHA256wRSA;
+        if (wc_MakeCertReq(&req, der, (word32)der_sz, (RsaKey*)dk->impl,
+                           NULL) > 0)
+            sz = wc_SignCert(req.bodySz, req.sigType, der, (word32)der_sz,
+                             (RsaKey*)dk->impl, NULL, &rng);
+    }
+    wc_FreeRng(&rng);
+    return sz;
 }
 
 static int poll_path(WolfCertServer* s)
@@ -102,6 +188,103 @@ static int poll_path(WolfCertServer* s)
     REQUIRE(legacy_rc == WOLFCERT_ERR_PENDING);
     wolfcert_buffer_free(&legacy_out);
 
+    /* A poll whose signed content is absent or not an envelope must be
+     * refused, and must leave the pending entry for the real poll below. */
+    static const uint8_t not_env[] = { 0x04, 0x03, 'a', 'b', 'c' };
+    const uint8_t* bad_content[2]  = { NULL, not_env };
+    size_t         bad_len[2]      = { 0, sizeof(not_env) };
+    for (int i = 0; i < 2; i++) {
+        char* status = NULL;
+        char* fail_info = NULL;
+        REQUIRE(post_signed(url, dk, &csr, "20", r1.transaction_id,
+                            r1.transaction_id_len, bad_content[i],
+                            bad_len[i], &status, &fail_info) == 0);
+        int refused = status != NULL && strcmp(status, "2") == 0 &&
+                      fail_info != NULL && strcmp(fail_info, "2") == 0;
+        WOLFCERT_XFREE(status, NULL);
+        WOLFCERT_XFREE(fail_info, NULL);
+        REQUIRE(refused);
+    }
+
+    /* A valid poll signed by another key must not release the entry either. */
+    WolfCertKey* other = NULL;
+    WolfCertBuffer other_csr = { 0 };
+    WolfCertScepResult rx = { 0 };
+    REQUIRE(wolfcert_key_generate(&kcfg, &other) == WOLFCERT_OK);
+    REQUIRE(wolfcert_csr_build(other, &meta, &other_csr) == WOLFCERT_OK);
+    rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
+                                        ca_der->buffer, ca_der->length,
+                                        NULL, 0,
+                                        other, other_csr.data, other_csr.len,
+                                        r1.transaction_id, r1.transaction_id_len,
+                                        &rx);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(rx.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE(rx.fail_info == 4);
+    wolfcert_scep_result_free(&rx);
+
+    /* Nor may another key's PKCSReq take over the parked transactionID. */
+    WolfCertBuffer other_env = { 0 };
+    char* tk_status = NULL;
+    char* tk_fail_info = NULL;
+    REQUIRE(wolfcert_scep_envelop(ca_der->buffer, ca_der->length,
+                                  other_csr.data, other_csr.len, AES128CBCb,
+                                  &other_env, NULL) == WOLFCERT_OK);
+    REQUIRE(post_signed(url, other, &other_csr, "19", r1.transaction_id,
+                        r1.transaction_id_len, other_env.data, other_env.len,
+                        &tk_status, &tk_fail_info) == 0);
+    int taken = !(tk_status != NULL && strcmp(tk_status, "2") == 0 &&
+                  tk_fail_info != NULL && strcmp(tk_fail_info, "2") == 0);
+    WOLFCERT_XFREE(tk_status, NULL);
+    WOLFCERT_XFREE(tk_fail_info, NULL);
+    wolfcert_buffer_free(&other_env);
+    REQUIRE(!taken);
+
+    /* A CSR with a broken signature is refused on the PKCSReq, not parked. */
+    other_csr.data[other_csr.len - 1] ^= 0x01;
+    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   other, other_csr.data, other_csr.len, &rx);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(rx.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE(rx.fail_info == 2);
+    other_csr.data[other_csr.len - 1] ^= 0x01;
+    WolfCertScepResult ry = { 0 };
+    rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
+                                        ca_der->buffer, ca_der->length,
+                                        NULL, 0,
+                                        other, other_csr.data, other_csr.len,
+                                        rx.transaction_id, rx.transaction_id_len,
+                                        &ry);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(ry.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE(ry.fail_info == 4);
+    wolfcert_scep_result_free(&rx);
+    wolfcert_scep_result_free(&ry);
+    wolfcert_buffer_free(&other_csr);
+    wolfcert_key_free(other);
+
+    /* Out of memory in the signer check or the issuance answers 500 and
+     * keeps the entry. */
+    static const int oom_at[2] = { 3 /* signer check */, 1 /* issuance */ };
+    for (int i = 0; i < 2; i++) {
+        WolfCertScepResult rm = { 0 };
+        wolfcert_scep_server_set_oom_fault(s, oom_at[i]);
+        rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                            ca_der->buffer, ca_der->length,
+                                            ca_der->buffer, ca_der->length,
+                                            NULL, 0,
+                                            dk, csr.data, csr.len,
+                                            r1.transaction_id,
+                                            r1.transaction_id_len, &rm);
+        wolfcert_scep_server_set_oom_fault(s, 0);
+        REQUIRE(rc != WOLFCERT_OK);
+        wolfcert_scep_result_free(&rm);
+    }
+
     /* Step 2: GetCertInitial with the same transactionID -> SUCCESS.
      * signer_cert=NULL so the client regenerates the transient
      * "SCEP Enrollee" self-signed cert that PKCSReq used. */
@@ -133,6 +316,76 @@ static int poll_path(WolfCertServer* s)
     wc_FreeDer(&issued_der);
     wolfSSL_CertManagerFree(cm);
 
+    /* Out of memory after issuing must not leave the entry to issue again. */
+    WolfCertScepResult r7 = { 0 };
+    WolfCertScepResult r8 = { 0 };
+    WolfCertScepResult r9 = { 0 };
+    wolfcert_scep_server_set_oom_fault(s, 3);
+    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   dk, csr.data, csr.len, &r7);
+    wolfcert_scep_server_set_oom_fault(s, 0);
+    REQUIRE(rc != WOLFCERT_OK);
+    wolfcert_scep_result_free(&r7);
+    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   dk, csr.data, csr.len, &r7);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(r7.status == WOLFCERT_SCEP_STATUS_PENDING);
+    wolfcert_scep_server_set_oom_fault(s, 2);
+    rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
+                                        ca_der->buffer, ca_der->length,
+                                        NULL, 0,
+                                        dk, csr.data, csr.len,
+                                        r7.transaction_id, r7.transaction_id_len,
+                                        &r8);
+    wolfcert_scep_server_set_oom_fault(s, 0);
+    REQUIRE(rc != WOLFCERT_OK);
+    rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
+                                        ca_der->buffer, ca_der->length,
+                                        NULL, 0,
+                                        dk, csr.data, csr.len,
+                                        r7.transaction_id, r7.transaction_id_len,
+                                        &r9);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(r9.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE(r9.fail_info == 4);
+    wolfcert_scep_result_free(&r7);
+    wolfcert_scep_result_free(&r8);
+    wolfcert_scep_result_free(&r9);
+
+    /* A parked CSR the CA refuses gets badRequest on its first poll, which
+     * drains it, so the next poll gets badCertId. */
+    uint8_t dir_csr[4096];
+    int dir_csr_len = dir_san_csr(dk, dir_csr, (int)sizeof(dir_csr));
+    WolfCertScepResult rd = { 0 };
+    REQUIRE(dir_csr_len > 0);
+    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   dk, dir_csr, (size_t)dir_csr_len, &rd);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(rd.status == WOLFCERT_SCEP_STATUS_PENDING);
+    for (int i = 0; i < 2; i++) {
+        WolfCertScepResult rp = { 0 };
+        rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                            ca_der->buffer, ca_der->length,
+                                            ca_der->buffer, ca_der->length,
+                                            NULL, 0,
+                                            dk, dir_csr, (size_t)dir_csr_len,
+                                            rd.transaction_id,
+                                            rd.transaction_id_len, &rp);
+        REQUIRE(rc == WOLFCERT_OK);
+        REQUIRE(rp.status == WOLFCERT_SCEP_STATUS_FAILURE);
+        REQUIRE(rp.fail_info == (i == 0 ? 2 : 4));
+        wolfcert_scep_result_free(&rp);
+    }
+    wolfcert_scep_result_free(&rd);
+
     /* Step 3: Polling an unknown transactionID -> FAILURE. */
     uint8_t bogus_tid[32];
     memset(bogus_tid, 0x5A, sizeof(bogus_tid));
@@ -154,7 +407,7 @@ static int poll_path(WolfCertServer* s)
      * it, so a value far longer than the generated 32-hex one is sent on the
      * wire (FAILURE/badCertId again) instead of being rejected up front. */
     uint8_t long_tid[200];
-    memset(long_tid, 0x11, sizeof(long_tid));
+    memset(long_tid, 'A', sizeof(long_tid));
     WolfCertScepResult r4 = { 0 };
     rc = wolfcert_scep_get_cert_initial(&cli, &caps,
                                         ca_der->buffer, ca_der->length,
@@ -166,6 +419,38 @@ static int poll_path(WolfCertServer* s)
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(r4.status == WOLFCERT_SCEP_STATUS_FAILURE);
     REQUIRE(r4.fail_info == 4);
+
+    /* Step 5: '_', '@', control bytes and bytes above 0x7F are outside the
+     * PrintableString set; its punctuation goes on the wire. */
+    static const uint8_t ok_tid[] = { 'A', '-', ':', '.', ' ', '\'', '?' };
+    WolfCertScepResult r6 = { 0 };
+    rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                        ca_der->buffer, ca_der->length,
+                                        ca_der->buffer, ca_der->length,
+                                        NULL, 0,
+                                        dk, csr.data, csr.len,
+                                        ok_tid, sizeof(ok_tid), &r6);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(r6.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE(r6.fail_info == 4);
+    wolfcert_scep_result_free(&r6);
+
+    static const uint8_t bad_tid[][4] = {
+        { 'A', 'B', '_', 'C' }, { 'A', 'B', 0x11, 'C' }, { 'A', 'B', 0x00, 'C' },
+        { 'A', 'B', '@', 'C' }, { 'A', 'B', 0x80, 'C' }
+    };
+    for (size_t i = 0; i < sizeof(bad_tid) / sizeof(bad_tid[0]); i++) {
+        WolfCertScepResult r5 = { 0 };
+        rc = wolfcert_scep_get_cert_initial(&cli, &caps,
+                                            ca_der->buffer, ca_der->length,
+                                            ca_der->buffer, ca_der->length,
+                                            NULL, 0,
+                                            dk, csr.data, csr.len,
+                                            bad_tid[i], sizeof(bad_tid[i]),
+                                            &r5);
+        wolfcert_scep_result_free(&r5);
+        REQUIRE(rc == WOLFCERT_ERR_BAD_ARG);
+    }
 
     wolfcert_scep_result_free(&r1);
     wolfcert_scep_result_free(&r2);

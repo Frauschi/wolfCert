@@ -164,8 +164,10 @@ what enables the post-handshake-auth bootstrap below.
 
 **Test server PHA mode.** `WolfCertServerCfgSrv.tls_post_handshake_auth`
 turns the in-tree server into the other end of shape 3. It needs
-`tls_client_ca_pem`; without it `wolfcert_server_start()` returns
-`WOLFCERT_ERR_BAD_ARG`. The CTX gets `WOLFSSL_VERIFY_POST_HANDSHAKE` and not
+`tls_client_ca_pem` and the EST protocol; without either
+`wolfcert_server_start()` returns `WOLFCERT_ERR_BAD_ARG`, since no other
+protocol requests the deferred certificate. The CTX gets
+`WOLFSSL_VERIFY_POST_HANDSHAKE` and not
 `FAIL_IF_NO_PEER_CERT`, so a TLS 1.3 handshake stays anonymous and a TLS 1.2
 client can still fetch `/cacerts`. A TLS 1.2 client is asked for its cert
 during the handshake, since TLS 1.2 has no PHA. On the first `/simpleenroll`
@@ -615,7 +617,9 @@ time `#error`s. See [`EMBEDDED.md`](EMBEDDED.md#configuring-wolfcert-without-its
 --enable-X" diagnostic if missing): `HAVE_PKCS7`, `WOLFSSL_CERT_GEN`,
 `WOLFSSL_CERT_REQ`, `WOLFSSL_CERT_EXT`, `WOLFSSL_KEY_GEN`, `WOLF_CRYPTO_CB`,
 `WOLFSSL_BASE64_ENCODE`, `WOLFSSL_ALT_NAMES`, `WOLFSSL_CERT_NAME_ALL`. A
-`NO_RSA` build hard-fails unless SCEP is disabled. CMake and autoconf also
+`NO_RSA` build hard-fails unless SCEP is disabled, and so does one without
+AES-128-CBC encrypt and decrypt (`NO_AES_128`, `NO_AES_CBC` or
+`NO_AES_DECRYPT`), which RFC 8894 makes mandatory. CMake and autoconf also
 link-probe the `WOLFSSL_ASN_API` helpers wolfCert calls (`wc_SetDNSEntry`,
 `wc_SetAltNamesFromList`, `FreeAltNames`, `SetLength`, `GetASNTag`,
 `GetLength`); a shared libwolfssl

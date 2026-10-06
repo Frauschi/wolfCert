@@ -625,7 +625,7 @@ static int issue_with_san(WolfCertStoreOps* store, const uint8_t* san,
     WC_RNG rng;
     test_signkey key;
     Cert req;
-    uint8_t csr[4096];
+    uint8_t csr[CTC_MAX_ALT_SIZE + 4096];
     int csr_len;
 
     REQUIRE(wc_InitRng(&rng) == 0);
@@ -670,6 +670,8 @@ static int test_issued_san_verbatim(void)
     DecodedCert dc;
     const byte* got = NULL;
     word32 got_len = 0;
+    uint8_t big_san[10 * 1024];
+    size_t big_len = 4;
     int rc = -1;
 
     REQUIRE(store != NULL);
@@ -680,6 +682,28 @@ static int test_issued_san_verbatim(void)
     REQUIRE(issue_with_san(store, dir_san, sizeof(dir_san), &rc, &issued,
                            &issued_len) == 0);
     REQUIRE(rc == WOLFCERT_ERR_UNSUPPORTED);
+
+    /* More SAN than the issued cert's old fixed 8 KB buffer held, in few
+     * entries so a static-memory pool can parse it. */
+    while (big_len + 3 + 240 <= sizeof(big_san)) {
+        big_san[big_len] = 0x82;
+        big_san[big_len + 1] = 0x81;
+        big_san[big_len + 2] = 240;
+        memset(big_san + big_len + 3, 'a', 240);
+        big_san[big_len + 3 + 60] = '.';
+        big_san[big_len + 3 + 120] = '.';
+        big_san[big_len + 3 + 180] = '.';
+        big_len += 3 + 240;
+    }
+    big_san[0] = 0x30;
+    big_san[1] = 0x82;
+    big_san[2] = (uint8_t)((big_len - 4) >> 8);
+    big_san[3] = (uint8_t)(big_len - 4);
+    REQUIRE(issue_with_san(store, big_san, big_len, &rc, &issued,
+                           &issued_len) == 0);
+    REQUIRE(rc == WOLFCERT_OK);
+    WOLFCERT_XFREE(issued, NULL);
+    issued = NULL;
     REQUIRE(issue_with_san(store, san, sizeof(san), &rc, &issued,
                            &issued_len) == 0);
     wolfcert_store_memory_close(store);
@@ -913,6 +937,41 @@ static int test_leaf_ca_rejected(void)
 }
 #endif /* WOLFCERT_HAVE_ECC */
 
+static int test_bad_bind_host_rejected(void)
+{
+    static const char* const hosts[] = {
+        "localhost", "::1", "", "127.0.0.300", "127.0.0.1 "
+    };
+    WolfCertServerCfgSrv cfg;
+    WolfCertServer* srv = NULL;
+    WolfCertBuffer left = { 0 };
+    size_t i;
+
+    for (i = 0; i < sizeof(hosts) / sizeof(hosts[0]); i++) {
+        WolfCertStoreOps* mem = wolfcert_store_memory_open(NULL);
+        REQUIRE(mem != NULL);
+
+        ca_store_cfg(&cfg, mem);
+        cfg.bind_host = hosts[i];
+        REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_ERR_BAD_ARG);
+        REQUIRE(srv == NULL);
+        REQUIRE(mem->read(mem->ctx, "ca.cert.der", &left) ==
+                WOLFCERT_ERR_NOT_FOUND);
+        REQUIRE(mem->read(mem->ctx, "ca.key.der", &left) ==
+                WOLFCERT_ERR_NOT_FOUND);
+        wolfcert_store_memory_close(mem);
+    }
+
+    /* NULL binds every interface and must still start. */
+    ca_store_cfg(&cfg, NULL);
+    cfg.bind_host = NULL;
+    REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
+    REQUIRE(wolfcert_server_port(srv) != 0);
+    wolfcert_server_free(srv);
+
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(test_static_mem_init() == 0);
@@ -957,6 +1016,8 @@ int main(void)
         return 1;
 #endif
     if (test_ca_key_usage())
+        return 1;
+    if (test_bad_bind_host_rejected())
         return 1;
 
 #if CA_STORE_NEEDS_TLS
