@@ -17,8 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* For the POSIX file backend below. Must precede any system header, so it
- * cannot be gated on WOLFCERT_HAVE_POSIX_STORE; inert when that is off. */
+/* Precedes every system header, so not gated on WOLFCERT_HAVE_POSIX_STORE. */
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
 
@@ -37,7 +36,6 @@
 #include <unistd.h>
 #endif
 
-/* ================================================================== POSIX */
 #ifdef WOLFCERT_HAVE_POSIX_STORE
 
 typedef struct {
@@ -264,8 +262,6 @@ void wolfcert_store_posix_close(WolfCertStoreOps* ops)
 
 #endif /* WOLFCERT_HAVE_POSIX_STORE */
 
-/* ================================================================ memory */
-
 typedef struct MemEntry {
     char*             key;
     uint8_t*          data;
@@ -408,8 +404,6 @@ void wolfcert_store_memory_close(WolfCertStoreOps* ops)
     WOLFCERT_XFREE(ctx, ops->heap);
     WOLFCERT_XFREE(ops, ops->heap);
 }
-
-/* ================================================= high-level cert/key */
 
 int wolfcert_store_write_cert(WolfCertStoreOps* store, const char* key,
                               const uint8_t* cert, size_t len)

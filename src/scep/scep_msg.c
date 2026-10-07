@@ -17,9 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * SCEP pkiMessage build/parse helpers.
- */
+/* SCEP pkiMessage build and parse helpers. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -37,21 +35,12 @@
 
 #include <string.h>
 
-/* ---- SCEP OIDs & message types ------------------------------------------ */
-
 static const byte OID_MSG_TYPE[]    = { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x02 };
 static const byte OID_TRANS_ID[]    = { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x07 };
 static const byte OID_SENDER_NONCE[]= { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x05 };
 static const byte OID_RECIP_NONCE[] = { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x06 };
 static const byte OID_PKI_STATUS[]  = { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x03 };
 static const byte OID_FAIL_INFO[]   = { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x04 };
-
-/* ---- small DER helpers --------------------------------------------------
- *
- * Each writer takes the caller's buffer capacity and returns -1 instead of
- * overflowing. Keeping the bounds check in the writer (rather than in each
- * caller after the fact) makes scratch-buffer overflows impossible.
- */
 
 static int der_put_len(byte* out, size_t cap, size_t n)
 {
@@ -108,14 +97,8 @@ static int der_put_len(byte* out, size_t cap, size_t n)
     return 5;
 }
 
-/* Emit the raw AttributeValue - a bare PrintableString or OCTET STRING
- * with NO outer SET. wolfSSL's PKCS7 encoder wraps each attribute's
- * value in the CMS-mandated `SET OF AttributeValue` itself; pre-wrapping
- * here would land SET { SET { ... } } on the wire, which every other
- * RFC 8894 implementation rejects.
- *
- * Returns total bytes written, WOLFCERT_ERR_BAD_ARG if `v` is not a
- * PrintableString, or WOLFCERT_ERR_MEMORY if `cap` is too small. */
+/* Emits a bare AttributeValue with no outer SET; wolfSSL's PKCS7 encoder adds
+ * the SET OF itself, and peers reject a doubled SET. */
 static int enc_printable_n(const byte* v, size_t vl, byte* out, size_t cap)
 {
     if (!wolfcert_is_printable_string(v, vl))
@@ -138,8 +121,6 @@ static int enc_printable(const char* s, byte* out, size_t cap)
     return enc_printable_n((const byte*)s, strlen(s), out, cap);
 }
 
-/* Wrap `vl` bytes in a SEQUENCE. Returns total bytes written, or -1 if `cap`
- * is too small. */
 static int enc_seq(const byte* v, size_t vl, byte* out, size_t cap)
 {
     if (cap < 1)
@@ -194,8 +175,7 @@ static int enc_integer(const byte* v, size_t vl, byte* out, size_t cap)
     return (int)(1 + (size_t)ll + pad + vl);
 }
 
-/* Size of the TLV an enc_* writer emits for `vl` content bytes, or 0 when the
- * length cannot be encoded. */
+/* TLV size for `vl` content bytes, or 0 when the length cannot be encoded. */
 static size_t enc_tlv_len(size_t vl)
 {
     byte tmp[8];
@@ -204,9 +184,7 @@ static size_t enc_tlv_len(size_t vl)
     return (ll < 0) ? 0 : (size_t)(1 + (size_t)ll + vl);
 }
 
-/* Read the TLV header at `in`, yielding its tag and content length. Returns
- * the header size, or -1 on a truncated, indefinite-length or over-long
- * encoding. */
+/* Header size, or -1 on a truncated, indefinite or over-long length. */
 static int der_read_tlv(const byte* in, size_t len, byte* out_tag,
                         size_t* out_len)
 {
@@ -255,8 +233,6 @@ static int enc_octet(const byte* v, size_t vl, byte* out, size_t cap)
     return (int)(1 + (size_t)ll + vl);
 }
 
-/* ---- signed attribs builder -------------------------------------------- */
-
 static int build_signed_attribs(const WolfCertScepAttrs* a,
                                 PKCS7Attrib* attrs, int* attrs_count,
                                 uint8_t* scratch, size_t scratch_cap)
@@ -278,11 +254,8 @@ static int build_signed_attribs(const WolfCertScepAttrs* a,
     }
 
     if (a->transaction_id != NULL) {
-        /* Encode by length, not through a NUL-terminated copy: the
-         * transactionID is a peer-chosen identifier that RFC 8894 does not
-         * bound, and quietly truncating it would put a value on the wire that
-         * no longer matches the transaction it names. Too long for the scratch
-         * buffer is an error here, never a silent trim. */
+        /* The transactionID is peer-chosen and unbounded; one too long for
+         * scratch fails rather than being truncated. */
         int vl = enc_printable_n(a->transaction_id, a->transaction_id_len,
                                  scratch + off, scratch_cap - off);
         if (vl < 0)
@@ -350,8 +323,6 @@ static int build_signed_attribs(const WolfCertScepAttrs* a,
     return WOLFCERT_OK;
 }
 
-/* ---- public API --------------------------------------------------------- */
-
 WOLFCERT_TEST_VIS int wolfcert_scep_envelop(const uint8_t* ra_cert_der,
     size_t ra_cert_len, const uint8_t* payload, size_t payload_len, int enc_oid,
     WolfCertBuffer* out_der, void* heap)
@@ -366,11 +337,8 @@ WOLFCERT_TEST_VIS int wolfcert_scep_envelop(const uint8_t* ra_cert_der,
         return WOLFCERT_ERR_WC(rc, "scep", "InitWithCert");
     }
 
-    /* RFC 8894 is RSA-only: the pkcsPKIEnvelope is encrypted to the RA/CA
-     * public key with CMS key transport, which wolfSSL only supports for an
-     * RSA recipient. A non-RSA (e.g. ECC) RA certificate would otherwise fall
-     * through to the key-agreement path and fail deep in the encoder with
-     * BAD_KEYWRAP_ALG_E; reject it up front with an actionable diagnostic. */
+    /* RFC 8894 is RSA-only; an ECC recipient would take wolfSSL's
+     * key-agreement path and fail with BAD_KEYWRAP_ALG_E. */
     if (p7->publicKeyOID != RSAk) {
         wc_PKCS7_Free(p7);
         return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
@@ -419,10 +387,7 @@ int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_
                              const uint8_t* env_der, size_t env_len,
                              WolfCertBuffer* out_plain, void* heap)
 {
-    /* env_len is server-controlled and drives cap = env_len + 4096 (plus a
-     * word32 cast into wolfSSL). Reject an empty or over-large envelope so the
-     * allocation stays bounded on constrained targets; see
-     * WOLFCERT_SCEP_MAX_MSG_SZ. */
+    /* env_len is server-controlled and sizes the env_len + 4096 allocation. */
     if (env_len == 0 || env_len > WOLFCERT_SCEP_MAX_MSG_SZ)
         return WOLFCERT_ERR_BAD_ARG;
 
@@ -477,9 +442,6 @@ WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
     if (key == NULL || csr_der == NULL || out_der == NULL || out_len == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    /* csr_len drives cap = csr_len + 4096 (plus a word32 cast into wolfSSL).
-     * Reject an empty or over-large request so the allocation stays bounded on
-     * constrained targets; see WOLFCERT_SCEP_MAX_MSG_SZ. */
     if (csr_len == 0 || csr_len > WOLFCERT_SCEP_MAX_MSG_SZ)
         return WOLFCERT_ERR_BAD_ARG;
     cap = csr_len + 4096;
@@ -496,16 +458,9 @@ WOLFCERT_TEST_VIS int wolfcert_scep_self_signed_rsa(RsaKey* key,
         return WOLFCERT_ERR_MEMORY;
     }
 
-    /* RFC 8894 section 2.3: the signer certificate SHOULD carry the same
-     * subject name as the enclosed PKCS#10 request. The certificate is
-     * self-signed, so its issuer name is the same DN.
-     *
-     * wolfSSL recovers the raw name length with XSTRLEN while encoding, so the
-     * raw-name path cannot represent a DN that contains a 0x00 byte (e.g. a
-     * BMPString value or a length octet whose low byte is zero). Use it only
-     * for a NUL-free DN that leaves room for a terminator, and fall back to the
-     * request's common name otherwise. The signer subject is not security
-     * relevant: issuance binds on the public key, not this name. */
+    /* RFC 8894 section 2.3: the signer cert SHOULD carry the CSR subject.
+     * wolfSSL takes the raw name length with XSTRLEN, so a DN containing a
+     * 0x00 byte, or too long for sbjRaw, falls back to the CSR common name. */
     wc_InitDecodedCert(dc, (const byte*)csr_der, (word32)csr_len, heap);
     rc = wc_ParseCert(dc, CERTREQ_TYPE, NO_VERIFY, NULL);
     if (rc != 0) {
@@ -595,10 +550,8 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_message(const uint8_t* envelope_de
         return WOLFCERT_ERR_CRYPTO;
     }
 
-    /* A CertRep with pkiStatus PENDING/FAILURE (RFC 8894 section 3.2.2) has no
-     * pkcsPKIEnvelope: the SignedData encapsulates no content. Emit a detached
-     * SignedData in that case so the eContent is genuinely absent; wolfSSL
-     * computes the messageDigest over the empty content internally. */
+    /* RFC 8894 sections 3.3.2.2 and 3.3.2.3: a PENDING or FAILURE CertRep has
+     * no pkcsPKIEnvelope, so its SignedData is detached. */
     int detached = (envelope_der == NULL || envelope_len == 0);
 
     p7->rng          = &rng;
@@ -634,12 +587,8 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_message(const uint8_t* envelope_de
         p7->signedAttribsSz = (word32)nattr;
     }
 
-    /* wolfSSL's PKCS7 encoder mutates internal state on each
-     * EncodeSignedData call, so retry-on-BUFFER_E with the same PKCS7
-     * object is unreliable. Give the encoder a single right-sized one-shot
-     * buffer instead: the envelope content and signer cert pass through
-     * verbatim, and WOLFCERT_SCEP_PKI_SLACK bounds the signed attributes,
-     * signature, and ASN.1 framing on top. */
+    /* EncodeSignedData mutates the PKCS7 object, so a retry on BUFFER_E is
+     * unreliable and the buffer is sized once. */
     size_t cap = envelope_len + signer_cert_len + WOLFCERT_SCEP_PKI_SLACK;
     uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
     if (buf == NULL) {
@@ -685,8 +634,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_next_ca_response(const uint8_t* next_c
     if (rc != WOLFCERT_OK)
         return rc;
 
-    /* Sign the certs-only bundle with the current CA key, carrying no SCEP
-     * signed attributes: this is a plain SignedData, not a pkiMessage. */
+    /* A plain SignedData with no SCEP signed attributes. */
     memset(&attrs, 0, sizeof(attrs));
     rc = wolfcert_scep_build_pki_message(inner.data, inner.len,
                                          ca_cert, ca_cert_len,
@@ -715,8 +663,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(const uint8_t* resp_
             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
             &signer, &signer_len, NULL, heap);
 
-    /* Bind the rollover message to the trusted current CA: its SignedData
-     * signer must share that CA's public key. */
+    /* The rollover signer must share the trusted current CA's public key. */
     if (rc == WOLFCERT_OK) {
         rc = wolfcert_scep_verify_rep_signer(signer, signer_len,
                                              current_ca_der, current_ca_len, heap);
@@ -731,8 +678,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(const uint8_t* resp_
     return rc;
 }
 
-/* One bit per SCEP signed attribute wolfCert reads. RFC 8894 gives each of
- * them a single value, so the parser tracks which it has already seen. */
+/* RFC 8894 attributes are single-valued; the parser tracks each by a bit. */
 #define SCEP_ATTR_MSG_TYPE      0x01
 #define SCEP_ATTR_PKI_STATUS    0x02
 #define SCEP_ATTR_FAIL_INFO     0x04
@@ -799,11 +745,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
         return WOLFCERT_ERR_WC(rc, "scep", "VerifySignedData");
     }
 
-    /* A CertRep with pkiStatus PENDING/FAILURE (RFC 8894 section 3.2.2) carries
-     * no pkcsPKIEnvelope, so the SignedData encapsulates no content. wolfSSL
-     * verifies the absent eContent against the hash of empty content, and the
-     * signed attributes (pkiStatus, transactionID, nonces, ...) stay
-     * authenticated; report the envelope as empty in that case. */
+    /* RFC 8894 sections 3.3.2.2-3: PENDING and FAILURE carry no envelope. */
     if (p7->content != NULL && p7->contentSz != 0) {
         uint8_t* env = (uint8_t*)WOLFCERT_XMALLOC(p7->contentSz, heap);
         if (env == NULL) {
@@ -825,10 +767,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     if (out_signer_cert != NULL && out_signer_cert_len != NULL) {
         *out_signer_cert = NULL;
         *out_signer_cert_len = 0;
-        /* Return the certificate that actually produced the verified
-         * signature, which wolfSSL matches by SignerInfo identity. It is not
-         * necessarily the first certificate in the bundle, so a caller binding
-         * the signer to a trust anchor must not trust cert[0]. */
+        /* verifyCert produced the signature; it need not be cert[0]. */
         if (p7->verifyCert != NULL && p7->verifyCertSz > 0) {
             uint8_t* sc = (uint8_t*)WOLFCERT_XMALLOC(p7->verifyCertSz, heap);
             if (sc != NULL) {
@@ -868,8 +807,6 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
         if (bit == 0)
             continue;
 
-        /* A repeated attribute is malformed: it would let the peer pick which
-         * copy the parser keeps and strand the copy it overwrote. */
         if ((seen & bit) != 0) {
             rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
                               "duplicate signed attribute in pkiMessage");
@@ -877,12 +814,8 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
         }
         seen |= bit;
 
-        /* PKCS7DecodedAttrib.value can arrive in either of two shapes
-         * depending on the wolfSSL version / producer:
-         *   (a) the outer `SET OF AttributeValue` (tag 0x31 + content), or
-         *   (b) the first AttributeValue already stripped of the SET
-         *       (tag 0x13 PrintableString, 0x04 OCTET STRING, ...).
-         * Detect and unwrap whichever one we got. */
+        /* Depending on the wolfSSL version, value is either the outer SET OF
+         * AttributeValue or the bare first AttributeValue. */
         if (a->valueSz < 2 || a->value == NULL)
             continue;
 
@@ -940,8 +873,6 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
 
         off = voff;
 
-        /* messageType, pkiStatus and failInfo are text; the transactionID and
-         * the two nonces are opaque octets carried with their length. */
         out_str     = NULL;
         out_bin     = NULL;
         out_bin_len = NULL;
@@ -992,8 +923,6 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
 
     wc_PKCS7_Free(p7);
 
-    /* Leave nothing allocated behind on the reject path, as the early returns
-     * above do not either. */
     if (rc != WOLFCERT_OK) {
         if (out_message_type != NULL) {
             WOLFCERT_XFREE(*out_message_type, heap);
@@ -1033,9 +962,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_pki_message(const uint8_t* pki_der,
     return rc;
 }
 
-/* The Name of the CA that issues under `dc`. A CA certificate issues under its
- * own name. An RA certificate is an end entity, so the CA that will issue is
- * the one that issued it. */
+/* A CA cert issues under its own name, an RA cert under its issuer's. */
 static void issuing_ca_name(const DecodedCert* dc, const uint8_t** out_name,
                             int* out_len)
 {
@@ -1084,8 +1011,7 @@ static int issuer_and_subject_der(DecodedCert* ic, DecodedCert* sc,
         return WOLFCERT_ERR_PARSE;
     }
 
-    /* Give each Name its own SEQUENCE, so the result decodes as
-     * IssuerAndSubject ::= SEQUENCE { issuer Name, subject Name }. */
+    /* IssuerAndSubject ::= SEQUENCE { issuer Name, subject Name } */
     size_t issuer_tlv  = enc_tlv_len((size_t)issuer_name_len);
     size_t subject_tlv = enc_tlv_len((size_t)sc->subjectRawLen);
     size_t inner = issuer_tlv + subject_tlv;
@@ -1318,9 +1244,6 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_name_matches(
     return match;
 }
 
-/* Extract the raw SPKI (SubjectPublicKeyInfo) from either a cert or a CSR
- * DER. Used by the server to verify the signer-cert pub key matches the
- * pub key in the enclosed CSR. */
 int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
                            uint8_t** out_spki, size_t* out_len, void* heap)
 {
@@ -1356,9 +1279,7 @@ int wolfcert_extract_spki(const uint8_t* der, size_t len, int is_csr,
     return rc;
 }
 
-/* Total length (tag + length octets + value) of the DER SEQUENCE at `p`, or 0
- * if it is not a SEQUENCE that fits in `len`. Walks a concatenated-DER cert
- * bundle one certificate at a time. */
+/* Size of the DER SEQUENCE at `p`, or 0 if none fits in `len`. */
 static size_t der_seq_len(const uint8_t* p, size_t len)
 {
     byte   tag;
@@ -1393,9 +1314,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert
     if (rc != WOLFCERT_OK)
         return rc == WOLFCERT_ERR_MEMORY ? rc : WOLFCERT_ERR_AUTH;
 
-    /* RFC 8894: the CertRep is signed by the CA or its RA. Accept the signer
-     * if it shares a public key with any certificate in the trusted GetCACert
-     * bundle (one or more concatenated DER certs). */
+    /* RFC 8894: the CA or its RA signs the CertRep, so match any bundle key. */
     rc = WOLFCERT_ERR_AUTH;
     while (off < ca_bundle_len && rc == WOLFCERT_ERR_AUTH) {
         clen = der_seq_len(ca_bundle + off, ca_bundle_len - off);

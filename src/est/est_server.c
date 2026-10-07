@@ -17,12 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Minimal EST (RFC 7030) test server. Plaintext HTTP only; uses the
- * shared CA helpers for generation and issuance. Exposes a vtable to
- * src/server.c and a serve_fd entry point for integration with external
- * event loops.
- */
+/* Minimal EST (RFC 7030) test server. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -49,14 +44,8 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-/* ---- pending queue (RFC 7030 section 4.2.3, manual-approval mode) --------------
- *
- * The EST RFC has no explicit transaction identifier for async
- * enrollment - the client is expected to re-POST the identical CSR. We
- * key pending entries off the SHA-256 of the decoded, signature-checked
- * CSR DER so the second POST produces the same digest as the first, even
- * across reconnects and base64 re-wrapping. The queue is capped and
- * intentionally shallow; real deployments use a proper approval workflow. */
+/* An RFC 7030 section 4.2.3 retry re-POSTs the same CSR, so pending entries
+ * are keyed by the SHA-256 of the decoded CSR DER. */
 #define EST_PENDING_CAP 8
 
 /* How long a client gets to answer a post-handshake CertificateRequest. */
@@ -90,8 +79,7 @@ static int pending_find(const EstPriv* p, const uint8_t hash[32])
     return -1;
 }
 
-/* Append `hash` if there's room and it isn't already present. Returns 1 if
- * a new entry was added, 0 if the queue is full. */
+/* Returns 1 if `hash` was added, 0 if the queue is full. */
 static int pending_add(EstPriv* p, const uint8_t hash[32])
 {
     if (p->count >= EST_PENDING_CAP)
@@ -114,8 +102,6 @@ static void pending_remove(EstPriv* p, int idx)
 
     --p->count;
 }
-
-/* ---- HTTP request parser ----------------------------------------------- */
 
 typedef struct {
     char   method[8];
@@ -152,17 +138,8 @@ static int read_line(const char** p, const char* end, char** ls, size_t* ll)
     return 0;
 }
 
-/* Parse the chunk-size line at raw[ri..]. On success store the chunk
- * length in *csz and the offset just past its terminating CRLF in
- * *next. The hex-digit count is capped at 8 so a crafted long size line
- * cannot wrap the value past a later bounds check; 8 digits cover every
- * chunk we accept (BODY_CAP is 1 MiB). Shared by the completeness scan
- * and the decode pass so the two cannot drift apart.
- *
- * returns  0  on success
- * returns  1  when the CRLF ending the size line has not arrived yet
- *             (need more bytes)
- * returns -1  when the line is malformed */
+/* Parse the chunk-size line at raw[ri..]. The 8 hex digit cap keeps csz within
+ * 32 bits. Returns 0 ok, 1 if the CRLF has not arrived, -1 if malformed. */
 static int read_chunk_size(const uint8_t* raw, size_t raw_len, size_t ri,
                            size_t* csz, size_t* next)
 {
@@ -176,7 +153,7 @@ static int read_chunk_size(const uint8_t* raw, size_t raw_len, size_t ri,
     }
 
     if (he + 1 >= raw_len)
-        return 1; /* size line not fully received yet */
+        return 1;
 
     for (size_t k = ri; k < he; ++k) {
         char c = (char)raw[k];
@@ -187,13 +164,13 @@ static int read_chunk_size(const uint8_t* raw, size_t raw_len, size_t ri,
               : (c >= 'a' && c <= 'f') ? c - 'a' + 10
               : (c >= 'A' && c <= 'F') ? c - 'A' + 10 : -1;
         if (d < 0 || ++hex_digits > 8)
-            return -1; /* bad hex digit or oversized length */
+            return -1;
 
         v = (v << 4) | (size_t)d;
         parsed = 1;
     }
     if (parsed == 0)
-        return -1; /* empty chunk-size line */
+        return -1;
 
     *csz  = v;
     *next = he + 2;
@@ -201,13 +178,9 @@ static int read_chunk_size(const uint8_t* raw, size_t raw_len, size_t ri,
     return 0;
 }
 
-/* Walk chunk framing over the bytes received so far and report whether
- * the message is complete, meaning a genuine zero-length chunk has been
- * parsed at a chunk-header boundary. Returns 1 when reading can stop
- * (complete, or the framing is malformed and the decode pass below will
- * reject it) and 0 when more bytes are still needed. A substring scan
- * for "0\r\n" cannot decide this: a chunk-size line that is a multiple
- * of 16 and chunk data both contain those bytes. */
+/* Walks the framing, since "0\r\n" also occurs in chunk sizes and data.
+ * Returns 1 once the last chunk and its trailers have arrived or the framing
+ * is malformed (the decode pass rejects it), 0 when more bytes are needed. */
 static int chunked_body_complete(const uint8_t* raw, size_t raw_len)
 {
     size_t ri = 0;
@@ -218,20 +191,14 @@ static int chunked_body_complete(const uint8_t* raw, size_t raw_len)
         size_t next = 0;
         int r = read_chunk_size(raw, raw_len, ri, &csz, &next);
         if (r > 0)
-            return 0; /* chunk-size line not fully received yet */
+            return 0;
         if (r < 0)
-            return 1; /* malformed line - the decode pass rejects it */
+            return 1;
 
-        /* read_chunk_size guarantees next <= raw_len, so ri stays
-         * <= raw_len and the raw_len - ri math below cannot underflow. */
         ri = next;
         if (csz == 0) {
-            /* Last-chunk marker. RFC 7230: the message ends only after
-             * the CRLF terminating the trailer section (minimum
-             * "0\r\n\r\n"). Stopping at "0\r\n" would leave that CRLF
-             * unread on the socket and corrupt the next request on a
-             * keep-alive connection. Consume any trailer field lines up
-             * to the terminating blank line before declaring complete. */
+            /* RFC 7230 section 4.1: consume trailers through the blank
+             * line, or the leftover CRLF corrupts the next request. */
             while (ri < raw_len) {
                 ls = ri;
                 while (ri + 1 < raw_len &&
@@ -240,18 +207,18 @@ static int chunked_body_complete(const uint8_t* raw, size_t raw_len)
                 }
 
                 if (ri + 1 >= raw_len)
-                    return 0; /* trailer line CRLF not fully received */
+                    return 0;
                 if (ri == ls)
                     return 1; /* blank line terminates the trailers */
 
-                ri += 2; /* skip this trailer field line, scan the next */
+                ri += 2;
             }
 
-            return 0; /* trailer terminator not yet received */
+            return 0;
         }
 
         if (raw_len - ri < 2 || csz > raw_len - ri - 2)
-            return 0; /* chunk payload plus trailing CRLF not yet received */
+            return 0;
 
         ri += csz + 2;
     }
@@ -364,12 +331,7 @@ static int parse_request(WolfCertServer* s, int fd, EstRequest* out, void* heap)
 
     size_t body_have = (size_t)(end - p);
     if (chunked) {
-        /* Transfer-Encoding: chunked - accumulate the raw request tail
-         * in a growable buffer, keep reading until we see a
-         * zero-length chunk, then stream-decode into `out->body` in a
-         * single pass. globalsign's estclient emits chunked
-         * unconditionally, so the EST enrolment path needs this.
-         * Hard-capped at 1 MiB to match the Content-Length branch. */
+        /* globalsign's estclient always sends chunked request bodies. */
         static const size_t BODY_CAP = 1 * 1024 * 1024;
         uint8_t* raw = NULL;
         size_t raw_len = 0, raw_cap = 0;
@@ -407,7 +369,6 @@ static int parse_request(WolfCertServer* s, int fd, EstRequest* out, void* heap)
             raw_len += (size_t)r;
         }
 
-        /* Decode pass: walk chunks, copy payloads into `body`. */
         uint8_t* body = (uint8_t*)WOLFCERT_XMALLOC(raw_len + 1, heap);
         if (body == NULL) {
             WOLFCERT_XFREE(raw, heap);
@@ -420,7 +381,7 @@ static int parse_request(WolfCertServer* s, int fd, EstRequest* out, void* heap)
             size_t next = 0;
             int r = read_chunk_size(raw, raw_len, ri, &csz, &next);
             if (r > 0)
-                break; /* chunk-size line not fully received */
+                break;
             if (r < 0) {
                 WOLFCERT_XFREE(body, heap);
                 WOLFCERT_XFREE(raw, heap);
@@ -441,12 +402,8 @@ static int parse_request(WolfCertServer* s, int fd, EstRequest* out, void* heap)
             body_sz += csz;
             ri += csz;
             if (ri == raw_len)
-                break; /* last chunk, no more framing */
+                break;
 
-            /* Every non-final chunk MUST end in CRLF - verify it before
-             * consuming so framing corruption (missing trailer, stray
-             * byte) is rejected as a protocol error rather than
-             * silently tolerated. */
             if (ri + 2 > raw_len ||
                 raw[ri] != '\r' || raw[ri + 1] != '\n') {
                 WOLFCERT_XFREE(body, heap);
@@ -496,8 +453,6 @@ static int parse_request(WolfCertServer* s, int fd, EstRequest* out, void* heap)
 
     return WOLFCERT_OK;
 }
-
-/* ---- writers ----------------------------------------------------------- */
 
 static void send_all(WolfCertServer* s, int fd, const void* buf, size_t len)
 {
@@ -564,7 +519,6 @@ static void send_accepted_retry_after(WolfCertServer* s, int fd, int retry_after
     send_response(s, fd, 202, "Accepted", ra, NULL, 0);
 }
 
-/* HTTP Basic authentication scheme token, including its trailing space. */
 #define EST_BASIC_AUTH_SCHEME     "Basic "
 #define EST_BASIC_AUTH_SCHEME_LEN (sizeof(EST_BASIC_AUTH_SCHEME) - 1)
 
@@ -595,9 +549,7 @@ static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
     if (wolfcert_base64_encode(raw, ul + 1 + pl, &enc, s->heap) != WOLFCERT_OK)
         return 0;
 
-    /* Constant-time, full-length comparison of the base64 credential: reject
-     * on a length mismatch, then accumulate byte differences so the timing
-     * does not leak the length of the matching prefix. */
+    /* Constant-time compare of the base64 credential. */
     const char* tok = auth_header + EST_BASIC_AUTH_SCHEME_LEN;
     int ok = (strlen(tok) == enc.len);
     if (ok)
@@ -608,12 +560,7 @@ static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
     return ok;
 }
 
-/* ---- handlers ---------------------------------------------------------- */
-
-/* RFC 7030 section 4.5.2: GET /.well-known/est/csrattrs.
- *   - 204 No Content   -> server has no attributes to advertise.
- *   - 200 OK           -> CsrAttrs DER, base64-encoded, content-type
- *                         application/csrattrs. */
+/* RFC 7030 section 4.5.2: 204 when there are no attributes to offer. */
 static int handler_csr_attrs(WolfCertServer* s, int fd, int head)
 {
     static const char why[] = "cannot encode the CSR attributes\n";
@@ -736,12 +683,7 @@ static int ensure_post_handshake_auth(WolfCertServer* s)
 #endif
 }
 
-/* ---- CSR attribute enforcement (est_require_csr_attributes) ---------- */
-
-/* Read a DER TLV at `p`; on success fill `*tag`, `*len` (value length)
- * and `*hdr` (header size in bytes). Returns 0 on success, -1 on
- * truncation or malformed length encoding. Long-form lengths up to 4
- * bytes are supported, which is more than enough for a CSR (< 64 KiB). */
+/* Read the DER tag, value length and header size at `p`; -1 if malformed. */
 static int csr__take_tl(const uint8_t* p, size_t avail,
                         uint8_t* tag, size_t* len, size_t* hdr)
 {
@@ -775,10 +717,8 @@ static int csr__take_tl(const uint8_t* p, size_t avail,
     return 0;
 }
 
-/* Walk a PKCS#10 CertificationRequest DER down to the `attributes [0]`
- * field and check whether it contains an Attribute whose type OID
- * matches `oid`. Returns 1 if present, 0 if absent, -1 if the CSR
- * can't be parsed well enough to decide. */
+/* 1 if the CSR's attributes [0] holds an Attribute of type `oid`, 0 if
+ * absent, -1 if the CSR does not parse. */
 static int csr__has_attr_oid(const uint8_t* csr, size_t csr_len,
                              const uint8_t* oid, size_t oid_len)
 {
@@ -820,9 +760,7 @@ static int csr__has_attr_oid(const uint8_t* csr, size_t csr_len,
     info += hdr + len;
     info_len -= hdr + len;
 
-    /* attributes [0] IMPLICIT - tag 0xA0 (context-specific,
-     * constructed, no. 0). Optional per PKCS#10; absent attributes
-     * = no match. */
+    /* Some encoders omit an empty attributes [0]; treat that as no match. */
     if (info_len == 0)
         return 0;
 
@@ -832,8 +770,7 @@ static int csr__has_attr_oid(const uint8_t* csr, size_t csr_len,
     const uint8_t* attrs = info + hdr;
     size_t attrs_len = len;
 
-    /* SET OF Attribute. Each Attribute is SEQUENCE { OID, SET OF vals }.
-     * Walk and compare the type OID of each. */
+    /* Each Attribute is SEQUENCE { type OID, SET OF values }. */
     while (attrs_len > 0) {
         if (csr__take_tl(attrs, attrs_len, &tag, &len, &hdr) != 0 || tag != 0x30) {
             return -1;
@@ -842,7 +779,6 @@ static int csr__has_attr_oid(const uint8_t* csr, size_t csr_len,
         const uint8_t* one  = attrs + hdr;
         size_t         onel = len;
 
-        /* First TLV inside is the type OID. */
         uint8_t ot;
         size_t olen, ohdr;
         if (csr__take_tl(one, onel, &ot, &olen, &ohdr) != 0 || ot != 0x06)
@@ -859,23 +795,13 @@ static int csr__has_attr_oid(const uint8_t* csr, size_t csr_len,
     return 0;
 }
 
-/* Enforce est_require_csr_attributes: every bare-OID policy item in
- * s->cfg_csr_attrs must appear as an attribute type OID in the CSR.
- * `err_oid_len` is a value-result parameter: on entry it holds the capacity
- * of the caller-provided `err_oid_buf`. It is reset to 0 up front and set
- * non-zero only when a missing required OID is captured in full into
- * `err_oid_buf` (an OID too large for the buffer leaves it at 0), so the caller
- * can treat `*err_oid_len > 0` as "a renderable OID was captured" without
- * coupling to the exact return code. The OID is copied out
- * before the parsed policy is freed: the WolfCertCsrAttrs owns its OID
- * storage, so returning a pointer into it would dangle once the policy is
- * released. */
+/* Every bare-OID item of cfg_csr_attrs must appear in the CSR. *err_oid_len
+ * is the buffer capacity on entry and the length of the missing OID copied
+ * into err_oid_buf on return, or 0 when none was captured. */
 static int csr_attrs_enforce(const WolfCertServer* s,
                              const uint8_t* csr_der, size_t csr_len,
                              uint8_t* err_oid_buf, size_t* err_oid_len)
 {
-    /* Read the caller's buffer capacity, then default the out-length to 0 so
-     * every non-missing return path reports "no OID captured". */
     size_t err_oid_cap = *err_oid_len;
     *err_oid_len = 0;
 
@@ -891,9 +817,7 @@ static int csr_attrs_enforce(const WolfCertServer* s,
 
     int missing = 0;
     for (size_t i = 0; i < policy.count; ++i) {
-        /* Presence-only enforcement today: bare-OID items are required,
-         * Attributes (with values) are advisory. Value-level comparison
-         * is a future enhancement. */
+        /* Attribute items with values are advisory. */
         if (policy.items[i].kind != WOLFCERT_CSRATTR_BARE_OID)
             continue;
 
@@ -902,10 +826,6 @@ static int csr_attrs_enforce(const WolfCertServer* s,
                                     policy.items[i].oid_len);
         if (has != 1) {
             size_t n = policy.items[i].oid_len;
-            /* Only surface the OID diagnostic when the full OID fits the
-             * caller's buffer. A truncated DER OID would render as an invalid
-             * dotted string, so leave *err_oid_len at 0 in that case and let the
-             * caller fall back to a generic 400. */
             if (n > 0 && n <= err_oid_cap) {
                 memcpy(err_oid_buf, policy.items[i].oid, n);
                 *err_oid_len = n;
@@ -920,8 +840,7 @@ static int csr_attrs_enforce(const WolfCertServer* s,
     return missing ? WOLFCERT_ERR_PROTOCOL : WOLFCERT_OK;
 }
 
-/* Emit a 400 Bad Request whose body lists the missing OID in dotted
- * decimal. Helpful for humans debugging the round-trip. */
+/* 400 Bad Request naming the missing OID in dotted decimal. */
 static void send_missing_oid(WolfCertServer* s, int fd,
                              const uint8_t* oid, size_t oid_len)
 {
@@ -1069,31 +988,13 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
         }
     }
 
-    /* RFC 7030 section 3.5 lets an EST client bind the proof-of-possession to
-     * the TLS session by carrying the tls-unique channel binding (RFC 5929)
-     * inside the CSR (typically the PKCS#9 challengePassword), in which case
-     * the server MUST verify it. We currently do not implement this: the CSR
-     * is issued on its own merits without extracting any tls-unique value or
-     * comparing it against this connection's TLS Finished data. If channel
-     * binding is ever required, derive tls-unique from the TLS session here
-     * and reject the request when the embedded binding does not match. */
-
-    /* Policy enforcement: reject CSRs that don't carry every
-     * bare-OID Attribute advertised via /csrattrs. Done before
-     * wolfcert_ca_issue so an offending client can't walk away with a
-     * cert even if the underlying issuance would have accepted it. */
+    /* RFC 7030 section 3.5 tls-unique channel binding is not verified. */
     if (s->cfg.est_require_csr_attributes) {
-        /* Room for the largest OID we would report; DER attribute-type OIDs
-         * are far shorter than this in practice. */
         uint8_t missing_oid[64];
         size_t missing_len = sizeof(missing_oid);   /* in: cap, out: OID len */
         int erc = csr_attrs_enforce(s, csr.data, csr.len,
                                     missing_oid, &missing_len);
         if (erc != WOLFCERT_OK) {
-            /* csr_attrs_enforce sets missing_len > 0 only when it captured a
-             * missing required OID into missing_oid. Gate on that explicitly
-             * (not on the return code alone) so no future error path can
-             * render an unpopulated buffer into the response body. */
             if (erc == WOLFCERT_ERR_PROTOCOL && missing_len > 0)
                 send_missing_oid(s, fd, missing_oid, missing_len);
             else
@@ -1105,9 +1006,7 @@ static int handler_enroll(WolfCertServer* s, int fd, const EstRequest* req,
         }
     }
 
-    /* Manual-approval gate. First POST for a given CSR: park it and
-     * return 202 + Retry-After. Second (matching) POST: drop the
-     * pending entry and fall through to issuance. */
+    /* Manual approval parks a new CSR with a 202 and issues on its re-POST. */
     if (s->cfg.est_require_approval && s->priv != NULL) {
         EstPriv* p = (EstPriv*)s->priv;
         uint8_t h[32];
@@ -1184,8 +1083,6 @@ static int handle_request(WolfCertServer* s, int fd)
 
     int rc = parse_request(s, fd, &req, s->heap);
     if (rc != WOLFCERT_OK) {
-        /* No parseable request means the client hung up or sent
-         * garbage; either way we're done with this connection. */
         s->keep_alive = 0;
         send_error(s, fd, 400, "Bad Request", "malformed HTTP request\n");
         free_req(&req);
@@ -1243,14 +1140,10 @@ static int handle_request(WolfCertServer* s, int fd)
     return rc;
 }
 
-/* ---- vtable ------------------------------------------------------------ */
-
 static int est_start(const WolfCertServerCfgSrv* cfg, WolfCertServer* base)
 {
     (void)cfg;
 
-    /* Only allocate the pending queue when manual-approval is on; most
-     * callers never touch it, so we avoid the ~300 byte state otherwise. */
     if (cfg->est_require_approval) {
         EstPriv* p = (EstPriv*)WOLFCERT_XMALLOC(sizeof(*p), base->heap);
         if (p == NULL)

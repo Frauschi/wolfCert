@@ -24,7 +24,6 @@
 
 #include "zephyr/wolfssl_user_settings.h"
 
-/* Move large crypto temporaries from the stack to the heap. */
 #define WOLFSSL_SMALL_STACK
 
 /* P-256 in Thumb-2 assembly on ARMv7-M/ARMv8-M Mainline cores. */

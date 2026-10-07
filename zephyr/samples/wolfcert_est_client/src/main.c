@@ -27,8 +27,7 @@
 /* An empty Kconfig string becomes NULL. */
 #define OPT_OR_NULL(s) (sizeof(s) > 1 ? (s) : NULL)
 
-/* The trust anchor is built in: an EST client must authenticate the server
- * (RFC 7030 section 3.3), so it needs one before it can talk to anybody. */
+/* EST requires server authentication (RFC 7030 section 3.3). */
 static const uint8_t ca_cert_pem[] = {
 #include "est_ca_cert.inc"
 };

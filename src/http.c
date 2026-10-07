@@ -34,17 +34,10 @@
 #include <string.h>
 
 #define WOLFCERT_HTTP_MAX_HOST_LEN 256
-/* Large enough to carry an RFC 8894 GET PKIOperation whose base64 pkiMessage
- * rides in the query string (bounded by WOLFCERT_SCEP_MAX_GET_URL). The parsed
- * path is heap-allocated and the request head buffer is sized to it, so this is
- * only a sanity ceiling. */
+/* Path plus query, which carries a SCEP GET pkiMessage. */
 #ifndef WOLFCERT_HTTP_MAX_PATH_LEN
 #define WOLFCERT_HTTP_MAX_PATH_LEN 8192
 #endif
-/* The SCEP GET fallback builds a URL up to WOLFCERT_SCEP_MAX_GET_URL and then
- * parses its own request through wolfcert_http_url_parse, which rejects a
- * path+query longer than this. Guard the relationship so an inconsistent -D
- * override fails fast instead of the client rejecting a URL it just built. */
 #if WOLFCERT_SCEP_MAX_GET_URL > WOLFCERT_HTTP_MAX_PATH_LEN
 #error "WOLFCERT_SCEP_MAX_GET_URL exceeds WOLFCERT_HTTP_MAX_PATH_LEN; raise WOLFCERT_HTTP_MAX_PATH_LEN so the client accepts the largest GET URL it will build."
 #endif
@@ -52,9 +45,7 @@
 #define WOLFCERT_HTTP_READ_CHUNK   2048
 #define WOLFCERT_HTTP_MAX_INTERIM  8
 
-/* ASCII-only case folding. Every token compared here (scheme, host, header
- * name, transfer coding) is ASCII by definition, and unlike strcasecmp this
- * cannot shift with the C locale. */
+/* ASCII-only case folding, independent of the C locale. */
 static int ci_lower(int c)
 {
     return (c >= 'A' && c <= 'Z') ? c + ('a' - 'A') : c;
@@ -88,8 +79,6 @@ int wolfcert_ascii_ncasecmp(const char* a, const char* b, size_t n)
     return 0;
 }
 
-/* ---- URL parsing -------------------------------------------------------- */
-
 WOLFCERT_TEST_VIS void wolfcert_http_url_free(WolfCertUrl* u)
 {
     if (u == NULL)
@@ -102,9 +91,7 @@ WOLFCERT_TEST_VIS void wolfcert_http_url_free(WolfCertUrl* u)
     u->scheme = u->host = u->path = NULL;
 }
 
-/* An IPv6 literal is stored with its brackets stripped, and re-emitting it
- * needs them back in a URL (RFC 3986 section 3.2.2) and in a Host header
- * (RFC 7230 section 5.4). */
+/* IPv6 hosts are stored unbracketed; URLs and Host headers need brackets. */
 static int host_is_ip_literal(const char* host)
 {
     uint8_t ip[16];
@@ -113,10 +100,7 @@ static int host_is_ip_literal(const char* host)
     return wolfcert_parse_ip(host, ip, &ip_len) == WOLFCERT_OK && ip_len == 16;
 }
 
-/* Build the "scheme://host[:port]" origin for a parsed URL into a freshly
- * allocated buffer (owned by the caller, free with WOLFCERT_XFREE). The default
- * port (443 for TLS, 80 otherwise) is omitted. Shared by the EST and SCEP
- * session opens so the two origin builders cannot drift. */
+/* "scheme://host[:port]" without a default port; free with WOLFCERT_XFREE. */
 WOLFCERT_TEST_VIS int wolfcert_http_url_origin(const WolfCertUrl* u, void* heap,
                                                char** out_origin)
 {
@@ -131,8 +115,7 @@ WOLFCERT_TEST_VIS int wolfcert_http_url_origin(const WolfCertUrl* u, void* heap,
     open_br  = host_is_ip_literal(u->host) ? "[" : "";
     close_br = host_is_ip_literal(u->host) ? "]" : "";
 
-    /* scheme + "://" (3) + host + the optional brackets, ":65535" and NUL; 16
-     * leaves that suffix room to spare rather than sizing it to the digit. */
+    /* "://", then room for the brackets, ":65535" and the NUL. */
     origin_len = strlen(u->scheme) + 3 + strlen(u->host) + 16;
     origin = (char*)WOLFCERT_XMALLOC(origin_len, heap);
     if (origin == NULL)
@@ -170,9 +153,7 @@ WOLFCERT_TEST_VIS int wolfcert_http_url_parse(const char* url, WolfCertUrl* out,
     if (url == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    /* TLS is the secure default: a URL without an explicit scheme is treated
-     * as https. An explicit "http://" still opts out into plaintext (SCEP, and
-     * EST against a local/test server, legitimately run over plain HTTP). */
+    /* A URL without a scheme is https. */
     const char* sep = strstr(url, "://");
     const char* host_start;
     if (sep == NULL) {
@@ -258,9 +239,8 @@ WOLFCERT_TEST_VIS int wolfcert_http_url_parse(const char* url, WolfCertUrl* out,
         host_end = end;
     }
 
-    /* RFC 7230 section 5.3.1 synthesizes the leading slash for an empty path;
-     * section 5.1 excludes the fragment from the target, so it never goes on
-     * the wire. */
+    /* An empty path becomes "/" (RFC 7230 section 5.3.1) and the fragment is
+     * never sent (section 5.1). */
     const char* frag = strchr(host_end, '#');
     size_t tlen = frag ? (size_t)(frag - host_end) : strlen(host_end);
     size_t plen = (*host_end == '/') ? tlen : tlen + 1;
@@ -287,8 +267,6 @@ WOLFCERT_TEST_VIS int wolfcert_http_url_parse(const char* url, WolfCertUrl* out,
 
     return WOLFCERT_OK;
 }
-
-/* ---- base64 auth header ------------------------------------------------- */
 
 static int basic_auth_header(const char* user, const char* pass,
                              char* out, size_t out_cap, void* heap)
@@ -319,9 +297,6 @@ static int basic_auth_header(const char* user, const char* pass,
     word32 enc_len = enc_cap;
     int rc = Base64_Encode_NoNl(raw, (word32)total, enc, &enc_len);
 
-    /* `raw` is the credential in the clear and `enc` is base64, which is
-     * encoding rather than protection - neither has any reason to sit in freed
-     * heap after the header is built. */
     wc_ForceZero(raw, (word32)total);
     WOLFCERT_XFREE(raw, heap);
     if (rc != 0) {
@@ -336,16 +311,13 @@ static int basic_auth_header(const char* user, const char* pass,
     wc_ForceZero(enc, enc_cap);
     WOLFCERT_XFREE(enc, heap);
     if (n < 0 || (size_t)n >= out_cap) {
-        /* snprintf wrote into the caller's buffer before this check, so the
-         * error path still has a truncated credential to clear. */
+        /* snprintf already wrote a truncated credential into out. */
         wc_ForceZero(out, (word32)out_cap);
         return WOLFCERT_ERR_MEMORY;
     }
 
     return n;
 }
-
-/* ---- TCP + TLS I/O ------------------------------------------------------ */
 
 typedef struct {
     WolfCertTransport t;
@@ -391,7 +363,6 @@ static int dial(WolfCertConn* c, const char* host, int port, int timeout_ms,
     return WOLFCERT_OK;
 }
 
-/* Release the connection exactly once, including on partial construction. */
 static void conn_close(WolfCertConn* c)
 {
     if (c->connected) {
@@ -400,9 +371,7 @@ static void conn_close(WolfCertConn* c)
     }
 }
 
-/* Per-request state for the async state machine. `sm_state` picks up
- * where the previous tick left off. Buffers are owned by the session
- * across WANT_READ/WRITE returns. */
+/* Async request state; the session owns its buffers across WANT_* returns. */
 typedef enum {
     SM_IDLE         = 0,
     SM_HANDSHAKE    = 1,  /* TLS handshake not yet complete */
@@ -418,27 +387,22 @@ struct WolfCertHttpSession {
     WolfCertConn  conn;
     WOLFSSL_CTX*  ctx;
     WolfCertUrl   base;
-    /* Bytes read past the end of the previous response's body; we carry
-     * them into the next request's parser. In practice HTTP/1.1 rarely
-     * pipelines responses, but we handle the case. */
+    /* Bytes read past the previous response, fed to the next parse. */
     uint8_t*      residual;
     size_t        residual_len;
     size_t        max_body;
     void*         heap;
     int           closed;
 
-    /* ---- async ---------------------------------------------------- */
     int           nonblocking;
     SmState       sm_state;
-    /* Outgoing head buffer (prebuilt once per request, then streamed). */
     char*         sm_head;
     size_t        sm_head_len;
     size_t        sm_head_off;
-    /* Borrowed body pointer from the caller; valid only until SM_DONE. */
+    /* Borrowed from the caller; valid only until SM_DONE. */
     const uint8_t* sm_body;
     size_t         sm_body_len;
     size_t         sm_body_off;
-    /* Response accumulator across ticks. */
     uint8_t*      sm_rx;
     size_t        sm_rx_len;
     size_t        sm_rx_cap;
@@ -478,8 +442,7 @@ static int conn_write(WolfCertConn* c, const void* buf, size_t len)
     return WOLFCERT_OK;
 }
 
-/* Bridge wolfSSL's record I/O onto the transport, so TLS and plain HTTP
- * share one byte path. ctx is the WolfCertConn. */
+/* wolfSSL I/O callbacks over the transport; ctx is the WolfCertConn. */
 static int wolfcert_cbio_recv(WOLFSSL* ssl, char* buf, int sz, void* ctx)
 {
     WolfCertConn* c = (WolfCertConn*)ctx;
@@ -496,8 +459,7 @@ static int wolfcert_cbio_recv(WOLFSSL* ssl, char* buf, int sz, void* ctx)
         return WOLFSSL_CBIO_ERR_GENERAL;
     if (r > 0)
         return r;
-    /* The contract forbids 0, but a transport forwarding recv() reports EOF
-     * that way; take it as the close it means. */
+    /* A recv()-style transport may report EOF as 0 despite the contract. */
     if (r == 0)
         return WOLFSSL_CBIO_ERR_CONN_CLOSE;
 
@@ -549,7 +511,6 @@ static int conn_read(WolfCertConn* c, void* buf, size_t len)
     if (c->ssl == NULL) {
         r = c->t.read(c->t.ctx, c->handle, (uint8_t*)buf, len,
                       c->io_timeout_ms);
-        /* Turn a 0 into a close, and refuse a count larger than len. */
         if (r == 0)
             return WOLFCERT_ERR_CONN_CLOSED;
         if (r > 0 && (size_t)r > len)
@@ -566,8 +527,6 @@ static int conn_read(WolfCertConn* c, void* buf, size_t len)
 
     return WOLFCERT_ERR_IO;
 }
-
-/* ---- response parsing --------------------------------------------------- */
 
 typedef struct {
     uint8_t* buf;
@@ -840,8 +799,7 @@ static int parse_status_line(const char* line, int* out_status)
     return WOLFCERT_OK;
 }
 
-/* RFC 9110 section 15.2: a final response follows an interim 1xx on the same
- * connection. 101 is itself the final response, so it is not interim. */
+/* RFC 9110 section 15.2; no final HTTP response follows a 101. */
 static int status_is_interim(int status)
 {
     return status >= 100 && status < 200 && status != 101;
@@ -878,9 +836,8 @@ static int read_headers(WolfCertConn* c, DynBuf* rx)
     }
 }
 
-/* Parse the chunk-size line at raw[ri..] into *csz, *next past its CRLF;
- * the value is capped at 0xFFFFFFFF so it cannot wrap a later bounds
- * check. Returns 0 ok, 1 if the CRLF has not arrived, -1 if malformed. */
+/* Parse the chunk-size line at raw[ri..]; *next lands past its CRLF. Returns 0
+ * ok, 1 if the CRLF has not arrived, -1 if malformed or over 0xFFFFFFFF. */
 static int read_chunk_size(const uint8_t* raw, size_t raw_len, size_t ri,
                            size_t* csz, size_t* next)
 {
@@ -893,15 +850,15 @@ static int read_chunk_size(const uint8_t* raw, size_t raw_len, size_t ri,
     }
 
     if (he + 1 >= raw_len)
-        return 1; /* size line not fully received yet */
+        return 1;
 
     for (size_t k = ri; k < he; ++k) {
         char c = (char)raw[k];
         if (c == ';')
             break; /* chunk-ext */
 
-        /* RFC 9112 section 7.1.1 allows whitespace between the size and
-         * the ';' that opens a chunk-ext, so only a ';' may follow it. */
+        /* RFC 9112 section 7.1.1: whitespace after the size may only lead
+         * into a chunk-ext. */
         if (parsed != 0 && (c == ' ' || c == '\t')) {
             while (k < he && (raw[k] == ' ' || raw[k] == '\t')) {
                 ++k;
@@ -943,17 +900,14 @@ static int chunked_body_complete(const uint8_t* raw, size_t raw_len)
         size_t next = 0;
         int r = read_chunk_size(raw, raw_len, ri, &csz, &next);
         if (r > 0)
-            return 0; /* chunk-size line not fully received yet */
+            return 0;
         if (r < 0)
-            return -1; /* malformed chunk-size line */
+            return -1;
 
-        /* ri stays <= raw_len, so the raw_len - ri math cannot
-         * underflow. */
         ri = next;
         if (csz == 0) {
-            /* Last-chunk marker. Consume any trailer field lines up to
-             * the blank line that ends the trailer section; stopping at
-             * "0\r\n" leaves that CRLF unread and desyncs keep-alive. */
+            /* Consume the trailer section through its blank line; stopping
+             * at "0\r\n" desyncs keep-alive. */
             while (ri < raw_len) {
                 ls = ri;
                 while (ri + 1 < raw_len &&
@@ -966,10 +920,10 @@ static int chunked_body_complete(const uint8_t* raw, size_t raw_len)
                 if (ri == ls)
                     return 1; /* blank line terminates the trailers */
 
-                ri += 2; /* skip this trailer field line, scan the next */
+                ri += 2;
             }
 
-            return 0; /* trailer terminator not yet received */
+            return 0;
         }
 
         if (raw_len - ri < 2 || csz > raw_len - ri - 2)
@@ -1006,9 +960,8 @@ static int check_trailers(const uint8_t* raw, size_t raw_len)
         if (ri == ls)
             return WOLFCERT_OK; /* blank line closes the section */
 
-        /* RFC 9112 section 5.2: a line opening with SP or HTAB continues
-         * the field line before it. The trailer fields are discarded, so
-         * skip the continuation rather than unfolding it. */
+        /* An SP or HTAB line continues the previous field (RFC 9112
+         * section 5.2). */
         if (ls != 0 && (raw[ls] == ' ' || raw[ls] == '\t')) {
             ri += 2;
             continue;
@@ -1185,8 +1138,6 @@ static int read_body(WolfCertConn* c, DynBuf* rx, size_t body_start,
     return WOLFCERT_OK;
 }
 
-/* ---- TLS setup ---------------------------------------------------------- */
-
 typedef struct {
     const uint8_t* trust_anchors;
     size_t         trust_anchors_len;
@@ -1198,7 +1149,6 @@ typedef struct {
     int            allow_post_handshake_auth;
 } TlsDials;
 
-/* Pick the wolfSSL file type for a credential buffer that may be PEM or DER. */
 static int buf_filetype(const uint8_t* buf, size_t len)
 {
     return wolfcert_buffer_is_der(buf, len) ? WOLFSSL_FILETYPE_ASN1
@@ -1208,11 +1158,6 @@ static int buf_filetype(const uint8_t* buf, size_t len)
 static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
                         const char* sni_host, WOLFSSL_CTX** out_ctx)
 {
-    /* Flex method: negotiates the highest mutually-supported TLS version,
-     * which on any modern peer will be TLS 1.3. We pin the *minimum* at
-     * TLS 1.2 so legacy-only servers still interoperate but SSL3/TLS1.0/
-     * TLS1.1 are refused outright. When wolfSSL is built without TLS 1.2
-     * (WOLFSSL_NO_TLS12), the floor is TLS 1.3. */
     WOLFSSL_CTX* ctx = wolfSSL_CTX_new(wolfTLS_client_method());
     if (ctx == NULL)
         return WOLFCERT_ERR_TLS;
@@ -1225,9 +1170,6 @@ static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
 
 #ifdef WOLFSSL_POST_HANDSHAKE_AUTH
     if (dials->allow_post_handshake_auth) {
-        /* Enabling PHA on the CTX lets the handshake negotiate the
-         * post_handshake_auth extension (RFC 8446 section 4.6.2). Without it a
-         * mid-session CertificateRequest is rejected. */
         (void)wolfSSL_CTX_allow_post_handshake_auth(ctx);
     }
 #else
@@ -1284,8 +1226,8 @@ static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
 #endif
 
         if (dials->verify_server) {
-            /* RFC 6125: a literal address matches iPAddress SAN entries
-             * only, so route it to the IP-specific checker. */
+            /* RFC 2818 section 3.1: an IP literal matches iPAddress SAN
+             * entries only. */
             uint8_t ipbuf[16];
             size_t  iplen;
             if (wolfcert_parse_ip(sni_host, ipbuf, &iplen) == WOLFCERT_OK) {
@@ -1308,7 +1250,6 @@ static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
     return WOLFCERT_OK;
 }
 
-/* Blocking variant: perform the handshake right here. */
 static int do_tls_handshake_blocking(WolfCertConn* c)
 {
     int r = wolfSSL_connect(c->ssl);
@@ -1325,9 +1266,6 @@ static int do_tls_handshake_blocking(WolfCertConn* c)
     return WOLFCERT_OK;
 }
 
-/* Non-blocking TLS handshake step. Returns WOLFCERT_OK when the
- * handshake is complete, WOLFCERT_ERR_WANT_READ / _WANT_WRITE while
- * it's still in progress, WOLFCERT_ERR_TLS on failure. */
 static int do_tls_handshake_step(WolfCertConn* c)
 {
     int r = wolfSSL_connect(c->ssl);
@@ -1359,11 +1297,6 @@ static int setup_tls(WolfCertConn* c, const WolfCertHttpRequest* req,
     return setup_tls_ex(c, &dials, sni_host, out_ctx);
 }
 
-/* ---- request / response primitives (shared by one-shot + session) ------ */
-
-/* Write one complete HTTP/1.1 request (headers + optional body). The
- * `keep_alive` flag flips between `Connection: keep-alive` (session
- * mode) and `Connection: close` (one-shot mode). */
 static int http_write_request(WolfCertConn* c, const WolfCertUrl* u,
                               const WolfCertHttpRequest* req,
                               int keep_alive, void* heap)
@@ -1425,7 +1358,6 @@ static int http_write_request(WolfCertConn* c, const WolfCertUrl* u,
         req->body_len,
         auth);
 
-    /* The Authorization line has been copied into `head`; drop this copy. */
     wc_ForceZero(auth, (word32)sizeof(auth));
 
     if (hn < 0 || (size_t)hn >= head_cap) {
@@ -1448,13 +1380,6 @@ static int http_write_request(WolfCertConn* c, const WolfCertUrl* u,
     return rc;
 }
 
-/* Read headers + body into the caller's WolfCertHttpResponse. The
- * blocking path does not try to carry pipelined bytes forward across
- * requests - HTTP/1.1 pipelining is effectively dead on the wire, and
- * the async state machine has its own per-request residual tracking
- * that doesn't depend on this helper. */
-/* The response allowance: the body cap the caller asked for, plus the header
- * budget. Both readers size their buffer from this one spelling. */
 static size_t rx_max(size_t max_body)
 {
     return max_body + WOLFCERT_HTTP_HEADER_BUDGET;
@@ -1515,7 +1440,6 @@ static int http_read_response(WolfCertConn* c,
             break;
         }
 
-        /* Drop the interim block. */
         memmove(rx.buf, rx.buf + hdr_end, rx.len - (size_t)hdr_end);
         rx.len -= (size_t)hdr_end;
     }
@@ -1547,8 +1471,6 @@ static int http_read_response(WolfCertConn* c,
 
     return rc;
 }
-
-/* ---- main --------------------------------------------------------------- */
 
 int wolfcert_http_request(const WolfCertHttpRequest* req, WolfCertHttpResponse* resp)
 {
@@ -1619,8 +1541,6 @@ out:
     return rc;
 }
 
-/* ---- keep-alive session ------------------------------------------------- */
-
 int wolfcert_http_session_open(const WolfCertHttpSessionCfg* cfg,
                                WolfCertHttpSession** out)
 {
@@ -1672,8 +1592,7 @@ int wolfcert_http_session_open(const WolfCertHttpSessionCfg* cfg,
     }
 
     if (cfg->nonblocking) {
-        /* The mode rides on io_timeout_ms per call, for TLS records and
-         * plain HTTP alike; the socket keeps its own blocking state. */
+        /* io_timeout_ms carries the mode; the socket keeps its own state. */
         s->nonblocking = 1;
 
         if (s->conn.ssl) {
@@ -1703,7 +1622,7 @@ int wolfcert_http_session_fd(const WolfCertHttpSession* s)
 
     return wolfcert_transport_fd(&s->conn.t, s->conn.handle);
 #else
-    (void)s;   /* no descriptor-backed transport exists in this build */
+    (void)s;
     return -1;
 #endif
 }
@@ -1719,7 +1638,6 @@ int wolfcert_http_session_request(WolfCertHttpSession* s,
     memset(resp, 0, sizeof(*resp));
     resp->heap = s->heap;
 
-    /* Validate that the URL targets the session's host / scheme / port. */
     WolfCertUrl u;
     int rc = wolfcert_http_url_parse(req->url, &u, s->heap);
     if (rc != WOLFCERT_OK)
@@ -1749,9 +1667,7 @@ int wolfcert_http_session_request(WolfCertHttpSession* s,
     return rc;
 }
 
-/* Release the stored request head. It carries the Authorization line, so clear
- * it rather than just releasing it. Every site that frees the head goes through
- * here. */
+/* The request head carries the Authorization line, so it is wiped. */
 static void sm_drop_head(WolfCertHttpSession* s)
 {
     if (s->sm_head != NULL)
@@ -1783,10 +1699,6 @@ static void sm_reset(WolfCertHttpSession* s)
     s->sm_interim = 0;
 }
 
-/* Tear-down shortcut for state-machine error returns: drop per-request
- * scratch and mark the session closed. Mirrors the SM_DONE path's
- * explicit cleanup so buffers don't sit allocated until
- * wolfcert_http_session_close. */
 static int sm_fail(WolfCertHttpSession* s, int rc)
 {
     s->closed = 1;
@@ -1815,10 +1727,6 @@ void wolfcert_http_session_close(WolfCertHttpSession* s)
     WOLFCERT_XFREE(s, s->heap);
 }
 
-/* ---- non-blocking request state machine --------------------------------- */
-
-/* Non-blocking write step. Returns OK when all bytes sent,
- * WANT_READ/WRITE otherwise. */
 static int nb_write(WolfCertConn* c, const uint8_t* buf, size_t len, size_t* off)
 {
     while (*off < len) {
@@ -1856,8 +1764,6 @@ static int nb_write(WolfCertConn* c, const uint8_t* buf, size_t len, size_t* off
     return WOLFCERT_OK;
 }
 
-/* Total accumulator allowance: the body cap plus the header budget. */
-/* Ensure the rx buffer has room for `need` more bytes. */
 static int nb_rx_reserve(WolfCertHttpSession* s, size_t need)
 {
     size_t want = s->sm_rx_len + need;
@@ -1885,24 +1791,20 @@ static int nb_rx_reserve(WolfCertHttpSession* s, size_t need)
     return WOLFCERT_OK;
 }
 
-/* Read one chunk into the rx buffer. Returns OK (may still want more),
- * WANT_READ/WRITE, or an error. `ended` is set to 1 when the peer
- * closed cleanly (EOF) - used by the read-until-close body path. */
+/* `ended` is set when the peer closed cleanly. */
 static int nb_read_some(WolfCertHttpSession* s, int* ended)
 {
     *ended = 0;
 
-    /* Read at most what the allowance still permits, so a response that
-     * ends inside the final quantum is not rejected before it is read. */
+    /* Clamp to the allowance left, so a response ending in it still fits. */
     size_t room = rx_max(s->max_body) - s->sm_rx_len;
     uint8_t probe;
     uint8_t* dst;
     int probing = 0;
 
     if (room == 0) {
-        /* An EOF-delimited body ending exactly on the allowance is legal, so
-         * a full accumulator still has to look for the close. Any byte that
-         * arrives instead puts the response over the allowance. */
+        /* An EOF-delimited body may end exactly on the allowance, so probe
+         * one byte for the close; data instead overruns it. */
         dst     = &probe;
         room    = 1;
         probing = 1;
@@ -1969,7 +1871,6 @@ static int nb_read_some(WolfCertHttpSession* s, int* ended)
     return WOLFCERT_ERR_IO;
 }
 
-/* Build the outgoing HTTP request head into s->sm_head. */
 static int build_head(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
                       const WolfCertUrl* u)
 {
@@ -2027,7 +1928,6 @@ static int build_head(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
         req->body_len,
         auth);
 
-    /* The Authorization line has been copied into `head`; drop this copy. */
     wc_ForceZero(auth, (word32)sizeof(auth));
 
     if (hn < 0 || (size_t)hn >= head_cap) {
@@ -2043,8 +1943,6 @@ static int build_head(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
     return WOLFCERT_OK;
 }
 
-/* After reading headers, pull Content-Length / Transfer-Encoding /
- * Content-Type and decide which body-read mode to enter. */
 static int inspect_headers(WolfCertHttpSession* s)
 {
     char* hdrs = (char*)WOLFCERT_XMALLOC(s->sm_hdr_end + 1, s->heap);
@@ -2147,10 +2045,7 @@ int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
             "with WolfCertHttpSessionCfg.nonblocking = 1");
     }
 
-    /* First call for this request: stash caller's resp, prep head +
-     * body buffers. We do this regardless of whether the TLS handshake
-     * is still in progress - the handshake step runs first in the
-     * state-machine loop either way. */
+    /* First call for this request. */
     if (s->sm_resp == NULL) {
         memset(resp, 0, sizeof(*resp));
         resp->heap = s->heap;
@@ -2186,15 +2081,10 @@ int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
         s->sm_head_request = (strcmp(req->method, "HEAD") == 0);
         s->sm_interim      = 0;
 
-        /* Seed rx with any residual bytes from the previous response. */
         if (s->residual_len > 0) {
             int rr = nb_rx_reserve(s, s->residual_len);
             if (rr != WOLFCERT_OK) {
-                /* build_head has already stored the Authorization line in
-                 * s->sm_head, so unwind through sm_fail: it scrubs the head
-                 * and closes the session. Returning directly would leave the
-                 * credentials allocated for the next build_head to overwrite
-                 * unzeroized. */
+                /* Return via sm_fail() to zero the password in s->sm_head. */
                 return sm_fail(s, rr);
             }
             memcpy(s->sm_rx, s->residual, s->residual_len);
@@ -2204,13 +2094,10 @@ int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
             s->residual_len = 0;
         }
 
-        /* If the session is past the handshake (or plaintext), move
-         * straight into writing the request head. */
         if (s->sm_state != SM_HANDSHAKE)
             s->sm_state = SM_WRITE_HEAD;
     }
 
-    /* Drive the state machine. */
     for (;;) {
         switch (s->sm_state) {
             case SM_HANDSHAKE:
@@ -2254,7 +2141,6 @@ int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
             }
             case SM_READ_HEAD:
             {
-                /* Check for full header end in the accumulated rx first. */
                 for (size_t i = 0; i + 3 < s->sm_rx_len; ++i) {
                     if (s->sm_rx[i] == '\r' && s->sm_rx[i+1] == '\n' &&
                         s->sm_rx[i+2] == '\r' && s->sm_rx[i+3] == '\n') {
@@ -2272,7 +2158,6 @@ int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
                                     WOLFCERT_HTTP_MAX_INTERIM));
                             }
 
-                            /* Drop the interim block. */
                             memmove(s->sm_rx, s->sm_rx + s->sm_hdr_end,
                                     s->sm_rx_len - s->sm_hdr_end);
                             s->sm_rx_len -= s->sm_hdr_end;
@@ -2349,15 +2234,13 @@ int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
                     if (fr != WOLFCERT_OK)
                         return sm_fail(s, fr);
 
-                    s->closed = 1;  /* peer closed; no more requests on this session */
+                    s->closed = 1;
                     s->sm_state = SM_DONE;
                 }
                 break;
             }
             case SM_DONE:
             {
-                /* Release per-request scratch. sm_resp stays referenced
-                * by the caller via the returned response. */
                 sm_drop_head(s);
                 WOLFCERT_XFREE(s->sm_rx,   s->heap);
                 s->sm_rx = NULL;
@@ -2369,7 +2252,6 @@ int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
                 return WOLFCERT_OK;
             }
             case SM_IDLE:
-                /* Shouldn't land here with sm_resp set; guard. */
                 return sm_fail(s, WOLFCERT_ERR_GENERIC);
             }
 state_loop_continue:

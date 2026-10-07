@@ -17,21 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Structured decode of RFC 7030 section 4.5.2 CsrAttrs.
- *
- *   CsrAttrs  ::= SEQUENCE SIZE (0..MAX) OF AttrOrOID
- *   AttrOrOID ::= CHOICE { oid OBJECT IDENTIFIER, attribute Attribute }
- *   Attribute ::= SEQUENCE { type OID, values SET OF AttributeValue }
- *
- * The parser walks the top-level SEQUENCE, splits each AttrOrOID by
- * tag (0x06 = OBJECT IDENTIFIER, 0x30 = SEQUENCE / Attribute), and
- * populates a caller-visible list of items plus a handful of
- * well-known-OID hint fields for the attributes wolfCert knows how to
- * act on (challenge password, extension request, pinned signature
- * algorithm, pinned key algorithm / curve). Everything else is left
- * for the caller to inspect via the `items` array.
- */
+/* RFC 7030 section 4.5.2 CsrAttrs decode and encode. */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -44,8 +30,6 @@
 
 #include <stdio.h>
 #include <string.h>
-
-/* ---- minimal DER parsing helpers --------------------------------------- */
 
 static int der_take_tl(const uint8_t* p, size_t avail,
                        uint8_t* out_tag, size_t* out_len, size_t* out_hdr)
@@ -82,8 +66,6 @@ static int der_take_tl(const uint8_t* p, size_t avail,
     return WOLFCERT_OK;
 }
 
-/* ---- well-known OID table --------------------------------------------- */
-
 #define OID_(...)  { __VA_ARGS__ }
 static const uint8_t OID_CHALLENGE_PASSWORD[] = {
     0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x07
@@ -114,7 +96,6 @@ static const uint8_t OID_ECDSA_SHA512[] = {
     0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x04, 0x03, 0x04
 };
 
-/* Public key algorithm OIDs. */
 static const uint8_t OID_RSA_ENCRYPTION[] = {
     0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x01, 0x01
 };
@@ -122,19 +103,15 @@ static const uint8_t OID_EC_PUBLIC_KEY[]  = {
     0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x02, 0x01
 };
 
-/* Named curves, body of the OID. */
 static const uint8_t OID_SECP256R1[] = { 0x2A, 0x86, 0x48, 0xCE, 0x3D, 0x03, 0x01, 0x07 };
 static const uint8_t OID_SECP384R1[] = { 0x2B, 0x81, 0x04, 0x00, 0x22 };
 static const uint8_t OID_SECP521R1[] = { 0x2B, 0x81, 0x04, 0x00, 0x23 };
 
-/* Ed25519 / Ed448 are covered by a single OID that identifies both the
- * key algorithm and the signature algorithm (RFC 8410). No separate
- * hash - Ed25519 uses SHA-512 internally, Ed448 uses SHAKE256. */
+/* RFC 8410: one OID names both the key and the signature algorithm. */
 static const uint8_t OID_ED25519[] = { 0x2B, 0x65, 0x70 };
 static const uint8_t OID_ED448[]   = { 0x2B, 0x65, 0x71 };
 
-/* FIPS 204 ML-DSA NIST OIDs (2.16.840.1.101.3.4.3.{17,18,19}).
- * Like Ed25519/Ed448 the OID doubles as key and signature algorithm. */
+/* FIPS 204 ML-DSA OIDs 2.16.840.1.101.3.4.3.{17,18,19}, also key + sig. */
 static const uint8_t OID_ML_DSA_44[] = {
     0x60, 0x86, 0x48, 0x01, 0x65, 0x03, 0x04, 0x03, 0x11
 };
@@ -151,8 +128,7 @@ static int oid_eq(const uint8_t* a, size_t al,
     return al == bl && memcmp(a, b, al) == 0;
 }
 
-/* Apply a hint for a signature-algorithm OID (or a combined key+sig OID
- * for the edwards / ML-DSA families, where one OID identifies both). */
+/* Map a signature-algorithm or combined key+sig OID to hints. */
 static void apply_sigalg(WolfCertCsrAttrs* out, const uint8_t* oid, size_t oid_len)
 {
     if (oid_eq(oid, oid_len, OID_SHA256_RSA, sizeof(OID_SHA256_RSA))) {
@@ -196,11 +172,8 @@ static void apply_sigalg(WolfCertCsrAttrs* out, const uint8_t* oid, size_t oid_l
     }
 }
 
-/* Walk the SET OF AttributeValue of an attribute whose type OID is a
- * public-key algorithm (rsaEncryption / id-ecPublicKey) and pull out
- * the hints. For rsaEncryption the pinned modulus size isn't typically
- * carried in the SET - leave preferred_rsa_bits at 0. For id-ecPublicKey
- * the values carry the named-curve OID. */
+/* Hints from a public-key algorithm attribute; for id-ecPublicKey the
+ * values carry the named-curve OID. */
 static void apply_pubkey_values(WolfCertCsrAttrs* out, int key_type,
                                 const uint8_t* vals, size_t vals_len)
 {
@@ -208,7 +181,6 @@ static void apply_pubkey_values(WolfCertCsrAttrs* out, int key_type,
     if (key_type != WOLFCERT_KEY_ECC || vals == NULL || vals_len == 0)
         return;
 
-    /* First value inside the SET. */
     uint8_t tag;
     size_t len, hdr;
     if (der_take_tl(vals, vals_len, &tag, &len, &hdr) != WOLFCERT_OK)
@@ -256,8 +228,6 @@ static void classify(WolfCertCsrAttrs* out, const WolfCertCsrAttrItem* it)
     }
 }
 
-/* ---- public API --------------------------------------------------------- */
-
 int wolfcert_est_parse_csr_attrs(const uint8_t* der, size_t der_len,
                                  WolfCertCsrAttrs* out)
 {
@@ -269,7 +239,7 @@ int wolfcert_est_parse_csr_attrs(const uint8_t* der, size_t der_len,
     out->heap = heap;
 
     if (der == NULL || der_len == 0)
-        return WOLFCERT_OK; /* empty attrs */
+        return WOLFCERT_OK;
 
     /* Copy the source bytes so items can hold stable pointers. */
     uint8_t* copy = (uint8_t*)WOLFCERT_XMALLOC(der_len, heap);
@@ -299,7 +269,6 @@ int wolfcert_est_parse_csr_attrs(const uint8_t* der, size_t der_len,
     const uint8_t* p   = copy + hdr;
     const uint8_t* end = p + len;
 
-    /* First pass: count items. */
     size_t n = 0;
     const uint8_t* scan = p;
     while (scan < end) {
@@ -334,7 +303,6 @@ int wolfcert_est_parse_csr_attrs(const uint8_t* der, size_t der_len,
         memset(out->items, 0, sizeof(WolfCertCsrAttrItem) * n);
     }
 
-    /* Second pass: fill items + classify. */
     size_t idx = 0;
     while (p < end) {
         uint8_t t;
@@ -369,12 +337,8 @@ int wolfcert_est_parse_csr_attrs(const uint8_t* der, size_t der_len,
             it->oid_len = olen;
             it->kind    = WOLFCERT_CSRATTR_ATTRIBUTE;
 
-            /* RFC 2985: the `values SET OF AttributeValue` is mandatory
-             * (SIZE(1..MAX)). An Attribute SEQUENCE that stops after
-             * the type OID is malformed; reject it rather than silently
-             * returning values_len=0. Callers who want "this attribute
-             * type must appear" with no fixed value should send a
-             * bare-OID AttrOrOID instead. */
+            /* RFC 7030 section 4.5.2 values are SIZE(1..MAX); an Attribute
+             * with only the type OID is malformed. */
             const uint8_t* after_oid = inner + ohdr + olen;
             size_t         remaining = inner_len - (ohdr + olen);
             if (remaining == 0) {
@@ -436,17 +400,12 @@ wolfcert_csr_attrs_find(const WolfCertCsrAttrs* a,
     return NULL;
 }
 
-/* ---- builder ----------------------------------------------------------- *
- * DER length headers are encoded with wolfSSL's public SetLength() (called
- * with a NULL buffer it just returns the header size). The single-byte tags
- * use wolfSSL's public ASN tag constants; they are written inline because the
- * matching SetSet / SetOctetString helpers are not part of the public API. */
+/* SetSet / SetOctetString are not public API, so tags are written inline. */
 
 /* Size of one AttrOrOID item on the wire. */
 static size_t item_size(const WolfCertCsrAttrItem* it)
 {
     if (it->kind == WOLFCERT_CSRATTR_BARE_OID) {
-        /* OID TLV */
         return 1 + SetLength((word32)it->oid_len, NULL) + it->oid_len;
     }
 
@@ -503,10 +462,7 @@ int wolfcert_csr_attrs_build(const WolfCertCsrAttrItem* items, size_t count,
     if (count > 0 && items == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    /* Every item must carry a non-empty OID; an Attribute (non-bare)
-     * also needs at least one value, since RFC 2985's SET OF
-     * AttributeValue has SIZE(1..MAX). Catching this here means the
-     * builder can never emit DER the parser would reject. */
+    /* An Attribute needs at least one value (RFC 7030 SIZE(1..MAX)). */
     for (size_t i = 0; i < count; ++i) {
         if (items[i].oid == NULL || items[i].oid_len == 0)
             return WOLFCERT_ERR_BAD_ARG;
@@ -541,10 +497,7 @@ int wolfcert_csr_attrs_build(const WolfCertCsrAttrItem* items, size_t count,
     return WOLFCERT_OK;
 }
 
-/* ---- _apply: overlay parsed hints onto caller's configs --------------- */
-
-/* Translate an ECC curve size (in bits) into the `WolfCertKeyCfg.param`
- * our keygen expects. Returns 0 for unknown sizes. */
+/* Curve size in bits to WolfCertKeyCfg.param; 0 for unknown sizes. */
 static int ecc_param_for_bits(int bits)
 {
     switch (bits) {
@@ -566,52 +519,30 @@ int wolfcert_csr_attrs_apply(const WolfCertCsrAttrs* attrs,
     if (attrs == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    /* Overlay the parsed hints onto the caller's `key_cfg` and `meta`,
-     * but only where the caller didn't already set an explicit value.
-     * Explicit caller values always win - this keeps the function safe
-     * to call unconditionally on top of a partially-populated config. */
-
+    /* Hints fill only zero fields; param only when type came from the hint. */
     if (key_cfg != NULL && key_cfg->type == 0 && attrs->preferred_key_type != 0) {
         key_cfg->type = (WolfCertKeyType)attrs->preferred_key_type;
-        /* Pick up any algorithm-specific size / curve hint at the same
-         * time - doing it here (rather than in a separate branch) keeps
-         * the "caller-supplied type wins" rule intact. */
         if (key_cfg->param == 0) {
             if (attrs->preferred_key_type == WOLFCERT_KEY_RSA) {
-                /* RSA hints never carry a modulus size, so fall back to
-                 * a safe default rather than handing keygen a 0. */
+                /* RSA hints carry no modulus size. */
                 key_cfg->param = attrs->preferred_rsa_bits > 0 ?
                                     attrs->preferred_rsa_bits : 2048;
             }
             else if (attrs->preferred_key_type == WOLFCERT_KEY_ECC) {
                 int ecc_param = ecc_param_for_bits(
                                     attrs->preferred_ecc_curve_bits);
-                /* A bare sig-alg OID pins the curve to nothing usable;
-                 * default to P-256 so keygen still has a curve. */
+                /* A bare sig-alg OID carries no curve; default to P-256. */
                 key_cfg->param = ecc_param != 0 ? ecc_param : 256;
             }
-            /* Ed25519 / Ed448 / ML-DSA 44/65/87: wolfCert's keygen
-             * ignores `param` for these types, so leave it at 0. */
         }
     }
 
     if (meta != NULL) {
-        /* Propagate the preferred signature hash into the richer CSR
-         * metadata. `wolfcert_csr_build` honours meta->preferred_hash
-         * only when set; 0 means "let choose_sig_type pick". */
         if (meta->preferred_hash == 0 && attrs->preferred_hash != 0) {
             meta->preferred_hash = attrs->preferred_hash;
         }
-
-        /* require_challenge_password / require_extension_request are
-         * informational on the client: the caller either populated
-         * meta->challenge_password (or SANs / EKU / KU for extensionRequest)
-         * or they didn't. We don't invent values here. */
     }
 
-    /* Refuse to silently apply hints for a key type the current build
-     * was compiled without - the caller will get a clearer error than
-     * "WOLFCERT_ERR_UNSUPPORTED from keygen" later on. */
     if (key_cfg != NULL) {
         switch (key_cfg->type) {
 #ifndef WOLFCERT_HAVE_ED25519
@@ -636,24 +567,19 @@ int wolfcert_csr_attrs_apply(const WolfCertCsrAttrs* attrs,
     return WOLFCERT_OK;
 }
 
-/* Render a DER-encoded OID as a dotted-decimal string into `out` (always
- * NUL-terminated when out_cap > 0). Returns the number of bytes written
- * (excluding the terminator). A general OID utility used by the EST server's
- * missing-attribute diagnostic and unit-tested directly; it lives here rather
- * than in est_server.c so it is available in EST builds without the server. */
+/* Render a DER OID as dotted decimal, NUL-terminated when out_cap > 0.
+ * Arcs that do not fit are dropped; the return value can exceed out_cap. */
 WOLFCERT_TEST_VIS size_t wolfcert_oid_to_dotted(const uint8_t* oid, size_t oid_len,
                                                 char* out, size_t out_cap)
 {
     size_t off = 0;
 
-    /* Always leave a valid C string, even for an empty OID or zero capacity. */
     if (out_cap > 0)
         out[0] = '\0';
 
     if (oid_len >= 1) {
-        /* First byte holds the first two arcs as 40*node1 + node2. node1 is
-         * capped at 2, so for a first byte >= 80 node2 is the remainder above
-         * 80 (node2 can exceed 40 only when node1 == 2). */
+        /* First byte is 40*node1 + node2 with node1 <= 2, so any value
+         * from 80 up is arc 2. */
         unsigned first  = oid[0] < 80 ? oid[0] / 40 : 2;
         unsigned second = oid[0] < 80 ? oid[0] % 40 : oid[0] - 80u;
         off += (size_t)snprintf(out + off, out_cap - off, "%u.%u",

@@ -19,8 +19,7 @@
 
 /*
  * wolfSSL configuration for a Zephyr build of wolfCert. The wolfSSL module
- * includes this in place of its own default block, so it must be
- * self-contained. Key algorithms follow the CONFIG_WOLFCERT_* symbols.
+ * includes it in place of its own defaults, so it must be self-contained.
  */
 
 #ifndef WOLFCERT_ZEPHYR_WOLFSSL_USER_SETTINGS_H
@@ -30,7 +29,7 @@
 extern "C" {
 #endif
 
-/* ---- platform ----------------------------------------------------------- */
+/* Platform */
 #define WOLFSSL_GENERAL_ALIGNMENT 4
 #define SIZEOF_LONG_LONG 8
 #define WOLFSSL_IGNORE_FILE_WARN
@@ -40,7 +39,7 @@ extern "C" {
 
 #define WOLFSSL_USER_IO
 
-/* ---- TLS ---------------------------------------------------------------- */
+/* TLS */
 #define WOLFSSL_TLS13
 #define NO_OLD_TLS
 #define HAVE_TLS_EXTENSIONS
@@ -56,7 +55,7 @@ extern "C" {
 
 #define WOLFSSL_POST_HANDSHAKE_AUTH
 
-/* ---- certificate handling ----------------------------------------------- */
+/* Certificate handling */
 #define WOLFSSL_ASN_TEMPLATE
 #define WOLFSSL_CERT_GEN
 #define WOLFSSL_CERT_REQ
@@ -68,19 +67,19 @@ extern "C" {
 #define WOLFSSL_DER_TO_PEM
 #define WOLFSSL_BASE64_ENCODE
 
-/* ---- PKCS#7 (SCEP pkiMessage, EST /cacerts) ----------------------------- */
+/* PKCS#7 (SCEP pkiMessage, EST /cacerts) */
 #define HAVE_PKCS7
 #define HAVE_AES_KEYWRAP
 #define WOLFSSL_AES_DIRECT
 #define HAVE_X963_KDF
 
-/* ---- CryptoCb ------------------------------------------------------------ */
+/* CryptoCb */
 #define WOLF_CRYPTO_CB
 
-/* ---- RNG ----------------------------------------------------------------- */
+/* RNG */
 #define HAVE_HASHDRBG
 
-/* ---- symmetric ----------------------------------------------------------- */
+/* Symmetric */
 #define HAVE_AES_CBC
 #define HAVE_AES_ECB
 #define HAVE_AESGCM
@@ -94,17 +93,15 @@ extern "C" {
 #define HAVE_POLY1305
 #define HAVE_ONE_TIME_AUTH
 
-/* ---- TLS transport ------------------------------------------------------- */
-/* ECDHE is the handshake's key agreement and essential for EST. RSA stays on
- * to verify servers, which commonly present RSA-signed certificates. */
+/* TLS transport, on regardless of Kconfig: ECDHE for the key agreement, RSA
+ * for servers presenting RSA-signed certificates. */
 #define HAVE_ECC
 #define ECC_TIMING_RESISTANT
 #undef  NO_RSA
 #define WC_RSA_BLINDING
 #define WC_RSA_PSS
 
-/* ---- key algorithms, following Kconfig ----------------------------------- */
-/* These pick what wolfCert can enrol, nothing about the handshake. */
+/* Enrollment key algorithms, following Kconfig */
 #ifdef CONFIG_WOLFCERT_ECC
     #define HAVE_ECC_KEY_EXPORT
 #endif
@@ -134,7 +131,7 @@ extern "C" {
     #define WOLFSSL_NO_SHAKE256
 #endif
 
-/* ---- disabled algorithms -------------------------------------------------- */
+/* Disabled algorithms */
 #define NO_DSA
 #define NO_DH
 #define NO_RC4
@@ -142,11 +139,10 @@ extern "C" {
 #define NO_MD5
 #define NO_PSK
 
-/* No 3DES: the SCEP fallback for a peer that does not advertise AES. */
+/* Drops the SCEP 3DES fallback for peers that do not advertise AES. */
 #define NO_DES3
 
-/* ---- math ---------------------------------------------------------------- */
-/* SP_MATH_ALL, not SP_MATH: the restricted variant cannot generate keys. */
+/* Math; plain WOLFSSL_SP_MATH cannot generate keys. */
 #define WOLFSSL_SP_MATH_ALL
 #define WOLFSSL_OLD_PRIME_CHECK
 

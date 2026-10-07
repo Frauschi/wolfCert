@@ -29,17 +29,6 @@
 #include <stddef.h>
 #include <string.h>
 
-/* ---- Subject DN parsing ---------------------------------------------------
- *
- * Accepts a simple comma-separated DN string, e.g.
- *   "CN=device-1,O=Acme,OU=Devices,C=US"
- * Literal ',' or '=' inside an attribute value are not supported; callers
- * that need them should use WolfCertCertMeta::customize. */
-
-/* Subject-DN attribute table. Declared `static const` so it lives in .rodata
- * rather than being rebuilt on the stack on every call; `off` is the byte
- * offset of the target field within wolfSSL's CertName, so the actual
- * destination is computed per-call from the caller's `subject`. */
 struct rdn_field {
     const char* key;
     size_t      key_len;
@@ -59,10 +48,6 @@ static const struct rdn_field rdn_fields[] = {
     { "GN",               2,  offsetof(CertName, givenName),  CTC_NAME_SIZE },
     { "emailAddress",     12, offsetof(CertName, email),      CTC_NAME_SIZE },
     { "serialNumber",     12, offsetof(CertName, serialDev),  CTC_NAME_SIZE },
-    /* Additional RDNs carried by wolfSSL's CertName beyond the common set
-     * above. UID is common in device / factory
-     * certs; postalCode and businessCategory show up in regulated-industry
-     * profiles (e.g. EV cert issuance). */
     { "UID",              3,  offsetof(CertName, userId),     CTC_NAME_SIZE },
     { "userId",           6,  offsetof(CertName, userId),     CTC_NAME_SIZE },
     { "postalCode",       10, offsetof(CertName, postalCode), CTC_NAME_SIZE },
@@ -102,6 +87,8 @@ static const char* trim_ws(const char* s, const char* end, size_t* out_len)
     return s;
 }
 
+/* Subject DNs are "CN=dev,O=Acme" strings; values containing ',' need
+ * WolfCertCertMeta::customize. */
 static int parse_subject_dn(const char* dn, CertName* subject)
 {
     if (dn == NULL)
@@ -133,13 +120,6 @@ static int parse_subject_dn(const char* dn, CertName* subject)
     }
     return WOLFCERT_OK;
 }
-
-/* ---- SAN encoder (into a bounded caller-supplied buffer) ------------------
- *
- * Builds a wolfSSL alt-name list with wc_SetDNSEntry() (which copies each
- * value) and encodes it into the GeneralNames SEQUENCE that Cert.altNames
- * expects via wc_FlattenAltNames(). wolfSSL owns all list allocation; the
- * list is released with FreeAltNames(). */
 
 static int build_san_seq(const WolfCertCertMeta* meta, Cert* cert, void* heap)
 {
@@ -179,8 +159,6 @@ static int build_san_seq(const WolfCertCertMeta* meta, Cert* cert, void* heap)
         return WOLFCERT_ERR_WC(rc, "csr", "SetDNSEntry");
     }
 
-    /* Encode straight into cert->altNames / altNamesSz. A NULL list (no SAN
-     * requested) sets altNamesSz to 0. */
     rc = wc_SetAltNamesFromList(cert, list);
 
     FreeAltNames(list, heap);
@@ -189,11 +167,7 @@ static int build_san_seq(const WolfCertCertMeta* meta, Cert* cert, void* heap)
     return WOLFCERT_OK;
 }
 
-/* ---- CSR build ------------------------------------------------------------ */
-
-/* ECDSA hash is traditionally matched to the curve (RFC 5480): P-256 -> SHA-256,
- * P-384 -> SHA-384, P-521 -> SHA-512. Other algorithms use the sig type from
- * the dispatch table. */
+/* RFC 5480 pairs P-256, P-384 and P-521 with SHA-256, SHA-384 and SHA-512. */
 #ifdef WOLFCERT_HAVE_ECC
 static int ecdsa_sig_for_curve(int curve_id)
 {
@@ -209,12 +183,8 @@ static int ecdsa_sig_for_curve(int curve_id)
 }
 #endif
 
-/* Map a caller-requested hash size (in bits) onto wolfSSL's CTC_*
- * signature-type constants for the key's algorithm family. Returns 0
- * when the combination isn't supported - the caller then falls back
- * to the per-key default. Ed25519 / Ed448 / ML-DSA don't use a
- * separate hash so `preferred_hash` is ignored for them (they return
- * the algorithm's default). */
+/* CTC_* signature type for a hash size in bits, or 0 when the key's family
+ * has no such hash choice. */
 static int sig_type_for_hash(WolfCertKeyType type, int preferred_hash)
 {
 #ifdef WOLFCERT_HAVE_RSA
@@ -253,10 +223,6 @@ static int sig_type_for_hash(WolfCertKeyType type, int preferred_hash)
 static int choose_sig_type(const WolfCertKey* key, const WolfCertKeyAlg* alg,
                            const WolfCertCertMeta* meta)
 {
-    /* Explicit hash override from the caller (or from
-     * wolfcert_csr_attrs_apply of a server-pinned /csrattrs hint)
-     * takes precedence, but only for algorithm families where the
-     * hash is a meaningful choice. */
     if (meta != NULL && meta->preferred_hash != 0) {
         int sig = sig_type_for_hash(key->type, meta->preferred_hash);
         if (sig != 0)
@@ -387,7 +353,6 @@ int wolfcert_csr_build_ex(const WolfCertKey* key, const WolfCertCertMeta* meta,
         return rc;
     }
 
-    /* SAN into cert->altNames[] (encoded directly by build_san_seq). */
     rc = build_san_seq(meta, cert, heap);
     if (rc != WOLFCERT_OK) {
         wc_CertFree(cert);
@@ -445,8 +410,6 @@ int wolfcert_csr_build_ex(const WolfCertKey* key, const WolfCertCertMeta* meta,
     }
     cert->sigType = choose_sig_type(key, alg, meta);
 
-    /* Size the DER buffer: algorithm hint + RSA modulus head room + the
-     * subject and SAN carried. */
     size_t der_cap = alg->der_cap_hint + 1024;
     if (key->type == WOLFCERT_KEY_RSA) {
         size_t bits = key->rsa_bits ? (size_t)key->rsa_bits : 4096;

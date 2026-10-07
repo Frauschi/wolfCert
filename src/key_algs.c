@@ -17,10 +17,6 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Algorithm dispatch table. See key_algs.h for the contract.
- */
-
 #include "internal.h"
 #include "key_algs.h"
 
@@ -38,16 +34,14 @@
 #endif
 #ifdef WOLFCERT_HAVE_MLDSA
 #  include <wolfssl/wolfcrypt/wc_mldsa.h>
-/* Checked here, not in check_config.h: dilithium.h derives this macro only
- * once settings.h has been parsed. */
+/* dilithium.h derives this only after settings.h, so check_config.h cannot
+ * test it. */
 #  ifndef WOLFSSL_MLDSA_CHECK_KEY
 #    error "wolfSSL is missing wc_MlDsaKey_CheckKey(); wolfCert's ML-DSA support needs it. Rebuild wolfSSL without WOLFSSL_DILITHIUM_NO_CHECK_KEY / WOLFSSL_MLDSA_VERIFY_ONLY."
 #  endif
 #endif
 
 #include <string.h>
-
-/* ---- RSA ---------------------------------------------------------------- */
 
 #ifdef WOLFCERT_HAVE_RSA
 static int rsa_alloc_init(struct WolfCertKey* k)
@@ -116,8 +110,6 @@ static int rsa_pub_check(struct WolfCertKey* k, const uint8_t* pub,
         goto out;
     }
 
-    /* Size the scratch from the keys themselves: a fixed cap would report an
-     * oversized stored CA as a crypto failure. */
     mine   = wc_RsaPublicKeyDerSize((RsaKey*)k->impl, 0);
     theirs = wc_RsaPublicKeyDerSize(cert_key, 0);
     if (mine <= 0 || theirs <= 0) {
@@ -136,8 +128,7 @@ static int rsa_pub_check(struct WolfCertKey* k, const uint8_t* pub,
         goto out;
     }
 
-    /* Both sides go through the same encoder so the comparison does not
-     * depend on how the certificate framed its public key. */
+    /* Re-encode both so the comparison ignores the certificate's framing. */
     mine   = wc_RsaKeyToPublicDer_ex((RsaKey*)k->impl, buf, (word32)cap, 0);
     theirs = wc_RsaKeyToPublicDer_ex(cert_key, buf + cap, (word32)cap, 0);
     if (mine <= 0 || theirs <= 0)
@@ -164,8 +155,6 @@ static void rsa_free(struct WolfCertKey* k)
     k->impl = NULL;
 }
 #endif /* WOLFCERT_HAVE_RSA */
-
-/* ---- ECC ---------------------------------------------------------------- */
 
 #ifdef WOLFCERT_HAVE_ECC
 static int ecc_alloc_init(struct WolfCertKey* k)
@@ -246,8 +235,7 @@ static int ecc_pub_check(struct WolfCertKey* k, const uint8_t* pub,
         return WOLFCERT_ERR_WC(rc, "keygen", "ecc_init_ex");
     }
 
-    /* A SEC1 private key need not carry its public point, so derive it when
-     * the decoder did not supply one. */
+    /* A SEC1 private key need not carry its public point. */
     if (((ecc_key*)k->impl)->type == ECC_PRIVATEKEY_ONLY) {
         rc = wc_ecc_make_pub((ecc_key*)k->impl, NULL);
         if (rc != 0) {
@@ -290,8 +278,6 @@ static void ecc_free(struct WolfCertKey* k)
 }
 #endif /* WOLFCERT_HAVE_ECC */
 
-/* ---- Ed25519 ----------------------------------------------------------- */
-
 #ifdef WOLFCERT_HAVE_ED25519
 static int ed25519_alloc_init(struct WolfCertKey* k)
 {
@@ -326,9 +312,7 @@ static int ed25519_priv_decode(struct WolfCertKey* k, const uint8_t* der, word32
 
 static int ed25519_priv_to_der(const struct WolfCertKey* k, uint8_t* buf, word32 cap)
 {
-    /* PrivateKeyToDer emits a PKCS#8 v1 PrivateKeyInfo (no public-key field),
-     * which OpenSSL accepts; KeyToDer's v2 OneAsymmetricKey-with-pubkey does
-     * not. Paired with PKCS8_PRIVATEKEY_TYPE in the alg table. */
+    /* PKCS#8 v1 PrivateKeyInfo, since OpenSSL rejects KeyToDer's v2 form. */
     return wc_Ed25519PrivateKeyToDer((ed25519_key*)k->impl, buf, cap);
 }
 
@@ -361,8 +345,6 @@ static void ed25519_free(struct WolfCertKey* k)
     k->impl = NULL;
 }
 #endif
-
-/* ---- Ed448 ------------------------------------------------------------- */
 
 #ifdef WOLFCERT_HAVE_ED448
 static int ed448_alloc_init(struct WolfCertKey* k)
@@ -431,8 +413,6 @@ static void ed448_free(struct WolfCertKey* k)
 }
 #endif
 
-/* ---- ML-DSA ------------------------------------------------------------ */
-
 #ifdef WOLFCERT_HAVE_MLDSA
 static int mldsa_level_for(WolfCertKeyType t)
 {
@@ -498,10 +478,7 @@ static int mldsa_priv_to_der(const struct WolfCertKey* k, uint8_t* buf, word32 c
     return wc_MlDsaKey_PrivateKeyToDer((MlDsaKey*)k->impl, buf, cap);
 }
 
-/* Unlike its siblings this hook mutates `key`: the certificate's public half
- * is adopted into it, since none can be derived from a PKCS#8 v1 private key.
- * A key that fails the check therefore carries an unverified public half and
- * must be discarded -- wolfcert_ca_load() frees the shim on any failure. */
+/* Adopts the certificate's public half, which a PKCS#8 v1 key lacks. */
 static int mldsa_pub_check(struct WolfCertKey* k, const uint8_t* pub,
                            word32 pub_len)
 {
@@ -522,8 +499,6 @@ static void mldsa_free(struct WolfCertKey* k)
     k->impl = NULL;
 }
 #endif
-
-/* ---- table -------------------------------------------------------------- */
 
 #ifdef WOLFCERT_HAVE_RSA
 static const WolfCertKeyAlg ALG_RSA = {
@@ -594,10 +569,6 @@ static const WolfCertKeyAlg ALG_ED448 = {
 #endif
 
 #ifdef WOLFCERT_HAVE_MLDSA
-/* Each parameter set can be turned off independently in wolfSSL via
- * WOLFSSL_NO_ML_DSA_{44,65,87} (visible here through wolfssl's options.h /
- * user_settings.h). Gate each level so wolfCert only advertises the sets the
- * underlying wolfSSL actually provides. */
 #ifndef WOLFSSL_NO_ML_DSA_44
 static const WolfCertKeyAlg ALG_MLDSA44 = {
     .type            = WOLFCERT_KEY_MLDSA44,

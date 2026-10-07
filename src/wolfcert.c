@@ -24,12 +24,6 @@
 
 #include <string.h>
 
-/* wolfcert_init()/wolfcert_cleanup() are thin wrappers over
- * wolfSSL_Init()/wolfSSL_Cleanup(). Those are themselves reference-counted
- * and thread-safe internally, so paired wolfcert_init()/wolfcert_cleanup()
- * calls bring wolfSSL up on the first and tear it down on the last with no
- * bookkeeping of our own. That leaves no shared mutable state for wolfCert to
- * guard, hence no library-level lock. */
 int wolfcert_init(void* heap)
 {
     int rc = wolfSSL_Init();

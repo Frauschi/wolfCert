@@ -17,16 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Algorithm dispatch table. Centralizes every per-key-type branch -
- * wolfSSL key struct allocation + free, keygen, PEM/DER round-trip, and the
- * constants (keyType / sigType / keyOID / PEM type) needed elsewhere -
- * instead of scattering them across keygen.c / csr.c / ca_issue.c.
- *
- * Adding a new algorithm = adding one struct literal at the bottom of
- * src/key_algs.c plus (if applicable) a WOLFCERT_HAVE_<ALG> compile
- * guard.
- */
+/* Per-key-type dispatch table. */
 
 #ifndef WOLFCERT_KEY_ALGS_H
 #define WOLFCERT_KEY_ALGS_H
@@ -48,30 +39,24 @@ typedef struct WolfCertKeyAlg {
 
     /* Allocate + wc_*_init_ex the backing wolfSSL struct into key->impl. */
     int  (*alloc_init)(struct WolfCertKey* key);
-    /* Generate. Called after alloc_init. */
     int  (*make)      (struct WolfCertKey* key, const WolfCertKeyCfg* cfg,
                        WC_RNG* rng);
-    /* Decode a DER-encoded private key into the backing struct. */
     int  (*priv_decode)(struct WolfCertKey* key,
                         const uint8_t* der, word32 len);
-    /* Serialize the private key as DER into caller-provided buffer.
-     * Returns written length (>0) on success, negative on error. */
+    /* Returns the DER length written, or negative on error. */
     int  (*priv_to_der)(const struct WolfCertKey* key,
                         uint8_t* buf, word32 cap);
-    /* Confirm the private key belongs to the given public key. Most
-     * implementations mutate `key` to do it - importing the verified public
-     * half (Ed25519/Ed448, ML-DSA) or deriving it (ECC) - so a key that fails
-     * carries an unverified public half and must be freed. */
+    /* Confirm the private key matches `pub`. May mutate `key`, which is not
+     * usable after a failure. */
     int  (*pub_check) (struct WolfCertKey* key,
                        const uint8_t* pub, word32 pub_len);
-    /* wc_*_free + free(key->impl). */
     void (*free_)     (struct WolfCertKey* key);
 } WolfCertKeyAlg;
 
 /* NULL if `t` is not a known or compiled-in algorithm. */
 const WolfCertKeyAlg* wolfcert_key_alg(WolfCertKeyType t);
 
-/* Iterate all registered algorithms (NULL-terminated). */
+/* NULL-terminated list of compiled-in algorithms. */
 const WolfCertKeyAlg* const* wolfcert_key_algs_all(void);
 
 #endif /* WOLFCERT_KEY_ALGS_H */

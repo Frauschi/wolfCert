@@ -17,17 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Degenerate (certs-only) PKCS#7 / CMS SignedData helpers:
- *   - extract certificates from a certs-only SignedData blob, returning them
- *     concatenated as PEM or DER.
- *   - build a certs-only SignedData around a set of DER certificates.
- *
- * Both directions go through wolfSSL's wc_PKCS7 API: extraction via
- * wc_PKCS7_VerifySignedData(), encoding via a DEGENERATE_SID SignedData
- * (wc_PKCS7_EncodeSignedData() with no signer). Heap hints thread through for
- * wolfSSL static-memory builds.
- */
+/* Degenerate (certs-only) PKCS#7 SignedData parse and build helpers. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -42,13 +32,6 @@
 #include <stdint.h>
 #include <string.h>
 
-/* ---- certs-only (degenerate) SignedData extraction --------------------- *
- *
- * wc_PKCS7_VerifySignedData validates the structure and populates
- * pkcs7->cert[] / certSz[]. The bundles we parse are degenerate certs-only
- * SignedData, so there is no signature to verify. */
-
-/* Append `n` bytes to a growable WolfCertBuffer. */
 static int acc_append(WolfCertBuffer* acc, size_t* cap, const uint8_t* data,
                       size_t n, void* heap)
 {
@@ -71,7 +54,6 @@ static int acc_append(WolfCertBuffer* acc, size_t* cap, const uint8_t* data,
     return WOLFCERT_OK;
 }
 
-/* Append one certificate to `acc`, either as raw DER or PEM-encoded. */
 static int append_cert(WolfCertBuffer* acc, size_t* cap, const uint8_t* der,
                        word32 der_len, int as_pem, void* heap)
 {
@@ -148,19 +130,6 @@ WOLFCERT_TEST_VIS int wolfcert_pkcs7_certs_to_der(const uint8_t* p7_der,
     return pkcs7_certs_extract(p7_der, p7_der_len, out_der, heap, 0);
 }
 
-/* ---- degenerate (certs-only) SignedData encoder ------------------------ *
- *
- * Driven through the public wc_PKCS7 API: a DEGENERATE_SID SignedData with no
- * signer, attributes or eContent (hashOID left 0). Certificates are loaded with
- * wc_PKCS7_AddCertificate() and emitted as the certs SET by
- * wc_PKCS7_EncodeSignedData(). We deliberately avoid wc_PKCS7_InitWithCert():
- * it parses the cert and sets pkcs7->publicKeyOID, which makes the encoder's
- * signer-path validation reject ECDSA/RSA-PSS certs (it demands a pre-computed
- * content hash) even though a degenerate bundle has no signer at all. */
-
-/* Light validation: every cert DER must start with SEQUENCE tag 0x30. The full
- * decode happens inside wolfSSL; this just gives a stable WOLFCERT_ERR_PARSE for
- * obviously non-DER input ahead of the wc_PKCS7 calls. */
 static int validate_certs(const uint8_t* const* certs, const size_t* lens, size_t count)
 {
     for (size_t i = 0; i < count; ++i) {
@@ -184,6 +153,8 @@ WOLFCERT_TEST_VIS int wolfcert_pkcs7_build_certs_only(const uint8_t* const* cert
     if (rc != WOLFCERT_OK)
         return rc;
 
+    /* wc_PKCS7_InitWithCert() would set publicKeyOID, which makes the encoder
+     * demand a content hash for ECDSA and RSA-PSS certs. */
     PKCS7* p7 = wc_PKCS7_New(heap, WOLFCERT_DEVID_SOFTWARE);
     if (p7 == NULL)
         return WOLFCERT_ERR_MEMORY;
@@ -204,7 +175,6 @@ WOLFCERT_TEST_VIS int wolfcert_pkcs7_build_certs_only(const uint8_t* const* cert
         return e;
     }
 
-    /* No signer, no eContent: a degenerate certs-only bundle. */
     p7->detached   = 1;
     p7->contentOID = DATA;
 
@@ -213,8 +183,7 @@ WOLFCERT_TEST_VIS int wolfcert_pkcs7_build_certs_only(const uint8_t* const* cert
         certs_body += certs_len[i];
     }
 
-    /* Wrapper overhead (ContentInfo + SignedData + empty SETs) is a few dozen
-     * bytes; 512 is a comfortable upper bound. */
+    /* 512 bytes covers the ContentInfo and SignedData wrapper. */
     word32 cap = (word32)(certs_body + 512);
     uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
     if (buf == NULL) {

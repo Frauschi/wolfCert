@@ -55,10 +55,6 @@ void wolfcert_client_free(WolfCertClient* c)
     WOLFCERT_XFREE(c, c->heap);
 }
 
-/* The orchestration API currently just forwards to the protocol-specific
- * primitives. Keeping it thin so both code paths share auth/trust/TLS
- * configuration. */
-
 int wolfcert_client_get_ca(WolfCertClient* client, const WolfCertServerCfg* srv,
                            WolfCertEncoding encoding, WolfCertBuffer* out_ca)
 {
@@ -93,7 +89,6 @@ int wolfcert_client_fetch_meta(WolfCertClient* client, const WolfCertServerCfg* 
         if (rc != WOLFCERT_OK)
             return rc;
 
-        /* 204 No Content - server has no policy; nothing to apply. */
         if (raw.data == NULL || raw.len == 0)
             return WOLFCERT_OK;
 
@@ -103,10 +98,6 @@ int wolfcert_client_fetch_meta(WolfCertClient* client, const WolfCertServerCfg* 
         if (rc != WOLFCERT_OK)
             return rc;
 
-        /* fetch_meta is the meta-only entry point; only overlays the
-         * hash hint. The full two-sided overlay (key_cfg + meta) is
-         * done inline by wolfcert_client_enroll when auto_csrattrs is
-         * set, since that path owns both structs. */
         if (meta != NULL)
             rc = wolfcert_csr_attrs_apply(&attrs, NULL, meta);
 
@@ -121,10 +112,7 @@ int wolfcert_client_fetch_meta(WolfCertClient* client, const WolfCertServerCfg* 
 }
 
 #ifdef WOLFCERT_HAVE_EST
-/* Apply the server's /csrattrs hints to the given key_cfg + meta
- * in-place. Silent no-op when the server returns 204. Internal helper
- * used by wolfcert_client_enroll's auto-discovery path - kept separate
- * so the failure mode of a broken /csrattrs response is one place. */
+/* Overlay the server's /csrattrs hints onto key_cfg and meta. */
 static int wolfcert_client_auto_csrattrs(const WolfCertServerCfg* srv,
                                          WolfCertKeyCfg* key_cfg,
                                          WolfCertCertMeta* meta)
@@ -161,19 +149,12 @@ int wolfcert_client_enroll(WolfCertClient* client, const WolfCertServerCfg* srv,
             out_key == NULL || out_cert_pem == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    /* Copy caller's key_cfg + meta onto the stack so auto-discovery
-     * can overlay server hints without mutating caller memory. The
-     * copies are shallow (pointers shared with caller) but that's
-     * fine - the apply helper only writes scalar fields. */
+    /* Shallow copies; csr_attrs_apply writes only scalar fields. */
     WolfCertKeyCfg   eff_key  = *key_cfg;
     WolfCertCertMeta eff_meta = *meta;
 
 #ifdef WOLFCERT_HAVE_EST
-    /* auto_csrattrs lives in the EST arm of proto_opts, so the protocol test
-     * has to come first: on a SCEP config that arm is not the active union
-     * member and its contents mean nothing. There is no SCEP equivalent of
-     * /csrattrs, and no way to ask for one - the flag simply does not exist
-     * on WolfCertScepServerOpts. */
+    /* proto_opts is a union; test the protocol before reading its EST arm. */
     if (srv->protocol == WOLFCERT_PROTO_EST && srv->proto_opts.est.auto_csrattrs) {
         int rc = wolfcert_client_auto_csrattrs(srv, &eff_key, &eff_meta);
         if (rc != WOLFCERT_OK)
@@ -202,9 +183,7 @@ int wolfcert_client_enroll(WolfCertClient* client, const WolfCertServerCfg* srv,
 #ifdef WOLFCERT_HAVE_SCEP
     if (srv->protocol == WOLFCERT_PROTO_SCEP) {
         rc = WOLFCERT_ERR_UNSUPPORTED;
-        /* SCEP enrollment needs the RA cert; caller must call
-         * wolfcert_scep_get_ca_cert + wolfcert_scep_pkcs_req directly
-         * until client grows a config for the RA trust anchor. */
+        /* SCEP enrollment needs the RA cert, which this API does not take. */
     }
     else
 #endif
