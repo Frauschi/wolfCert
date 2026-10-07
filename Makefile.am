@@ -244,6 +244,7 @@ EXTRA_DIST = \
     README.md           \
     AGENTS.md           \
     CLAUDE.md           \
+    CONTRIBUTING.md     \
     LICENSE             \
     docs/ARCHITECTURE.md \
     docs/CI.md          \

@@ -11,7 +11,7 @@ This file is for agents helping users *integrate wolfCert into their own
 projects*. If `AGENTS.local.md` or `CLAUDE.local.md` exists in the repository
 root, read it before starting work. Those files are gitignored, carry
 maintainer- and machine-specific instructions, and take precedence over this
-file.
+file. Changes to wolfCert itself follow `CONTRIBUTING.md`.
 
 ## Choose an integration path
 
