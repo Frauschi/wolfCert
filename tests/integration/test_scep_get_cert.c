@@ -17,14 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * End-to-end coverage for RFC 8894 section 3.3.4 GetCert (messageType 21):
- * enroll, then fetch the issued certificate back by its serial number, and
- * check that an unknown serial answers FAILURE with failInfo badCertId.
- *
- * GetCert is off by default, so a second server instance without
- * scep_enable_get_cert must answer as though it did not implement it.
- */
+/* RFC 8894 section 3.3.4 GetCert, with the server option enabled and off. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -100,8 +93,7 @@ static int get_cert_path(WolfCertServer* s)
     REQUIRE(wc_ParseCert(&ic, CERT_TYPE, NO_VERIFY, NULL) == 0);
     REQUIRE(ic.serialSz > 0);
 
-    /* Step 2: GetCert for that serial, signed with the cert just issued,
-     * returns the very same DER. */
+    /* Step 2: GetCert for that serial returns the same DER. */
     WolfCertScepResult r2 = { 0 };
     int rc = wolfcert_scep_get_cert(&cli, &caps,
                                     ca_der->buffer, ca_der->length,
@@ -145,9 +137,7 @@ static int get_cert_path(WolfCertServer* s)
                                    issued_der->buffer, issued_der->length,
                                    dk, ic.serial, 0, &r4) == WOLFCERT_ERR_BAD_ARG);
 
-    /* Step 5: the operation GetCert exists for - one holder fetching a
-     * certificate issued to someone else. The reply is enveloped to the
-     * requester's own cert, so the signer and the fetched cert differ. */
+    /* Step 5: fetch a certificate issued to another holder. */
     WolfCertKey* other = NULL;
     REQUIRE(wolfcert_key_generate(&kcfg, &other) == WOLFCERT_OK);
     WolfCertCertMeta other_meta = { .subject_dn = "CN=device-getcert-2" };
@@ -192,9 +182,8 @@ static int get_cert_path(WolfCertServer* s)
     wolfcert_buffer_free(&other_csr);
     wolfcert_key_free(other);
 
-    /* Step 6: the registry holds the last SCEP_ISSUED_MAX certificates, so
-     * enrolling past that evicts the oldest. Re-using one key and CSR keeps
-     * this to one keygen; every enrollment still gets its own serial. */
+    /* Step 6: 17 more enrollments push the loop's first cert out of the 16
+     * the server keeps. */
     uint8_t first_serial[32];
     size_t  first_serial_len = 0;
     uint8_t last_serial[32];
@@ -229,7 +218,7 @@ static int get_cert_path(WolfCertServer* s)
         wolfcert_scep_result_free(&rn);
     }
 
-    /* The cert from step 1 and the first of the loop have both aged out. */
+    /* GetCert for the loop's first serial gets FAILURE/badCertId. */
     WolfCertScepResult r5 = { 0 };
     REQUIRE(wolfcert_scep_get_cert(&cli, &caps,
                                    ca_der->buffer, ca_der->length,
@@ -241,8 +230,7 @@ static int get_cert_path(WolfCertServer* s)
     REQUIRE(r5.fail_info == 4);
     wolfcert_scep_result_free(&r5);
 
-    /* ...while the newest is still there, so the miss above is eviction and
-     * not a registry that stopped recording. */
+    /* The newest is still held. */
     WolfCertScepResult r6 = { 0 };
     REQUIRE(wolfcert_scep_get_cert(&cli, &caps,
                                    ca_der->buffer, ca_der->length,
@@ -254,8 +242,7 @@ static int get_cert_path(WolfCertServer* s)
     REQUIRE(r6.cert_pem.data != NULL);
     wolfcert_scep_result_free(&r6);
 
-    /* Step 7: a CA that answers with some other certificate is refused, rather
-     * than handing the caller a cert it never asked for. */
+    /* Step 7: a reply carrying a different certificate is refused. */
     wolfcert_scep_server_set_getcert_fault(s, 1, 0);
     WolfCertScepResult r7 = { 0 };
     rc = wolfcert_scep_get_cert(&cli, &caps,
@@ -269,9 +256,7 @@ static int get_cert_path(WolfCertServer* s)
     wolfcert_scep_result_free(&r7);
     wolfcert_scep_server_set_getcert_fault(s, 0, 0);
 
-    /* Step 8: a GetCert whose pkiMessage carried no signer certificate is
-     * refused with badRequest. Unlike enroll there is no falling back to the
-     * CA cert, since a reply enveloped to the CA's key is undecryptable. */
+    /* Step 8: a GetCert with no signer certificate gets badRequest. */
     wolfcert_scep_server_set_getcert_fault(s, 0, 1);
     WolfCertScepResult r8 = { 0 };
     rc = wolfcert_scep_get_cert(&cli, &caps,
@@ -299,8 +284,8 @@ static int get_cert_path(WolfCertServer* s)
     return 0;
 }
 
-/* Default-off: the server refuses a GetCert the same way it refuses a
- * messageType it does not implement, so a client cannot tell the two apart. */
+/* With scep_enable_get_cert clear, GetCert for an issued serial gets
+ * FAILURE/badRequest. */
 static int disabled_path(WolfCertServer* s)
 {
     char url[128];
@@ -338,8 +323,6 @@ static int disabled_path(WolfCertServer* s)
     wc_InitDecodedCert(&ic, issued_der->buffer, issued_der->length, NULL);
     REQUIRE(wc_ParseCert(&ic, CERT_TYPE, NO_VERIFY, NULL) == 0);
 
-    /* The certificate exists and the serial is right; only the gate is shut,
-     * so this is badRequest rather than the badCertId of a genuine miss. */
     WolfCertScepResult r2 = { 0 };
     REQUIRE(wolfcert_scep_get_cert(&cli, &caps,
                                    ca_der->buffer, ca_der->length,
@@ -383,7 +366,7 @@ int main(void)
     if (rc != 0)
         return rc;
 
-    /* ---- the same server with GetCert left at its default */
+    /* GetCert left at its default. */
     WolfCertServerCfgSrv cfg_off = {
         .protocol = WOLFCERT_PROTO_SCEP,
         .bind_host = "127.0.0.1", .bind_port = 0,

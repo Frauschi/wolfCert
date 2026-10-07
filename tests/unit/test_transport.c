@@ -19,14 +19,7 @@
  * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-/*
- * A caller-supplied WolfCertTransport drives the whole HTTP path with no
- * socket, so these run on every target. Coverage: handle 0 is valid,
- * disconnect runs exactly once, an incomplete vtable is rejected, the parser
- * survives a byte-at-a-time feed, a body may end at CONN_CLOSED, response
- * framing follows the status and request method, and a build with no
- * built-in transport refuses a config that supplies none.
- */
+/* A caller-supplied WolfCertTransport drives the HTTP path with no socket. */
 
 #include <wolfcert/wolfcert.h>
 #include <wolfcert/http.h>
@@ -45,8 +38,7 @@
         }                                                                   \
     } while (0)
 
-/* Scripted peer: hands back `resp` in `chunk`-sized pieces, then reports the
- * close. handle 0 is deliberate - a wolfIP descriptor starts there. */
+/* Scripted peer feeding `resp` in `chunk`-sized pieces, then the close. */
 typedef struct {
     const char* resp;
     size_t      off;
@@ -74,7 +66,7 @@ static int p_connect(void* ctx, const char* host, int port, int timeout_ms,
     if (p->bogus_connect_rc != 0)
         return p->bogus_connect_rc;
     p->connects++;
-    *conn = (void*)0;
+    *conn = (void*)0;   /* a wolfIP descriptor can be 0 */
     return WOLFCERT_OK;
 }
 
@@ -222,8 +214,6 @@ static int test_roundtrip(void)
     return 0;
 }
 
-/* One byte per read splits the status line, the headers and the body across
- * calls, which is what a real stack does under load. */
 static int test_byte_at_a_time(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -236,7 +226,6 @@ static int test_byte_at_a_time(void)
     return 0;
 }
 
-/* No Content-Length and no chunking: the body ends at CONN_CLOSED. */
 static int test_body_ends_at_close(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -249,8 +238,7 @@ static int test_body_ends_at_close(void)
     return 0;
 }
 
-/* read() must never return 0, but a transport wrapping recv() is one line
- * away from doing so. wolfCert maps it to a close rather than looping. */
+/* A read() returning 0 is treated as a close. */
 static int test_zero_is_not_data(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -264,8 +252,6 @@ static int test_zero_is_not_data(void)
     return 0;
 }
 
-/* A count larger than the buffer would make the parser copy past the end of
- * it, so the transfer is refused instead of trusted. */
 static int test_read_overcount_rejected(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -277,8 +263,7 @@ static int test_read_overcount_rejected(void)
     return 0;
 }
 
-/* disconnect runs exactly once per successful connect, and never for one
- * that failed. */
+/* A failed connect gets no disconnect; a failed write gets one. */
 static int test_error_paths(void)
 {
     WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
@@ -302,8 +287,7 @@ static int test_error_paths(void)
     return 0;
 }
 
-/* A positive connect return - a descriptor or a byte-count-style 1 - must
- * surface as a negative error, never leak out where callers test rc < 0. */
+/* A positive connect return surfaces as a negative error. */
 static int test_positive_connect_rc(void)
 {
     WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
@@ -322,8 +306,7 @@ static int test_positive_connect_rc(void)
     return 0;
 }
 
-/* Opens with a vtable that dies with this frame, so a session that outlives it
- * proves the copy. */
+/* The vtable lives in this frame, so the session must keep its own copy. */
 static int open_scoped(Peer* p, WolfCertHttpSession** out)
 {
     WolfCertHttpSessionCfg cfg = { .base_url = "http://peer.test/" };
@@ -333,8 +316,7 @@ static int open_scoped(Peer* p, WolfCertHttpSession** out)
     return wolfcert_http_session_open(&cfg, out);
 }
 
-/* Overwrite the frame open_scoped() used, so a borrowed vtable would read
- * junk rather than callbacks that happen to still be intact. */
+/* Overwrites the stack frame open_scoped() used. */
 static int clobber_stack(void)
 {
     volatile unsigned char junk[512];
@@ -368,8 +350,7 @@ static int test_transport_is_copied(void)
     return 0;
 }
 
-/* Only a wholly zeroed transport asks for the built-in one; a half-filled one
- * is a mistake and must not silently dial POSIX. */
+/* Only an all-zero transport selects the built-in one. */
 static int test_partial_vtable_rejected(void)
 {
     WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };
@@ -461,8 +442,6 @@ static int test_204_keeps_retry_after(void)
     return 0;
 }
 
-/* A HEAD reply states the length it would have sent; those bytes never
- * follow. */
 static int test_head_ignores_content_length(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -477,8 +456,6 @@ static int test_head_ignores_content_length(void)
     return 0;
 }
 
-/* "head" is a different method from "HEAD", and its response carries a body
- * like any other. */
 static int test_lowercase_head_is_not_head(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -492,8 +469,6 @@ static int test_lowercase_head_is_not_head(void)
     return 0;
 }
 
-/* The advertised length is what a GET would have returned, so it must not be
- * applied as a body-size bound. */
 static int test_head_oversized_length_ok(void)
 {
     WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
@@ -537,7 +512,6 @@ static int test_interim_then_final(void)
     return 0;
 }
 
-/* The header fields of an interim block must not reach the caller. */
 static int test_interim_headers_discarded(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -554,7 +528,6 @@ static int test_interim_headers_discarded(void)
     return 0;
 }
 
-/* The cap is a ceiling, not a limit one below it. */
 static int test_interim_at_cap_accepted(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -591,8 +564,7 @@ static int test_switching_protocols_rejected(void)
     return 0;
 }
 
-/* Bounded drive of one request: a response that never completes ends the loop
- * rather than spinning in it. */
+/* Drives one request with a bounded number of steps. */
 static int drive_nb(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
                     WolfCertHttpResponse* out)
 {
@@ -778,7 +750,7 @@ static int test_retry_after_http_date(void)
             REQUIRE(sec == 0);
         }
 
-        /* RFC 850 years resolve against now, not a fixed 1970 pivot. */
+        /* RFC 850 years resolve against the current year. */
         snprintf(date, sizeof(date), "Monday, 01-Jan-%02d 00:00:00 GMT",
                  (cy + 45) % 100);
         REQUIRE(retry_after_of(date, nb, &sec) == WOLFCERT_OK);
@@ -879,7 +851,6 @@ static int test_eof_empty_body_is_null(void)
     return 0;
 }
 
-/* The async path runs its own copies of these checks. */
 static int test_nb_head_ignores_content_length(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -936,9 +907,8 @@ static int test_nb_switching_protocols_rejected(void)
     return 0;
 }
 
-/* One byte per read with a WANT_READ between each, so the state machine
- * suspends inside the interim block and inside the final header block and has
- * to resume at the right offset. */
+/* One byte per read with a WANT_READ between, so parsing resumes inside
+ * both the interim and the final header block. */
 static int test_nb_interim_fragmented(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -991,7 +961,6 @@ static int test_nb_head_oversized_length_ok(void)
     return 0;
 }
 
-/* The header fields of an interim block must not reach the caller. */
 static int test_nb_interim_headers_discarded(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -1041,8 +1010,7 @@ static int test_nb_session_reuse_after_204(void)
 }
 
 #ifdef WOLFCERT_HAVE_BUILTIN_TRANSPORT
-/* A zeroed transport reaches the built-in one, so the failure must come from
- * the connect attempt rather than from validation. */
+/* A zeroed transport reaches the built-in one and fails at connect. */
 static int test_zero_transport_takes_builtin(void)
 {
     WolfCertHttpRequest req = { .method = "GET", .url = "http://127.0.0.1:1/" };
@@ -1083,7 +1051,6 @@ static int test_no_fd(void)
     cfg.transport = t;
 
     REQUIRE(wolfcert_http_session_open(&cfg, &s) == WOLFCERT_OK);
-    /* Nothing pollable exists, so the accessor must say so. */
     REQUIRE(wolfcert_http_session_fd(s) == -1);
     wolfcert_http_session_close(s);
     REQUIRE(p.disconnects == 1);
@@ -1091,8 +1058,6 @@ static int test_no_fd(void)
 }
 
 #ifndef WOLFCERT_HAVE_BUILTIN_TRANSPORT
-/* Nothing can be dialled when the config names no transport and the build
- * carries no built-in one, so both entry points must refuse it. */
 static int test_no_builtin_transport(void)
 {
     WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };

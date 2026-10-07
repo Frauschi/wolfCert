@@ -17,15 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Shared integration-test helper: mint self-signed identities (cert + key,
- * PEM) with an iPAddress SAN for 127.0.0.1, used to stand up the in-tree test
- * server behind TLS. EST mandates TLS (RFC 7030), so the EST integration tests
- * run over HTTPS and pin a freshly-minted cert as their bootstrap trust
- * anchor. The signing algorithm follows whatever the wolfSSL build provides
- * (RSA when present, else ECC P-256), so the helpers work under reduced
- * key-algorithm configurations.
- */
+/* Self-signed TLS identities and a raw TLS client for the integration tests. */
 
 #ifndef WOLFCERT_TLS_TEST_UTIL_H
 #define WOLFCERT_TLS_TEST_UTIL_H
@@ -61,10 +53,8 @@ static inline void test_sleep_ms(long ms)
     nanosleep(&ts, NULL);
 }
 
-/* Open a loopback listener that completes the TCP handshake (via the kernel
- * backlog) but never accepts, reads, or answers, so a non-blocking HTTP request
- * sent to it is guaranteed to stay in WOLFCERT_ERR_WANT_READ. Returns the
- * listening fd (>= 0) and writes the bound port to *out_port, or -1 on error. */
+/* Loopback listener that never accepts, so a request to it stays in
+ * WOLFCERT_ERR_WANT_READ. Returns the fd and sets *out_port, or -1. */
 static inline int black_hole_listener(uint16_t* out_port)
 {
     struct sockaddr_in addr;
@@ -88,8 +78,7 @@ static inline int black_hole_listener(uint16_t* out_port)
     return fd;
 }
 
-/* A key algorithm + parameter the current build supports, for client
- * enrollments where the algorithm is incidental to what the test verifies. */
+/* A key type the build has, for tests where the algorithm is incidental. */
 #if defined(WOLFCERT_HAVE_ECC)
     #define TEST_ENROLL_KEY_TYPE  WOLFCERT_KEY_ECC
     #define TEST_ENROLL_KEY_PARAM 256
@@ -106,9 +95,7 @@ static inline int black_hole_listener(uint16_t* out_port)
     #error "tls_test_util: no supported enrollment key algorithm"
 #endif
 
-/* The tests self-sign their identities with whatever signature-capable key
- * algorithm the wolfSSL build provides: RSA when present, else ECC P-256.
- * (A wolfCert build always has at least one of the two.) */
+/* Identities are signed with RSA when present, else ECC P-256. */
 #if !defined(NO_RSA)
     typedef RsaKey            test_signkey;
     #define TEST_CERT_SIGTYPE CTC_SHA256wRSA
@@ -198,10 +185,8 @@ static inline int test_signkey_to_der(test_signkey* key, uint8_t* der,
 #endif
 }
 
-/* Mint a self-signed cert + key (PEM) for common name `cn`. With is_ca == 0
- * the cert carries an iPAddress SAN for 127.0.0.1 (a usable TLS leaf); with
- * is_ca != 0 it is marked CA and carries no SAN. Returns 0 on success; the
- * caller frees *cert_pem / *key_pem with free(). */
+/* Self-signed cert + key (PEM) for `cn`. A leaf gets an iPAddress SAN for
+ * 127.0.0.1, a CA none. The caller frees both with free(). */
 static inline int mint_self_id(const char* cn, int is_ca,
                                uint8_t** cert_pem, size_t* cert_pem_len,
                                uint8_t** key_pem,  size_t* key_pem_len)
@@ -271,10 +256,8 @@ static inline int gen_server_identity(uint8_t** cert_pem, size_t* cert_pem_len,
                         key_pem, key_pem_len);
 }
 
-/* A raw TLS client against the in-tree test server, for the tests that need
- * to script byte-exact HTTP rather than go through wolfcert_est_*. Each
- * test_tls_write() becomes one TLS record and so one wolfSSL_read() on the
- * server, which is what the segmentation-sensitive framing tests rely on. */
+/* Raw TLS client; each test_tls_write() is one TLS record, so one
+ * wolfSSL_read() on the server, which the split-request tests need. */
 typedef struct {
     WOLFSSL_CTX* ctx;
     WOLFSSL*     ssl;
@@ -359,9 +342,8 @@ static inline int test_tls_connect(TestTlsConn* c, uint16_t port,
     return 0;
 }
 
-/* Send the ClientHello and stop there, returning once the server's flight has
- * arrived -- proof that the server is inside wolfSSL_accept() awaiting the
- * rest of the handshake. Returns 0 on success, -1 on error or `timeout_ms`. */
+/* Send the ClientHello and return once the server's flight arrives, leaving
+ * the server inside wolfSSL_accept(). Returns -1 on error or timeout. */
 static inline int test_tls_connect_partial(TestTlsConn* c, uint16_t port,
                                            const uint8_t* ca_pem,
                                            size_t ca_pem_len, int timeout_ms)

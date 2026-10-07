@@ -18,12 +18,8 @@
  */
 
 /*
- * Test helper for WOLFSSL_NO_MALLOC builds. With no dynamic allocator, wolfCert
- * can only allocate from a wolfSSL static-memory pool, so a test loads one and
- * registers it as wolfCert's default heap; every wolfcert_* call then draws
- * from it. On any other build test_static_mem_init() is a no-op. Call it once
- * from a test's main() before wolfcert_init(), so wolfSSL_Init() (invoked by
- * wolfcert_init) and every later NULL-heap allocation draw from the pool.
+ * Static-memory pool for WOLFSSL_NO_MALLOC test builds, a no-op elsewhere.
+ * test_static_mem_init() runs before wolfcert_init() so wolfSSL_Init() uses it.
  */
 
 #ifndef WOLFCERT_TEST_STATIC_MEM_H
@@ -35,10 +31,7 @@
 
 #include <wolfssl/wolfcrypt/memory.h>
 
-/* Sized generously for the unit tests' peak concurrent use (RSA/ECC/ML-DSA
- * keygen, CSR + PKCS7 buffers, and a loopback TLS handshake). wolfSSL's
- * default, feature-aware bucket distribution partitions this buffer; only the
- * total size is tuned here, not the bucket layout. */
+/* Sized for the unit tests' peak use, up to a loopback TLS handshake. */
 static unsigned char g_test_static_pool[4 * 1024 * 1024];
 static WOLFSSL_HEAP_HINT* g_test_heap_hint = NULL;
 
@@ -47,9 +40,6 @@ static inline int test_static_mem_init(void)
     if (wc_LoadStaticMemory(&g_test_heap_hint, g_test_static_pool,
                             sizeof(g_test_static_pool), WOLFMEM_GENERAL, 1) != 0)
         return -1;
-    /* Register the pool as wolfSSL's global heap so wolfSSL_Init() (invoked by
-     * wolfcert_init) and any NULL-heap allocation draw from it. Must run before
-     * wolfcert_init. */
     wolfSSL_SetGlobalHeapHint(g_test_heap_hint);
     wolfcert_set_default_heap(g_test_heap_hint);
     return 0;

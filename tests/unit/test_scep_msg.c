@@ -17,16 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * SCEP pkiMessage structural tests.
- *
- * RFC 8894 section 3.2.2: a CertRep whose pkiStatus is PENDING ("3") or
- * FAILURE ("2") carries no pkcsPKIEnvelope, so the signed pkiMessage must
- * encode with an absent SignedData eContent. This exercises the build/parse
- * pair directly: a non-success pkiMessage built with no envelope must contain
- * no EnvelopedData and must round-trip through the parser with an empty
- * envelope and the expected signed attributes.
- */
+/* SCEP pkiMessage build, parse and signer checks (RFC 8894). */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -65,8 +56,7 @@
         }                                                                   \
     } while (0)
 
-/* Generate a throwaway self-signed RSA CA cert and its private key, both DER.
- * Ownership of the returned buffers passes to the caller (free with free()). */
+/* Throwaway self-signed RSA CA cert and key, both DER; free with free(). */
 static int make_ca(uint8_t** cert_out, size_t* cert_out_len,
                    uint8_t** key_out, size_t* key_out_len)
 {
@@ -140,9 +130,8 @@ static int make_ca(uint8_t** cert_out, size_t* cert_out_len,
     return ret;
 }
 
-/* Issue a certificate signed by the make_ca CA cert/key, so its issuer and
- * subject names differ. `is_ca` sets the basic constraints CA flag; `with_bc`
- * 0 omits the extension entirely. Caller frees *cert_out with free(). */
+/* Issues a cert from the make_ca CA; `with_bc` 0 omits basic constraints.
+ * Free *cert_out with free(). */
 static int make_signed_cert(const uint8_t* ca_der, size_t ca_der_len,
                             const uint8_t* ca_key_der, size_t ca_key_len,
                             const char* cn, int is_ca, int with_bc,
@@ -232,8 +221,7 @@ static int make_signed_cert(const uint8_t* ca_der, size_t ca_der_len,
 }
 
 #ifdef HAVE_ECC
-/* Generate a throwaway self-signed ECC (P-256) CA cert, DER. Ownership of the
- * returned buffer passes to the caller (free with free()). */
+/* Throwaway self-signed ECC P-256 CA cert, DER; free with free(). */
 static int make_ecc_ca(uint8_t** cert_out, size_t* cert_out_len)
 {
     ecc_key  key;
@@ -302,9 +290,7 @@ static int make_ecc_ca(uint8_t** cert_out, size_t* cert_out_len)
     return ret;
 }
 
-/* wolfcert_scep_envelop must reject a non-RSA RA certificate up front with a
- * clear WOLFCERT_ERR_UNSUPPORTED, not fail deep in the PKCS#7 encoder with
- * BAD_KEYWRAP_ALG_E - RFC 8894 is RSA-only. An RSA RA cert still succeeds. */
+/* RFC 8894 is RSA-only, so an ECC RA cert gives WOLFCERT_ERR_UNSUPPORTED. */
 static int test_envelop_rejects_ecc_ra(void)
 {
     static const uint8_t payload[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
@@ -323,9 +309,6 @@ static int test_envelop_rejects_ecc_ra(void)
     made_ecc = make_ecc_ca(&ecc_ca, &ecc_ca_len);
     made_rsa = make_ca(&rsa_ca, &rsa_ca_len, &rsa_key, &rsa_key_len);
 
-    /* enc_oid is irrelevant for the ECC case: the recipient is rejected up
-     * front, before it is used. The RSA cert is the contrast that must still
-     * envelop. */
     if (made_ecc == 0) {
         ecc_rc = wolfcert_scep_envelop(ecc_ca, ecc_ca_len, payload,
                                        sizeof(payload), AES128CBCb, &ecc_env,
@@ -356,15 +339,12 @@ static int test_envelop_rejects_ecc_ra(void)
 }
 #endif /* HAVE_ECC */
 
-/* Build a FAILURE CertRep signed with hash_oid and confirm it carries no
- * pkcsPKIEnvelope and still round-trips through the parser - which must
- * discover the signer's digest rather than assume one. */
+/* A FAILURE CertRep signed with hash_oid has no pkcsPKIEnvelope. */
 static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
                              const uint8_t* key_der, size_t key_len,
                              int hash_oid)
 {
-    /* pkcs7-envelopedData OID 1.2.840.113549.1.7.3 - present whenever a
-     * pkcsPKIEnvelope is emitted, and what must be absent here. */
+    /* pkcs7-envelopedData, OID 1.2.840.113549.1.7.3 */
     static const uint8_t ENVELOPED_OID[] =
         { 0x06,0x09,0x2A,0x86,0x48,0x86,0xF7,0x0D,0x01,0x07,0x03 };
     static const uint8_t tid[16] =
@@ -390,7 +370,6 @@ static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
     memset(sn, 0xA5, sizeof(sn));
     memset(rn, 0x5A, sizeof(rn));
 
-    /* Build a FAILURE CertRep with no enveloped messageData. */
     memset(&attrs, 0, sizeof(attrs));
     attrs.transaction_id     = tid;
     attrs.transaction_id_len = sizeof(tid);
@@ -406,16 +385,13 @@ static int check_no_envelope(const uint8_t* ca_der, size_t ca_len,
                                             key_der, key_len, hash_oid,
                                             &attrs, &pki, NULL) == WOLFCERT_OK);
 
-    /* The pkcsPKIEnvelope must be genuinely absent: no EnvelopedData. */
     REQUIRE(memmem(pki.data, pki.len, ENVELOPED_OID,
                    sizeof(ENVELOPED_OID)) == NULL);
 
-    /* The message must still verify and parse, returning an empty envelope. */
     prc = wolfcert_scep_parse_pki_message(pki.data, pki.len, &env,
             &rx_tid, &rx_tid_len, &rx_sn, &rx_sn_len, &rx_rn, &rx_rn_len,
             &mt, &status, NULL, NULL, &rx_fi, NULL);
-    /* Capture every assertion, then free the parsed outputs before the REQUIREs
-     * so a failing check cannot leak them (same pattern as test_pki_get_url). */
+    /* Free the parsed outputs before the REQUIREs so a failure cannot leak. */
     env_ok    = (env.len == 0 && env.data == NULL);
     status_ok = (status != NULL && strcmp(status, "2") == 0);
     mt_ok     = (mt != NULL && strcmp(mt, "3") == 0);
@@ -448,8 +424,7 @@ static int test_non_success_has_no_envelope(void)
 
     REQUIRE(make_ca(&ca_der, &ca_len, &key_der, &key_len) == 0);
 
-    /* SHA-256 is the common case. SHA-512 covers a signer that chose a
-     * different digest: the parser must not assume the algorithm. */
+    /* Signer digests SHA-256 and, where built, SHA-512. */
     rc = check_no_envelope(ca_der, ca_len, key_der, key_len, SHA256h);
 #ifdef WOLFSSL_SHA512
     if (rc == 0)
@@ -461,10 +436,7 @@ static int test_non_success_has_no_envelope(void)
     return rc;
 }
 
-/* A transactionID longer than the generated 32-hex one must survive a
- * build -> parse round trip byte for byte. RFC 8894 puts no length bound on the
- * attribute, and a client that silently truncated it would send an identifier
- * naming a different transaction than the one it is polling for. */
+/* RFC 8894 puts no length bound on transactionID, so 200 bytes round-trip. */
 static int test_long_transaction_id(void)
 {
     uint8_t* ca_der  = NULL;
@@ -487,8 +459,7 @@ static int test_long_transaction_id(void)
 
     REQUIRE(make_ca(&ca_der, &ca_len, &key_der, &key_len) == 0);
 
-    /* Printable-string bytes so the value is a legal PrintableString, and
-     * varying so a truncated copy cannot compare equal by accident. */
+    /* Varying PrintableString characters so a truncated copy cannot match. */
     for (size_t i = 0; i < sizeof(tid); ++i)
         tid[i] = (uint8_t)('A' + (i % 26));
     memset(sn, 0xA5, sizeof(sn));
@@ -528,9 +499,7 @@ static int test_long_transaction_id(void)
     return 0;
 }
 
-/* Build a PKCS#10 CSR with a distinctive multi-RDN subject, DER-encoded and
- * signed with `key`. Ownership of *csr_out passes to the caller (free with
- * free()). */
+/* Signed PKCS#10 CSR with a multi-RDN subject, DER; free with free(). */
 static int make_csr(RsaKey* key, WC_RNG* rng, const char* cn, const char* org,
                     uint8_t** csr_out, size_t* csr_out_len)
 {
@@ -579,10 +548,7 @@ static int make_csr(RsaKey* key, WC_RNG* rng, const char* cn, const char* org,
     return ret;
 }
 
-/* RFC 8894 section 2.3: the transient self-signed certificate that signs a
- * PKCSReq must carry the same subject name as the enclosed PKCS#10 request.
- * Build a CSR with a distinctive subject, generate the signer cert from it,
- * and require the signer's subject DN to match the CSR's byte for byte. */
+/* RFC 8894 section 2.3: the signer cert's subject equals the CSR's. */
 static int test_signer_subject_matches_csr(void)
 {
     RsaKey      key;
@@ -612,7 +578,6 @@ static int test_signer_subject_matches_csr(void)
     wc_InitDecodedCert(&sgn_dc, signer_der, (word32)signer_len, NULL);
     REQUIRE(wc_ParseCert(&sgn_dc, CERT_TYPE, NO_VERIFY, NULL) == 0);
 
-    /* The signer certificate subject DN must equal the CSR subject DN. */
     if (sgn_dc.subjectRaw == NULL || csr_dc.subjectRaw == NULL ||
             sgn_dc.subjectRawLen != csr_dc.subjectRawLen ||
             memcmp(sgn_dc.subjectRaw, csr_dc.subjectRaw,
@@ -710,9 +675,8 @@ static const uint8_t* seq_content(const uint8_t* p, size_t len,
     return p + hdr;
 }
 
-/* Build the IssuerAndSubject for `ra_der` and require it to decode as
- * SEQUENCE { issuer Name, subject Name }, with the issuer Name carrying the
- * subject DN of `name_der` and the subject Name that of the CSR. */
+/* The IssuerAndSubject for `ra_der` names `name_der`'s subject as issuer
+ * and the CSR's subject as subject. */
 static int check_issuer_and_subject(const uint8_t* ra_der, size_t ra_len,
                                     const uint8_t* name_der, size_t name_len,
                                     const uint8_t* csr_der, size_t csr_len)
@@ -772,8 +736,8 @@ static int check_issuer_and_subject(const uint8_t* ra_der, size_t ra_len,
     return rc;
 }
 
-/* Every SCEP entry point taking a WolfCertScepResult must leave it defined once
- * it has accepted the pointer, so "call, then free on any outcome" is safe. */
+/* rc is BAD_ARG and r is UNSET with no cert, no tid, fail_info -1 and a
+ * NULL heap. */
 static int check_result_defined(const char* what, int rc, const WolfCertScepResult* r)
 {
     if (rc != WOLFCERT_ERR_BAD_ARG) {
@@ -824,8 +788,7 @@ static void* failing_realloc(void* ptr, size_t sz)
     return realloc(ptr, sz);
 }
 
-/* Failing each allocation in turn must give WOLFCERT_ERR_MEMORY, never a
- * "not found" that GetCert would blame on the CA. */
+/* Failing each allocation in turn must give WOLFCERT_ERR_MEMORY or a match. */
 static int pem_has_cert_reports_oom(const char* pem, size_t pem_len,
                                     const DecodedCert* lc)
 {
@@ -856,7 +819,6 @@ static int pem_has_cert_reports_oom(const char* pem, size_t pem_len,
     return 0;
 }
 
-/* Running out of memory while checking a CertRep signer is not a forgery. */
 static int rep_signer_reports_oom(const uint8_t* signer, size_t signer_len,
                                   const uint8_t* bundle, size_t bundle_len)
 {
@@ -886,8 +848,8 @@ static int rep_signer_reports_oom(const uint8_t* signer, size_t signer_len,
 }
 #endif
 
-/* The GetCert response check walks a PEM bundle: a certificate that will not
- * parse is skipped, so one ahead of the target cannot hide it. */
+/* A leaf's issuer and serial give 1 against its PEM, also behind a junk
+ * entry; a wrong serial or issuer, or a NULL or truncated input, give 0. */
 static int test_pem_has_cert(void)
 {
     uint8_t* ca_der     = NULL;
@@ -931,8 +893,7 @@ static int test_pem_has_cert(void)
                                        lc.issuerRaw, (size_t)lc.issuerRawLen,
                                        lc.serial, (size_t)lc.serialSz, NULL) == 1);
 
-    /* Both halves are load-bearing: neither a wrong serial nor a wrong issuer
-     * may match the certificate that is there. */
+    /* A wrong serial and a wrong issuer each fail to match. */
     {
         uint8_t bad_serial[32];
         uint8_t bad_issuer[512];
@@ -1070,7 +1031,7 @@ static int test_result_defined_on_early_return(void)
         wolfcert_scep_result_free(&r);                     \
     } while (0)
 
-    /* One-shot: a NULL srv trips the check that follows the out handling. */
+    /* One-shot entry points with a NULL srv. */
     POISON_AND_CALL("pkcs_req_ex",
         wolfcert_scep_pkcs_req_ex(NULL, &caps, blob, sizeof(blob),
                                   blob, sizeof(blob), key, blob, sizeof(blob), &r));
@@ -1088,7 +1049,7 @@ static int test_result_defined_on_early_return(void)
                                blob, sizeof(blob), blob, sizeof(blob),
                                key, blob, sizeof(blob), &r));
 
-    /* Session: a NULL session trips the check that follows the out handling. */
+    /* Session entry points with a NULL session. */
     POISON_AND_CALL("session_pkcs_req_ex",
         wolfcert_scep_session_pkcs_req_ex(NULL, &caps, blob, sizeof(blob),
                                           blob, sizeof(blob), key,
@@ -1127,8 +1088,8 @@ static int test_result_defined_on_early_return(void)
     return 0;
 }
 
-/* RFC 8894 section 3.3.4 carries an RFC 5652 IssuerAndSerialNumber: the issuer
- * Name is picked as for IssuerAndSubject, and the parser finds the serial again. */
+/* IssuerAndSerialNumber round trip for a leaf, high-bit and padded serial;
+ * truncated or trailing bytes fail to parse. */
 static int test_issuer_and_serial(void)
 {
     uint8_t* ca_der     = NULL;
@@ -1174,8 +1135,7 @@ static int test_issuer_and_serial(void)
     REQUIRE(dn_len == (size_t)cc.subjectRawLen);
     REQUIRE(memcmp(dn, cc.subjectRaw, dn_len) == 0);
 
-    /* The serial follows as a DER INTEGER, padded when bit 8 of its first byte
-     * would otherwise read as a sign, and spans the rest. */
+    /* A DER INTEGER serial, sign-padded if bit 8 is set, ends the SEQUENCE. */
     size_t pad = (lc.serial[0] & 0x80) ? 1 : 0;
     REQUIRE(outer[total] == 0x02);
     REQUIRE(outer[total + 1] == (uint8_t)((size_t)lc.serialSz + pad));
@@ -1199,8 +1159,7 @@ static int test_issuer_and_serial(void)
     REQUIRE(memcmp(got_iss, cc.subjectRaw, got_iss_len) == 0);
     REQUIRE(wolfcert_scep_issuer_name_matches(ca_der, ca_len, got_iss,
                                               got_iss_len, NULL));
-    /* The leaf names its own issuer, so it resolves to the same CA; only an
-     * unrelated CA is a genuine mismatch. */
+    /* The leaf names the same CA as issuer; only the unrelated CA fails. */
     REQUIRE(wolfcert_scep_issuer_name_matches(leaf_der, leaf_len, got_iss,
                                               got_iss_len, NULL));
     REQUIRE(!wolfcert_scep_issuer_name_matches(other_der, other_len, got_iss,
@@ -1213,10 +1172,8 @@ static int test_issuer_and_serial(void)
     REQUIRE(wolfcert_scep_issuer_and_serial(ca_der, ca_len, lc.serial, 0,
                                             &ias, NULL) == WOLFCERT_ERR_BAD_ARG);
 
-    /* wolfSSL hands back DecodedCert.serial with any DER sign pad stripped, and
-     * its own generator clears bit 8, so a high-bit serial only arrives from a
-     * third-party CA. It must re-encode as 02 04 00 8A 01 02, not as the
-     * negative 02 03 8A 01 02. */
+    /* Hand-built, since wolfSSL never generates a high-bit serial. The sign
+     * pad is not in DecodedCert.serial, so 8A 01 02 must re-encode with 00. */
     static const uint8_t high_bit[3] = { 0x8A, 0x01, 0x02 };
     WolfCertBuffer hb = { 0 };
     REQUIRE(wolfcert_scep_issuer_and_serial(ca_der, ca_len, high_bit,
@@ -1247,8 +1204,7 @@ static int test_issuer_and_serial(void)
                                                   &got, &got_len) != WOLFCERT_OK);
     free(trailing);
 
-    /* A caller who passes the padded wire form instead of the magnitude gets
-     * the same encoding, so the two conventions cannot drift apart. */
+    /* The padded wire form of a serial encodes the same as its magnitude. */
     static const uint8_t padded[4] = { 0x00, 0x8A, 0x01, 0x02 };
     WolfCertBuffer pb = { 0 };
     REQUIRE(wolfcert_scep_issuer_and_serial(ca_der, ca_len, padded,
@@ -1269,9 +1225,8 @@ static int test_issuer_and_serial(void)
     return 0;
 }
 
-/* RFC 8894 section 3.3.3: the IssuerAndSubject issuer Name identifies the CA
- * that issues the requested cert - an RA contributes its issuer's name, a CA
- * (including a sub-CA under an offline root) its own subject. */
+/* IssuerAndSubject issuer for an RA, a self-signed CA, a sub-CA and a cert
+ * without basic constraints names the issuing CA; NULL args get BAD_ARG. */
 static int test_issuer_and_subject_issuer_name(void)
 {
     RsaKey   key;
@@ -1322,8 +1277,7 @@ static int test_issuer_and_subject_issuer_name(void)
         rc = check_issuer_and_subject(sub_der, sub_len, sub_der, sub_len,
                                       csr_der, csr_len);
 
-    /* No basic constraints at all: taken for an end entity, so its issuer
-     * supplies the Name whatever the certificate was meant to be. */
+    /* No basic constraints counts as an end entity, so its issuer is used. */
     if (rc == 0)
         rc = check_issuer_and_subject(nobc_der, nobc_len, ca_der, ca_len,
                                       csr_der, csr_len);
@@ -1353,10 +1307,7 @@ static int test_issuer_and_subject_issuer_name(void)
     return 0;
 }
 
-/* RFC 8894: a CertRep must be signed by the CA/RA certificate the client
- * fetched via GetCACert. A response signed by any other certificate, as a
- * MITM or rogue server would forge, must be rejected before the client
- * trusts the enclosed certificate. */
+/* A CertRep signer with a key other than the RA cert's fails; the RA passes. */
 static int test_cert_rep_signer_trust(void)
 {
     uint8_t* ra_der  = NULL;
@@ -1371,12 +1322,10 @@ static int test_cert_rep_signer_trust(void)
     REQUIRE(make_ca(&ra_der,  &ra_len,  &ra_key,  &ra_key_len)  == 0);
     REQUIRE(make_ca(&att_der, &att_len, &att_key, &att_key_len) == 0);
 
-    /* Signer whose key differs from the RA cert must be rejected. */
     REQUIRE(wolfcert_scep_verify_rep_signer(att_der, att_len,
                                             ra_der, ra_len, NULL)
             != WOLFCERT_OK);
 
-    /* The genuine CA/RA signer is accepted. */
     REQUIRE(wolfcert_scep_verify_rep_signer(ra_der, ra_len,
                                             ra_der, ra_len, NULL)
             == WOLFCERT_OK);
@@ -1388,10 +1337,6 @@ static int test_cert_rep_signer_trust(void)
     return 0;
 }
 
-/* RFC 8894: an enrollment response must be a CertRep (messageType "3") whose
- * transactionID echoes the request. A mismatched transactionID or a wrong
- * messageType must be rejected so a follow-up poll cannot run under the wrong
- * transaction. */
 static int test_cert_rep_txid_and_type(void)
 {
     static const uint8_t sent[8]  = { 'a','b','c','d','e','f','0','1' };
@@ -1420,11 +1365,7 @@ static int test_cert_rep_txid_and_type(void)
     return 0;
 }
 
-/* RFC 8894 section 4.7.1: the GetNextCACert response must be a SignedData
- * signed by the current CA, not an unsigned degenerate certs-only bundle. A
- * signed message verifies through the pkiMessage parser (which rejects
- * degenerate SignedData); the signed content must in turn yield the next CA
- * certificate. */
+/* A built GetNextCACert reply parses as signed data holding the next CA. */
 static int test_next_ca_response_is_signed(void)
 {
     uint8_t* ca_der   = NULL;
@@ -1448,8 +1389,7 @@ static int test_next_ca_response_is_signed(void)
                                                  ca_key, ca_key_len,
                                                  &resp, NULL) == WOLFCERT_OK);
 
-    /* A signed SignedData verifies here; an unsigned degenerate bundle does
-     * not, because the parser rejects degenerate SignedData. */
+    /* OK proves a signature; the parser refuses degenerate SignedData. */
     rc = wolfcert_scep_parse_pki_message(resp.data, resp.len, &content,
             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
     REQUIRE(rc == WOLFCERT_OK);
@@ -1470,9 +1410,8 @@ static int test_next_ca_response_is_signed(void)
     return 0;
 }
 
-/* RFC 8894 section 4.7.1: the client must bind the GetNextCACert response to
- * the current CA it already trusts. A response validated against a different
- * (attacker) CA must be rejected, while the genuine current CA is accepted. */
+/* A roll-over reply verifies against the CA that signed it; another CA fails
+ * and a NULL CA gets BAD_ARG. */
 static int test_next_ca_response_signer_trust(void)
 {
     uint8_t* ca_der   = NULL;
@@ -1507,14 +1446,13 @@ static int test_next_ca_response_signer_trust(void)
     REQUIRE(pem.len > 0);
     wolfcert_buffer_free(&pem);
 
-    /* Rejected when bound to a different CA: the signer is not trusted. */
+    /* Rejected when bound to a different CA. */
     REQUIRE(wolfcert_scep_verify_next_ca_response(resp.data, resp.len,
                                                   att_der, att_len,
                                                   &pem, NULL) != WOLFCERT_OK);
     wolfcert_buffer_free(&pem);
 
-    /* Binding is mandatory: a NULL current CA must be rejected, not silently
-     * skipped. */
+    /* A NULL current CA is rejected. */
     REQUIRE(wolfcert_scep_verify_next_ca_response(resp.data, resp.len,
                                                   NULL, 0, &pem, NULL)
             == WOLFCERT_ERR_BAD_ARG);
@@ -1530,9 +1468,8 @@ static int test_next_ca_response_signer_trust(void)
     return 0;
 }
 
-/* Build a SignedData signed by signer_cert/signer_key, but prepend extra_cert
- * so the bundle carries it as the first certificate while the SignerInfo still
- * identifies signer_cert. Ownership of *out passes to the caller (free()). */
+/* SignedData signed by signer_cert with extra_cert prepended as cert[0];
+ * free *out with free(). */
 static int make_two_cert_signed(const uint8_t* signer_cert, size_t signer_cert_len,
                                 const uint8_t* signer_key, size_t signer_key_len,
                                 const uint8_t* extra_cert, size_t extra_cert_len,
@@ -1597,11 +1534,7 @@ static int make_two_cert_signed(const uint8_t* signer_cert, size_t signer_cert_l
     return ret;
 }
 
-/* A SignedData verifier trusts the certificate that actually produced the
- * signature, which wolfSSL matches by SignerInfo identity, not the first cert
- * in the bundle. A message signed by an attacker key but carrying a trusted
- * cert first must surface the attacker cert as the signer so the trust check
- * against the trusted CA rejects it. */
+/* The signer is the cert the SignerInfo names, which need not be cert[0]. */
 static int test_signer_is_verified_cert(void)
 {
     uint8_t* ca_der   = NULL;
@@ -1629,11 +1562,11 @@ static int test_signer_is_verified_cert(void)
             NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
             &signer, &signer_len, NULL, NULL) == WOLFCERT_OK);
 
-    /* The parser must surface the cert that signed, not cert[0]. */
+    /* The parser reports the cert that signed. */
     REQUIRE(signer != NULL);
     REQUIRE(signer_len == att_len && memcmp(signer, att_der, att_len) == 0);
 
-    /* Binding that real signer to the trusted CA must therefore fail. */
+    /* That signer does not verify against the trusted CA. */
     REQUIRE(wolfcert_scep_verify_rep_signer(signer, signer_len,
                                             ca_der, ca_len, NULL) != WOLFCERT_OK);
 
@@ -1647,11 +1580,7 @@ static int test_signer_is_verified_cert(void)
     return 0;
 }
 
-/* RFC 8894 / split CA-RA: the response signer is trusted when it matches any
- * certificate in the fingerprint-verified GetCACert bundle, not only the first
- * one. Verify a signer matching the second cert of a two-cert bundle (e.g. an
- * RA encryption cert followed by the CA signer) is accepted, and one in neither
- * is rejected. */
+/* Signers A and B pass against an [A, B] bundle; an unrelated one fails. */
 static int test_signer_matches_any_bundle_cert(void)
 {
     uint8_t* a_der  = NULL;
@@ -1706,12 +1635,8 @@ static int test_signer_matches_any_bundle_cert(void)
     return 0;
 }
 
-/* When the CSR subject cannot be copied verbatim, wolfcert_scep_self_signed_rsa
- * falls back to a common name. An empty subject (DER 30 00) trips the memchr
- * guard against wolfSSL's XSTRLEN raw-name recovery (the 0x00 length octet),
- * and with no CN present the signer cert gets the literal "SCEP Enrollee".
- * (The CN-fallback branch needs an embedded-NUL or oversized DN that
- * wc_MakeCertReq cannot produce, so only the default branch is exercised.) */
+/* An empty CSR subject (DER 30 00) gives the signer the literal CN
+ * "SCEP Enrollee". */
 static int test_signer_subject_fallback(void)
 {
     RsaKey      key;
@@ -1726,7 +1651,6 @@ static int test_signer_subject_fallback(void)
     REQUIRE(wc_InitRsaKey(&key, NULL) == 0);
     REQUIRE(wc_MakeRsaKey(&key, 2048, WC_RSA_EXPONENT, &rng) == 0);
 
-    /* Empty subject: raw path skipped, no CN, so the literal is used. */
     REQUIRE(make_csr(&key, &rng, "", "", &csr, &csr_len) == 0);
 
     REQUIRE(wolfcert_scep_self_signed_rsa(&key, csr, csr_len,
@@ -1746,9 +1670,7 @@ static int test_signer_subject_fallback(void)
     return 0;
 }
 
-/* All fingerprint assertions run against a caller-owned CA DER so the buffer is
- * freed exactly once by test_ca_fingerprint no matter which REQUIRE fires - the
- * same ownership split as check_no_envelope / test_non_success_has_no_envelope. */
+/* Fingerprint cases for ca_der, which test_ca_fingerprint frees after. */
 static int check_ca_fingerprint(const uint8_t* ca_der, size_t ca_len)
 {
     uint8_t sha256[WC_SHA256_DIGEST_SIZE];
@@ -1799,11 +1721,7 @@ static int check_ca_fingerprint(const uint8_t* ca_der, size_t ca_len)
     REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1,
                 sizeof(sha1), WOLFCERT_SCEP_FP_SHA1) == WOLFCERT_ERR_AUTH);
 #else
-    /* SHA-1 absent: an explicit SHA-1 request, and AUTO with a 20-byte
-     * (SHA-1-length) fingerprint, both fall to the outer switch default and
-     * must report the algorithm unsupported rather than mis-dispatching. The
-     * buffer contents are irrelevant - the algorithm check precedes the
-     * fingerprint compare. */
+    /* SHA-1 absent: both requests report UNSUPPORTED before any compare. */
     memset(sha1_absent, 0, sizeof(sha1_absent));
     REQUIRE(wolfcert_scep_verify_ca_fingerprint(ca_der, ca_len, sha1_absent,
                 sizeof(sha1_absent), WOLFCERT_SCEP_FP_SHA1)
@@ -1837,8 +1755,6 @@ static int check_ca_fingerprint(const uint8_t* ca_der, size_t ca_len)
     return 0;
 }
 
-/* wolfcert_scep_verify_ca_fingerprint: correct digest verifies, a tampered one
- * is rejected, AUTO dispatches on length, and length/argument misuse is caught. */
 static int test_ca_fingerprint(void)
 {
     uint8_t* ca_der  = NULL;
@@ -1867,9 +1783,8 @@ static int hex_nibble(char c)
     return -1;
 }
 
-/* Percent-decode `in` into `out` (which must hold at least strlen(in) bytes),
- * reversing url_encode()'s "%XX" escaping. Returns the decoded byte count, or
- * -1 on a malformed escape. */
+/* Decodes %XX escapes in `in` into `out`, which holds strlen(in) bytes.
+ * Returns the decoded length, or -1 on a malformed escape. */
 static int percent_decode(const char* in, uint8_t* out)
 {
     int    hi, lo;
@@ -1894,8 +1809,6 @@ static int percent_decode(const char* in, uint8_t* out)
     return (int)o;
 }
 
-/* wolfcert_scep_build_pki_get_url: builds a well-formed GET URL for small
- * messages and refuses one that would exceed WOLFCERT_SCEP_MAX_GET_URL. */
 static int test_pki_get_url(void)
 {
     const char* base = "http://ca.example/scep";
@@ -1910,13 +1823,9 @@ static int test_pki_get_url(void)
     REQUIRE(wolfcert_scep_build_pki_get_url(base, small, sizeof(small), NULL, &url)
             == WOLFCERT_OK);
     REQUIRE(url != NULL);
-    /* Capture the assertions, then free url before the REQUIREs so a failing
-     * check cannot leak the heap-allocated URL. */
+    /* Free url before the REQUIREs so a failing check cannot leak it. */
     prefix_ok = (strncmp(url, pfx, strlen(pfx)) == 0);
-    /* Round-trip the message= value rather than only checking it is non-empty:
-     * percent-decode, then base64-decode, and confirm it reproduces the
-     * original bytes. A url_encode that dropped the mandatory base64 escaping
-     * (+, /, =) would corrupt this and be caught here. */
+    /* message= must percent- and base64-decode back to the original bytes. */
     if (prefix_ok) {
         uint8_t        decoded_b64[sizeof(small) * 2];  /* holds the ~88-char b64 */
         WolfCertBuffer raw = { 0 };
@@ -1928,7 +1837,7 @@ static int test_pki_get_url(void)
         }
         wolfcert_buffer_free(&raw);
     }
-    WOLFCERT_XFREE(url, NULL);   /* url came from the wolfCert heap, not malloc */
+    WOLFCERT_XFREE(url, NULL);   /* url is from the wolfCert heap */
     REQUIRE(prefix_ok);
     REQUIRE(msg_ok);
 
@@ -1946,13 +1855,10 @@ static int test_pki_get_url(void)
     return 0;
 }
 
-/* wolfcert_scep_build_getca_url: omits message= when no CA identifier is set,
- * appends it (URL-encoded) when one is. */
 static int test_getca_url(void)
 {
-    /* The URLs come from the wolfCert heap, so they are released with
-     * WOLFCERT_XFREE and not free(): under WOLFSSL_NO_MALLOC that heap is a
-     * static pool and libc never saw the pointer. */
+    /* The URLs come from the wolfCert heap, a static pool under
+     * WOLFSSL_NO_MALLOC, so they go back through WOLFCERT_XFREE. */
     char* u;
 
     u = wolfcert_scep_build_getca_url("http://ca.example/scep", "GetCACert", NULL, NULL);
@@ -1981,14 +1887,8 @@ static int test_getca_url(void)
     return 0;
 }
 
-/* The mirror of test_est_rejects_scep_cfg: WolfCertServerCfg.protocol
- * discriminates the proto_opts union, so a SCEP entry point handed an EST
- * config must refuse it rather than read the wrong arm. Reading the SCEP arm
- * here would send the EST username as the CA identifier and derive the txid
- * mode and content cipher from the bytes of the password pointer. The
- * enrollment entry points share the same gate; the ones exercised below are
- * those reachable without a live RSA signer. Nothing here touches the
- * network. */
+/* An EST config with Basic credentials gets BAD_ARG from the SCEP GetCA*
+ * calls and both session opens. */
 static int test_scep_rejects_est_cfg(void)
 {
     static const uint8_t dummy_ca[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
@@ -2009,15 +1909,12 @@ static int test_scep_rejects_est_cfg(void)
     REQUIRE(wolfcert_scep_get_next_ca_cert(&srv, dummy_ca, sizeof(dummy_ca),
                                            &out) == WOLFCERT_ERR_BAD_ARG);
 
-    /* Both session-open paths gate on the discriminator too, before they copy
-     * the SCEP options out of the union. */
     REQUIRE(wolfcert_scep_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(sess == NULL);
     REQUIRE(wolfcert_scep_session_open_async(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(sess == NULL);
 
-    /* An unset discriminator is refused for the same reason: nothing says
-     * which arm of the union the caller populated. */
+    /* protocol = 0 is refused too. */
     srv.protocol = (WolfCertProtocol)0;
     REQUIRE(wolfcert_scep_get_ca_caps(&srv, &caps) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(wolfcert_scep_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
@@ -2025,8 +1922,7 @@ static int test_scep_rejects_est_cfg(void)
     return 0;
 }
 
-/* The content-cipher choice reaches the wire: enveloping with AES256CBCb /
- * AES128CBCb yields a message carrying the matching AES-CBC OID. */
+/* AES256CBCb / AES128CBCb put the matching AES-CBC OID on the wire. */
 static int test_envelop_cipher_oid(void)
 {
 #if defined(WOLFSSL_AES_256)
@@ -2071,9 +1967,8 @@ static const byte scep_oid_pki_status[] =
 static const byte scep_oid_fail_info[] =
     { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x04 };
 
-/* Sign fixed content with the caller's signed attributes. Taking them raw is
- * what lets a test build an attribute set wolfCert itself never emits.
- * Ownership of *out passes to the caller. */
+/* Signs fixed content with raw caller attributes, so a test can build sets
+ * wolfCert never emits. The caller frees *out. */
 static int make_signed_with_attribs(const uint8_t* signer_cert,
                                     size_t signer_cert_len,
                                     const uint8_t* signer_key,
@@ -2166,9 +2061,7 @@ static int make_dup_tid_signed(const uint8_t* signer_cert, size_t signer_cert_le
                                     attribs, 3, out, out_len);
 }
 
-/* One transactionID attribute holding two PrintableStrings. EncodeAttributes
- * wraps a PKCS7Attrib's value bytes in a single SET without reading them, so
- * both land inside one SET OF AttributeValue. */
+/* One transactionID Attribute whose value SET holds "A" and "B". */
 static int make_multi_value_tid_signed(const uint8_t* signer_cert,
                                        size_t signer_cert_len,
                                        const uint8_t* signer_key,
@@ -2193,9 +2086,7 @@ static int make_multi_value_tid_signed(const uint8_t* signer_cert,
                                     attribs, 2, out, out_len);
 }
 
-/* RFC 8894 gives each SCEP signed attribute one value and wolfSSL's PKCS#7
- * decoder returns every copy, so a pkiMessage with two transactionID
- * attributes must be rejected rather than letting the peer pick a winner. */
+/* Two transactionID attributes are rejected (RFC 8894: one value each). */
 static int test_duplicate_signed_attrib(void)
 {
     uint8_t* ca_der  = NULL;
@@ -2223,8 +2114,7 @@ static int test_duplicate_signed_attrib(void)
     REQUIRE(make_dup_tid_signed(ca_der, ca_len, ca_key, ca_key_len,
                                 &msg, &msg_len) == 0);
 
-    /* Every out-param is requested so the reject path has to roll back what it
-     * had already produced, the signer certificate and messageType included. */
+    /* Every output is requested so each can be checked after the reject. */
     rc = wolfcert_scep_parse_pki_message(msg, msg_len, &env,
             &tid, &tid_len, &snonce, &snonce_len, &rnonce, &rnonce_len,
             &mt, &ps, &signer, &signer_len, &fi, NULL);
@@ -2233,9 +2123,7 @@ static int test_duplicate_signed_attrib(void)
                 rc, (int)tid_len, tid == NULL ? "" : (const char*)tid);
     }
 
-    /* Nothing may be left behind for the caller to leak. Capture every check,
-     * then free unconditionally, so a failing one cannot leak either (same
-     * pattern as test_non_success_has_no_envelope). */
+    /* Capture every check, then free unconditionally so nothing leaks. */
     tid_ok    = (tid == NULL && tid_len == 0);
     snonce_ok = (snonce == NULL && snonce_len == 0);
     rnonce_ok = (rnonce == NULL && rnonce_len == 0);
@@ -2265,9 +2153,7 @@ static int test_duplicate_signed_attrib(void)
     return 0;
 }
 
-/* The same ambiguity in the other encoding: one Attribute SEQUENCE whose SET
- * carries two values. Nothing says which value applies, so the message is
- * rejected instead of silently yielding the first. */
+/* One transactionID Attribute whose SET carries two values. */
 static int test_multi_value_signed_attrib(void)
 {
     uint8_t* ca_der  = NULL;
@@ -2379,8 +2265,7 @@ static int check_text_attrib(const uint8_t* ca_der, size_t ca_len,
     return 0;
 }
 
-/* RFC 8894 section 3.2.1 carries messageType, pkiStatus and failInfo as
- * PrintableStrings. Another tag, or a NUL inside, must not parse. */
+/* RFC 8894 section 3.2.1 text attributes must be NUL-free PrintableStrings. */
 static int test_text_attrib_printable(void)
 {
     static const byte ps_ok[]   = { 0x13, 0x01, '2' };

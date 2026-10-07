@@ -17,10 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * End-to-end test of the EST client module against a single-shot loopback
- * HTTP responder.
- */
+/* EST client module against a single-shot loopback TLS responder. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -57,7 +54,6 @@
     } while (0)
 
 #ifndef WOLFCERT_HAVE_BUILTIN_TRANSPORT
-/* Nothing below can open a socket in a build with no built-in transport. */
 int main(void)
 {
     return 77;
@@ -98,15 +94,11 @@ fail:
     return -1;
 }
 
-/* EST is TLS-only (RFC 7030), so the mock responder terminates TLS using a
- * self-signed identity the client pins as its trust anchor. */
 struct srv_ctx { int listen_fd; uint8_t* body; size_t len; WOLFSSL_CTX* ctx;
                  char request[8192]; size_t request_len;
                  int post_missing_ctenc; };
 
-/* Bind a loopback listener and report the ephemeral port it landed on.
- * Callers run this before spawning the responder thread, so the port never
- * has to travel back across the thread boundary. */
+/* Returns a bound loopback listener and its ephemeral port. */
 static int listen_loopback(int* port)
 {
     int ls = socket(AF_INET, SOCK_STREAM, 0);
@@ -159,11 +151,8 @@ static void handle_conn(int cs, struct srv_ctx* sc)
         return;
     }
 
-    /* Read the request headers, then drain the body. The canned response is
-     * the same regardless of the request, but we must still consume the whole
-     * request before responding + closing: a POST /simpleenroll carries the
-     * CSR, and shutting the connection while the client is still writing that
-     * body races the client's send and intermittently fails the enroll. */
+    /* Closing before the CSR body is fully read races the client's send and
+     * fails the enroll intermittently, so drain the request first. */
     char buf[8192];
     int n = 0;
     char* hdr_end = NULL;
@@ -194,8 +183,7 @@ static void handle_conn(int cs, struct srv_ctx* sc)
         }
     }
 
-    /* Record the raw request so a test can inspect which headers the
-     * client emitted on the wire. The last connection wins. */
+    /* The last connection's raw request is kept for the tests. */
     if (n > 0) {
         size_t cap = sizeof(sc->request) - 1;
         size_t cpy = (size_t)n < cap ? (size_t)n : cap;
@@ -203,9 +191,7 @@ static void handle_conn(int cs, struct srv_ctx* sc)
         sc->request[cpy] = '\0';
         sc->request_len = cpy;
 
-        /* Every base64 enrollment POST must advertise the encoding. Count
-         * any POST that does not, so a regression in either session enroll
-         * variant is caught, not only the last request captured above. */
+        /* Counts each enrollment POST lacking the base64 CTE header. */
         if (strncmp(sc->request, "POST", 4) == 0 &&
             strstr(sc->request, "Content-Transfer-Encoding: base64") == NULL)
             ++sc->post_missing_ctenc;
@@ -239,9 +225,7 @@ static void* srv_thread(void* arg)
     return NULL;
 }
 
-/* wolfcert_oid_to_dotted must decode the first two arcs correctly even when
- * the leading byte is >= 120 (node1 == 2, node2 >= 40), not just for the
- * common OIDs whose first byte is < 80. */
+/* A first byte >= 120 decodes to arc 2 with a second arc >= 40. */
 static int test_oid_to_dotted(void)
 {
     char out[128];
@@ -262,9 +246,6 @@ static int test_oid_to_dotted(void)
     return 0;
 }
 
-/* wolfcert_hex_encode writes exactly 2 * in_len characters in the requested
- * case and touches nothing beyond them (callers such as url_encode and the SCEP
- * transactionID builders rely on both properties). */
 static int test_hex_encode(void)
 {
     const uint8_t in[] = { 0x00, 0x0f, 0xa5, 0xff };
@@ -294,11 +275,8 @@ static int test_hex_encode(void)
     return 0;
 }
 
-/* RFC 7030 mandates that an EST client authenticate the server. In this
- * transport verify_server is the only switch that turns on peer verification,
- * so any config that leaves it at its zero default must be refused - with or
- * without a pinned trust anchor - before an HTTP Basic credential or a CSR
- * crosses the wire, rather than silently completing a VERIFY_NONE handshake. */
+/* verify_server = 0 gets ERR_TLS from the EST one-shots and session_open,
+ * also with a trust anchor set; verify_server = 1 gets IO from the dial. */
 static int test_est_require_server_auth(void)
 {
     static const uint8_t dummy_ta[]  = { 0x30, 0x03, 0x02, 0x01, 0x00 };
@@ -314,20 +292,13 @@ static int test_est_require_server_auth(void)
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* rk = NULL;
 
-    /* verify_server off, no trust anchor: every entry point must be rejected
-     * at the TLS gate, before the transport is dialed, so the assertion is
-     * the gate's own WOLFCERT_ERR_TLS rather than a downstream connect
-     * failure. The enroll path is the one that actually transmits the Basic
-     * credentials and the CSR, so it is asserted directly; the gate fires
-     * before the CSR bytes are parsed, so a placeholder CSR is fine. */
+    /* Each call gets ERR_TLS, even simple_enroll with a placeholder CSR. */
     REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_TLS);
     REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == WOLFCERT_ERR_TLS);
     REQUIRE(wolfcert_est_simple_enroll(&srv, dummy_csr, sizeof(dummy_csr),
                                        &out) == WOLFCERT_ERR_TLS);
 
-    /* Reenroll shares the same gate, but it fires inside post_enroll_ex after
-     * the current key is serialized to PEM, so it needs a real key to reach
-     * the gate rather than tripping an earlier argument check. */
+    /* Reenroll with a generated key so verify_server = 0 is what fails it. */
     REQUIRE(wolfcert_key_generate(&kcfg, &rk) == WOLFCERT_OK);
     REQUIRE(wolfcert_est_simple_reenroll(&srv, dummy_csr, sizeof(dummy_csr), rk,
                                          dummy_csr, sizeof(dummy_csr), &out)
@@ -337,19 +308,13 @@ static int test_est_require_server_auth(void)
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_TLS);
     REQUIRE(sess == NULL);
 
-    /* A pinned trust anchor is not enough: verify_server alone drives peer
-     * verification, so verify_server=0 stays refused even with a trust anchor.
-     * The gate must not be fooled into treating a loaded-but-unenforced trust
-     * anchor as server authentication. */
+    /* A pinned trust anchor alone does not count as server authentication. */
     srv.trust_anchors     = dummy_ta;
     srv.trust_anchors_len = sizeof(dummy_ta);
     REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_TLS);
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_TLS);
 
-    /* An authenticated config (verify_server on) passes the gate and reaches
-     * the transport, failing only because nothing is listening on port 1,
-     * which surfaces as WOLFCERT_ERR_IO - proving the gate does not
-     * over-refuse a legitimate request. */
+    /* With verify_server on, the dial to port 1 fails with WOLFCERT_ERR_IO. */
     srv.verify_server = 1;
     REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_IO);
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_IO);
@@ -357,12 +322,7 @@ static int test_est_require_server_auth(void)
     return 0;
 }
 
-/* WolfCertServerCfg.protocol discriminates the proto_opts union, so an EST
- * entry point handed a SCEP config must refuse it rather than read the wrong
- * arm. The overlay is actively dangerous: proto_opts.scep.txid_mode and
- * .content_cipher share storage with proto_opts.est.password, so reading the
- * EST arm here would hand basic_auth_header a pointer fabricated from two
- * enum values. Every rejection happens before any network access. */
+/* A SCEP config gets BAD_ARG from the EST one-shots and both session opens. */
 static int test_est_rejects_scep_cfg(void)
 {
     static const uint8_t dummy_csr[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
@@ -393,15 +353,12 @@ static int test_est_rejects_scep_cfg(void)
             == WOLFCERT_ERR_BAD_ARG);
     wolfcert_key_free(rk);
 
-    /* Both session-open paths gate on the discriminator too, before they copy
-     * the credentials out of the union. */
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(sess == NULL);
     REQUIRE(wolfcert_est_session_open_async(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(sess == NULL);
 
-    /* An unset discriminator is refused for the same reason: nothing says
-     * which arm of the union the caller populated. */
+    /* protocol = 0 is refused too. */
     srv.protocol = (WolfCertProtocol)0;
     REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
@@ -452,8 +409,6 @@ static int est_result_defined(const char* what, int rc, const WolfCertEstResult*
     return 0;
 }
 
-/* wolfcert/est.h: an entry point defines *out before any other argument check,
- * so a rejected call still hands back something safe to free. */
 static int test_est_result_defined_on_early_return(void)
 {
     WolfCertEstResult r;
@@ -469,7 +424,6 @@ static int test_est_result_defined_on_early_return(void)
 
     REQUIRE(wolfcert_key_generate(&kcfg, &key) == WOLFCERT_OK);
 
-    /* A NULL srv trips the check that now follows the out handling. */
     memset(&r, 0xA5, sizeof(r));
     if (est_result_defined("simple_enroll_ex",
             wolfcert_est_simple_enroll_ex(NULL, blob, sizeof(blob), &r), &r)) {
@@ -536,8 +490,7 @@ static int test_est_uses_cfg_transport(void)
     return 0;
 }
 
-/* Drive a non-blocking session enroll to completion, poll()ing on the
- * session fd between WANT_READ / WANT_WRITE returns. */
+/* Drives a non-blocking session enroll, polling the session fd. */
 static int pump_simple_enroll(WolfCertEstSession* s,
                               const uint8_t* csr, size_t csr_len,
                               WolfCertBuffer* out)
@@ -607,9 +560,7 @@ static int check_empty_body(WOLFSSL_CTX* ctx, const WolfCertServerCfg* tmpl,
 
 int main(void)
 {
-    /* The mock TLS responder may wolfSSL_write() after the client has read its
-     * response and closed the connection ("Connection: close"); don't die on
-     * the resulting SIGPIPE. */
+    /* The mock responder may write after the client closed the connection. */
     signal(SIGPIPE, SIG_IGN);
 
     REQUIRE(test_static_mem_init() == 0);
@@ -646,8 +597,7 @@ int main(void)
     REQUIRE(wolfcert_base64_encode(p7.data, p7.len, &b64, NULL) == WOLFCERT_OK);
     wolfcert_buffer_free(&p7);
 
-    /* EST runs over TLS (RFC 7030): give the mock responder a self-signed
-     * identity and pin it as the client trust anchor. */
+    /* The mock responder gets a self-signed identity the client pins. */
     uint8_t *tls_cert = NULL, *tls_key = NULL;
     size_t tls_cert_len = 0, tls_key_len = 0;
     REQUIRE(gen_server_identity(&tls_cert, &tls_cert_len,
@@ -696,9 +646,7 @@ int main(void)
                                          csr.data, csr.len, &reenrolled) == WOLFCERT_OK);
     wolfcert_buffer_free(&reenrolled);
 
-    /* The session-based enroll base64-encodes the CSR too, so it must
-     * emit Content-Transfer-Encoding: base64 like the one-shot path
-     * (RFC 7030 section 4.2.1). */
+    /* Session enroll sends the base64 CTE header (RFC 7030 section 4.2.1). */
     WolfCertEstSession* sess = NULL;
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_OK);
     WolfCertBuffer sess_enrolled = { 0 };
@@ -709,9 +657,7 @@ int main(void)
     wolfcert_buffer_free(&sess_enrolled);
     wolfcert_est_session_close(sess);
 
-    /* Same requirement for the non-blocking session enroll, which shares the
-     * base64 body path: drive it through a poll loop and confirm its request
-     * carries the header too. */
+    /* Non-blocking session enroll also sends the base64 CTE header. */
     WolfCertEstSession* sess_nb = NULL;
     REQUIRE(wolfcert_est_session_open_async(&srv, &sess_nb) == WOLFCERT_OK);
     WolfCertBuffer sess_nb_enrolled = { 0 };
@@ -730,9 +676,7 @@ int main(void)
     wolfcert_buffer_free(&b64);
     pthread_join(tid, NULL);
 
-    /* sc.request holds the last connection, the non-blocking enroll;
-     * post_missing_ctenc catches any POST enrollment, the blocking session
-     * variant included, that dropped the header. */
+    /* sc.request is the last connection, the non-blocking enroll. */
     REQUIRE(strstr(sc.request, "Content-Transfer-Encoding: base64") != NULL);
     REQUIRE(sc.post_missing_ctenc == 0);
     wolfSSL_CTX_free(ctx);

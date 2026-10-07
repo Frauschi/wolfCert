@@ -18,14 +18,8 @@
  */
 
 /*
- * End-to-end coverage for RFC 8894 polling (PKCSReq -> pkiStatus=PENDING
- * -> GetCertInitial -> pkiStatus=SUCCESS) and GetNextCACert (section 4.7).
- *
- * The test server is configured with scep_require_approval=1 so the
- * first PKCSReq is parked in the pending queue; GetCertInitial for the
- * same transactionID then releases it. A second server instance with
- * scep_enable_next_ca=1 is used to check that the roll-over CA is
- * generated on demand and returned as a distinct cert.
+ * RFC 8894 polling (PKCSReq PENDING, then GetCertInitial) and GetNextCACert
+ * (section 4.7) against the in-tree server.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -188,8 +182,7 @@ static int poll_path(WolfCertServer* s)
     REQUIRE(legacy_rc == WOLFCERT_ERR_PENDING);
     wolfcert_buffer_free(&legacy_out);
 
-    /* A poll whose signed content is absent or not an envelope must be
-     * refused, and must leave the pending entry for the real poll below. */
+    /* A poll with absent or non-envelope content is refused, entry kept. */
     static const uint8_t not_env[] = { 0x04, 0x03, 'a', 'b', 'c' };
     const uint8_t* bad_content[2]  = { NULL, not_env };
     size_t         bad_len[2]      = { 0, sizeof(not_env) };
@@ -241,7 +234,7 @@ static int poll_path(WolfCertServer* s)
     wolfcert_buffer_free(&other_env);
     REQUIRE(!taken);
 
-    /* A CSR with a broken signature is refused on the PKCSReq, not parked. */
+    /* A CSR with a broken signature is refused at PKCSReq and never parked. */
     other_csr.data[other_csr.len - 1] ^= 0x01;
     rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
                                    ca_der->buffer, ca_der->length,
@@ -267,8 +260,7 @@ static int poll_path(WolfCertServer* s)
     wolfcert_buffer_free(&other_csr);
     wolfcert_key_free(other);
 
-    /* Out of memory in the signer check or the issuance answers 500 and
-     * keeps the entry. */
+    /* OOM in the signer check or the issuance answers 500, entry kept. */
     static const int oom_at[2] = { 3 /* signer check */, 1 /* issuance */ };
     for (int i = 0; i < 2; i++) {
         WolfCertScepResult rm = { 0 };
@@ -285,9 +277,7 @@ static int poll_path(WolfCertServer* s)
         wolfcert_scep_result_free(&rm);
     }
 
-    /* Step 2: GetCertInitial with the same transactionID -> SUCCESS.
-     * signer_cert=NULL so the client regenerates the transient
-     * "SCEP Enrollee" self-signed cert that PKCSReq used. */
+    /* Step 2: GetCertInitial with signer_cert NULL -> SUCCESS, chains to CA. */
     WolfCertScepResult r2 = { 0 };
     rc = wolfcert_scep_get_cert_initial(&cli, &caps,
                                         ca_der->buffer, ca_der->length,
@@ -302,7 +292,6 @@ static int poll_path(WolfCertServer* s)
     REQUIRE(memmem(r2.cert_pem.data, r2.cert_pem.len,
                    "BEGIN CERTIFICATE", 17) != NULL);
 
-    /* Verify the issued cert chains up to the test CA. */
     WOLFSSL_CERT_MANAGER* cm = wolfSSL_CertManagerNew();
     REQUIRE(cm != NULL);
     REQUIRE(wolfSSL_CertManagerLoadCABuffer(cm, ca_pem.data, (long)ca_pem.len,
@@ -386,7 +375,7 @@ static int poll_path(WolfCertServer* s)
     }
     wolfcert_scep_result_free(&rd);
 
-    /* Step 3: Polling an unknown transactionID -> FAILURE. */
+    /* Step 3: polling an unknown transactionID -> FAILURE/badCertId. */
     uint8_t bogus_tid[32];
     memset(bogus_tid, 0x5A, sizeof(bogus_tid));
     WolfCertScepResult r3 = { 0 };
@@ -399,13 +388,10 @@ static int poll_path(WolfCertServer* s)
                                         &r3);
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(r3.status == WOLFCERT_SCEP_STATUS_FAILURE);
-    /* The server reports failInfo "4" (badCertId) for an unknown transaction;
-     * the client must surface it in the result. */
     REQUIRE(r3.fail_info == 4);
 
-    /* Step 4: the caller's transactionID is copied to a heap buffer sized to
-     * it, so a value far longer than the generated 32-hex one is sent on the
-     * wire (FAILURE/badCertId again) instead of being rejected up front. */
+    /* Step 4: a transactionID far longer than the generated 32-hex one is
+     * still sent. */
     uint8_t long_tid[200];
     memset(long_tid, 'A', sizeof(long_tid));
     WolfCertScepResult r4 = { 0 };
@@ -479,7 +465,7 @@ static int next_ca_path(WolfCertServer* s)
     REQUIRE(wc_PemToDer(current.data, (long)current.len, CERT_TYPE,
                         &current_der, NULL, NULL, NULL) == 0);
 
-    /* Bound to the current CA that signed the response: accepted. */
+    /* Accepted when bound to the current CA, which signed the response. */
     WolfCertBuffer next = { 0 };
     REQUIRE(wolfcert_scep_get_next_ca_cert(&cli, current_der->buffer,
                                            current_der->length, &next)
@@ -498,8 +484,7 @@ static int next_ca_path(WolfCertServer* s)
     REQUIRE(next.len == next2.len);
     REQUIRE(memcmp(next.data, next2.data, next.len) == 0);
 
-    /* Bound to a CA that did not sign the response (the roll-over CA itself,
-     * which the current CA signs over): rejected. */
+    /* Rejected when bound to the roll-over CA, which did not sign it. */
     DerBuffer* rollover_der = NULL;
     REQUIRE(wc_PemToDer(next.data, (long)next.len, CERT_TYPE,
                         &rollover_der, NULL, NULL, NULL) == 0);
@@ -519,9 +504,7 @@ static int next_ca_path(WolfCertServer* s)
 
 static int next_ca_disabled_path(void)
 {
-    /* Server without scep_enable_next_ca set: GetNextCACert -> 404 ->
-     * WOLFCERT_ERR_NOT_FOUND, and GetCACaps must NOT advertise
-     * GetNextCACert. */
+    /* GetNextCACert is not advertised and answers WOLFCERT_ERR_NOT_FOUND. */
     WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,
                                  .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s = NULL;
@@ -560,7 +543,6 @@ int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
-    /* ---- Pending queue (PKCSReq -> PENDING -> GetCertInitial -> issued) */
     WolfCertServerCfgSrv cfg_pending = {
         .protocol = WOLFCERT_PROTO_SCEP,
         .bind_host = "127.0.0.1", .bind_port = 0,
@@ -577,7 +559,6 @@ int main(void)
     if (rc != 0)
         return rc;
 
-    /* ---- GetNextCACert */
     WolfCertServerCfgSrv cfg_next = {
         .protocol = WOLFCERT_PROTO_SCEP,
         .bind_host = "127.0.0.1", .bind_port = 0,

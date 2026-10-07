@@ -17,14 +17,8 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * End-to-end EST enrollment for ML-DSA (FIPS 204) keys at all three parameter
- * sets (ML-DSA-44/65/87). Exercises keygen + CSR + /simpleenroll and, crucially,
- * the certs-only PKCS#7 certificate extraction on the response: an ML-DSA
- * public key is far larger than an RSA key, and a wolfSSL without ML-DSA
- * PKCS#7 support rejects such a cert with ASN_PARSE_E. This is the regression
- * guard for that path.
- */
+/* EST enrollment for ML-DSA-44/65/87 (FIPS 204); a wolfSSL without ML-DSA
+ * PKCS#7 support fails each enroll with ASN_PARSE_E. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -85,9 +79,6 @@ static int enroll_mldsa(const WolfCertServerCfg* client_cfg, WolfCertKeyType kt,
     REQUIRE(issued.len > 0);
     size_t pem_len = issued.len;
 
-    /* The issued cert must be valid DER and chain to the CA. Extracting it
-     * from the certs-only PKCS#7 response is the step that fails on a wolfSSL
-     * without ML-DSA PKCS#7 support. */
     DerBuffer* issued_der = NULL;
     REQUIRE(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE,
                         &issued_der, NULL, NULL, NULL) == 0);
@@ -114,7 +105,6 @@ int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
-    /* EST runs over TLS (RFC 7030): pin a freshly minted server identity. */
     uint8_t *tls_cert = NULL, *tls_key = NULL;
     size_t tls_cert_len = 0, tls_key_len = 0;
     REQUIRE(gen_server_identity(&tls_cert, &tls_cert_len,
@@ -150,7 +140,6 @@ int main(void)
     REQUIRE(wolfcert_est_get_cacerts(&client_cfg, &ca_pem) == WOLFCERT_OK);
 
     int rc = 0;
-    /* Each level can be disabled independently (WOLFSSL_NO_ML_DSA_{44,65,87}). */
 #ifndef WOLFSSL_NO_ML_DSA_44
     rc |= enroll_mldsa(&client_cfg, WOLFCERT_KEY_MLDSA44, "mldsa44", &ca_pem);
 #endif

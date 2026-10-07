@@ -17,36 +17,8 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Shutdown coverage for the accept loop in src/server.c: a peer that
- * connects and then sends nothing must not pin the serving thread past
- * wolfcert_server_stop().
- *
- * Four blocking points are exercised, each entered only once the peer has seen
- * the server reach it, so no case can pass without the server parked:
- *   1. A ClientHello answered by the server's flight, so the server is parked
- *      in wolfSSL_accept() waiting for the rest of the handshake.
- *   2. A completed TLS handshake with no request bytes, so the server is
- *      parked in the protocol handler's read.
- *   3. A served GetCACaps on a plaintext SCEP listener, so the keep-alive
- *      loop is parked in recv() on the next request.
- *   4. The same listener with a peer that trickles an unterminated request, so
- *      every receive succeeds and no timeout ever expires.
- *
- * In each case the test requires the server to still be running, calls
- * wolfcert_server_stop(), and requires wolfcert_server_run() to return
- * WOLFCERT_OK inside a bounded wait; a thread still running at the deadline
- * cannot be joined, so the test reports the failure and exits immediately
- * rather than hanging.
- *
- * A fifth case covers the other entry point: wolfcert_server_serve_fd()
- * runs on a caller-supplied fd that the accept loop never armed, so a
- * would-block read there must fail instead of retrying forever.
- *
- * Cases six to eight cover availability: a peer that stalls mid-handshake,
- * after its handshake, or before its plaintext request line must not keep the
- * next client from being served.
- */
+/* Cases 1-4 stop the server once a peer has it blocked in a read, case 5 runs
+ * serve_fd() on a non-blocking fd, 6-8 queue a client behind a stalled peer. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -80,8 +52,7 @@
         }                                                                   \
     } while (0)
 
-/* How long wolfcert_server_run() gets to return after stop(), and the
- * granularity the test polls at. */
+/* Time wolfcert_server_run() gets to return after stop(), and poll step. */
 #define STOP_DEADLINE_MS 5000
 #define POLL_STEP_MS     10
 
@@ -89,8 +60,6 @@
  * answer. Must exceed WOLFCERT_SERVER_REQUEST_TIMEOUT_MS. */
 #define STALL_WAIT_MS    20000
 
-/* The accept loop is what these cases exercise, so any compiled-in protocol
- * will do for the TLS listener; SCEP is absent from any NO_RSA build. */
 #if defined(WOLFCERT_HAVE_EST)
     #define TLS_LISTENER_PROTO WOLFCERT_PROTO_EST
 #else
@@ -100,8 +69,7 @@
 typedef struct {
     WolfCertServer*    srv;
     int                run_rc;
-    /* Atomic, not volatile: the poll below needs a happens-before edge
-     * against the serving thread, the same way srv->stopping does. */
+    /* Atomic for a happens-before edge with the serving thread. */
     wolfSSL_Atomic_Int returned;
 } ServerCtx;
 
@@ -116,7 +84,6 @@ static void* server_thread(void* arg)
 }
 
 #ifdef WOLFCERT_HAVE_SCEP
-/* Connect to 127.0.0.1:port. Returns the fd, or -1. */
 static int connect_loopback(uint16_t port)
 {
     struct sockaddr_in sa;
@@ -138,8 +105,7 @@ static int connect_loopback(uint16_t port)
     return fd;
 }
 
-/* Drive one plaintext GetCACaps to completion, so the reply proves the handler
- * ran and the keep-alive loop is now parked reading the next request. */
+/* One GetCACaps, leaving the keep-alive loop parked on the next request. */
 static int connect_after_getcacaps(uint16_t port, int timeout_ms)
 {
     static const char req[] =
@@ -167,9 +133,8 @@ static int connect_after_getcacaps(uint16_t port, int timeout_ms)
 }
 #endif /* WOLFCERT_HAVE_SCEP */
 
-/* Stop the server and wait for its thread to leave wolfcert_server_run().
- * Returns 0 when it did, -1 on the deadline, -2 if it had already returned --
- * a case that must not be scored as a successful shutdown. */
+/* Returns 0 once wolfcert_server_run() returns, -1 on the deadline, -2 if it
+ * had already returned before stop(). */
 static int stop_and_wait(ServerCtx* ctx)
 {
     int waited;
@@ -207,16 +172,14 @@ static int fail_stop(const char* which, int rc)
 }
 
 #ifdef WOLFCERT_HAVE_SCEP
-/* A peer that keeps supplying bytes never lets a receive time out, so the
- * handler only leaves its read if the server checks the stopping flag. Sends
- * a request header that never terminates, a byte at a time. */
+/* Sends an unterminated request header a byte at a time. */
 typedef struct {
     int                fd;
     wolfSSL_Atomic_Int halt;
 } TrickleCtx;
 
-/* Outlast the shutdown deadline several times over, so a server that keeps
- * consuming cannot reach the end of the trickle and pass by timing out. */
+/* The trickle lasts 3x STOP_DEADLINE_MS, so a server ignoring stop() misses the
+ * deadline. */
 #define TRICKLE_STEP_MS 20
 #define TRICKLE_MAX     ((STOP_DEADLINE_MS * 3) / TRICKLE_STEP_MS)
 
@@ -278,8 +241,7 @@ int main(void)
     int waited;
 #endif
 
-    /* The trickle peer keeps writing into a connection the server tears down
-     * on stop, so the test must survive the reset. */
+    /* The trickle peer writes into a connection the server resets on stop. */
     signal(SIGPIPE, SIG_IGN);
 
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -296,7 +258,7 @@ int main(void)
     cfg.tls_key_pem_len  = tls_key_len;
     cfg.est_allow_anonymous_enroll = 1;
 
-    /* 1. Parked in wolfSSL_accept(): TCP is up, no ClientHello follows. */
+    /* 1. Parked in wolfSSL_accept() after answering the ClientHello. */
     memset(&ctx, 0, sizeof(ctx));
     REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
     REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
@@ -355,8 +317,7 @@ int main(void)
     close(fd);
     wolfcert_server_free(ctx.srv);
 
-    /* 4. Parked in recv() with a peer that keeps trickling: no timeout ever
-     *    expires, so only a stopping check can end the handler's read. */
+    /* 4. Parked in recv() with a trickling peer, so no timeout expires. */
     memset(&ctx, 0, sizeof(ctx));
     REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
     REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
@@ -381,8 +342,7 @@ int main(void)
     close(fd);
     wolfcert_server_free(ctx.srv);
 
-    /* 5. serve_fd() on a non-blocking fd the accept loop never armed: the
-     *    read must surface the error instead of spinning on EAGAIN. */
+    /* 5. serve_fd() returns on an empty non-blocking fd. */
     memset(&ctx, 0, sizeof(ctx));
     REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
 
@@ -409,7 +369,7 @@ int main(void)
     wolfcert_server_free(ctx.srv);
 #endif
 
-    /* 6. A peer parked mid-handshake: the next client must still be served. */
+    /* 6. The next client is served behind a peer stalled mid-handshake. */
     cfg.protocol         = TLS_LISTENER_PROTO;
     cfg.tls_cert_pem     = tls_cert;
     cfg.tls_cert_pem_len = tls_cert_len;
@@ -438,8 +398,7 @@ int main(void)
     test_tls_close(&stalled);
     wolfcert_server_free(ctx.srv);
 
-    /* 7. A peer silent after its handshake: the next client must still be
-     *    served. */
+    /* 7. The next client is served behind a peer silent after its handshake. */
     memset(&ctx, 0, sizeof(ctx));
     REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
     REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
@@ -461,8 +420,7 @@ int main(void)
     wolfcert_server_free(ctx.srv);
 
 #ifdef WOLFCERT_HAVE_SCEP
-    /* 8. A plaintext peer that never sends a request line: the next client
-     *    must still be served. */
+    /* 8. The next client is served behind a silent plaintext peer. */
     memset(&cfg, 0, sizeof(cfg));
     cfg.protocol  = WOLFCERT_PROTO_SCEP;
     cfg.bind_host = "127.0.0.1";

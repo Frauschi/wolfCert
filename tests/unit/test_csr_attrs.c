@@ -17,16 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Unit coverage for wolfcert_est_parse_csr_attrs. We hand-build
- * CsrAttrs DER blobs to cover:
- *   - empty response (len==0),
- *   - bare OIDs (challengePassword + extensionRequest),
- *   - a full Attribute (id-ecPublicKey with a named-curve value),
- *   - a bare signature-algorithm OID (ecdsa-with-SHA384) that populates
- *     preferred_hash + preferred_key_type,
- *   - malformed inputs (truncated length, wrong outer tag).
- */
+/* wolfcert_est_parse_csr_attrs over hand-built CsrAttrs DER blobs. */
 
 #define _POSIX_C_SOURCE 200809L
 
@@ -46,8 +37,7 @@
         }                                                                   \
     } while (0)
 
-/* Encode `body` as `tag | short-form-length | body` into `out`.
- * Always uses short-form length (len < 128). Returns bytes written. */
+/* Short-form DER TLV (body_len < 128); returns bytes written. */
 static size_t der_tlv(uint8_t tag, const uint8_t* body, size_t body_len,
                       uint8_t* out)
 {
@@ -76,7 +66,7 @@ int main(void)
     REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
-    /* ---- Empty input -> OK, no items, all hint fields zero. */
+    /* Empty input gives no items and zero hints. */
     {
         WolfCertCsrAttrs a;
         REQUIRE(wolfcert_est_parse_csr_attrs(NULL, 0, &a) == WOLFCERT_OK);
@@ -85,9 +75,7 @@ int main(void)
         wolfcert_csr_attrs_free(&a);
     }
 
-    /* ---- Two bare OIDs + one sig-alg bare OID + one id-ecPublicKey
-     *      Attribute with P-384 value. Build the inner SEQUENCE body
-     *      first, then wrap in the outer SEQUENCE header. */
+    /* Two bare OIDs, a sig-alg bare OID and an id-ecPublicKey Attribute. */
     uint8_t body[256];
     size_t body_len = 0;
 
@@ -121,14 +109,12 @@ int main(void)
     REQUIRE(wolfcert_est_parse_csr_attrs(outer, outer_len, &a) == WOLFCERT_OK);
     REQUIRE(a.count == 4);
 
-    /* Recognised hints. */
     REQUIRE(a.require_challenge_password == 1);
     REQUIRE(a.require_extension_request  == 1);
     REQUIRE(a.preferred_hash             == 384);
     REQUIRE(a.preferred_key_type         == WOLFCERT_KEY_ECC);
     REQUIRE(a.preferred_ecc_curve_bits   == 384);
 
-    /* Lookup. */
     const WolfCertCsrAttrItem* cp = wolfcert_csr_attrs_find(
         &a, OID_CHALLENGE_PASSWORD, sizeof(OID_CHALLENGE_PASSWORD));
     REQUIRE(cp != NULL);
@@ -141,13 +127,12 @@ int main(void)
     REQUIRE(pk->values_der != NULL);
     REQUIRE(pk->values_len > 0);
 
-    /* An unknown OID must not be found. */
     static const uint8_t BOGUS[] = { 0x2A, 0x03, 0x04, 0x05 };
     REQUIRE(wolfcert_csr_attrs_find(&a, BOGUS, sizeof(BOGUS)) == NULL);
 
     wolfcert_csr_attrs_free(&a);
 
-    /* ---- Malformed: outer tag is not SEQUENCE. */
+    /* Outer tag is not SEQUENCE. */
     {
         uint8_t bad[] = { 0x31, 0x00 };
         WolfCertCsrAttrs b;
@@ -155,15 +140,15 @@ int main(void)
                 == WOLFCERT_ERR_PARSE);
     }
 
-    /* ---- Malformed: truncated length byte. */
+    /* Truncated long-form length. */
     {
-        uint8_t bad[] = { 0x30, 0x82, 0x00 };  /* says 0x00?? but only one more */
+        uint8_t bad[] = { 0x30, 0x82, 0x00 };  /* 0x82 needs two length bytes */
         WolfCertCsrAttrs b;
         int rc = wolfcert_est_parse_csr_attrs(bad, sizeof(bad), &b);
         REQUIRE(rc == WOLFCERT_ERR_PARSE);
     }
 
-    /* ---- Malformed: AttrOrOID tag we don't accept. */
+    /* AttrOrOID tag that is neither OID nor SEQUENCE. */
     {
         uint8_t bad_body[] = { 0x04, 0x01, 0xAA };          /* OCTET STRING */
         uint8_t bad[8];
@@ -172,10 +157,7 @@ int main(void)
         REQUIRE(wolfcert_est_parse_csr_attrs(bad, n, &b) == WOLFCERT_ERR_PARSE);
     }
 
-    /* ---- Malformed: Attribute SEQUENCE missing the SET OF (RFC 2985
-     *      says values is SIZE(1..MAX), so an OID-only Attribute is
-     *      ill-formed and must be rejected; callers who want "this
-     *      type must appear" should send a bare OID). */
+    /* Attribute missing its SET OF values; RFC 2985 requires SIZE(1..MAX). */
     {
         uint8_t attr_only_oid[32];
         size_t al = der_tlv(0x06, OID_EC_PUBLIC_KEY, sizeof(OID_EC_PUBLIC_KEY),
@@ -189,7 +171,7 @@ int main(void)
                 == WOLFCERT_ERR_PARSE);
     }
 
-    /* ---- Builder validation: bare OID with zero length is rejected. */
+    /* Builder rejects a zero-length bare OID. */
     {
         WolfCertCsrAttrItem bad_item = {
             .kind = WOLFCERT_CSRATTR_BARE_OID, .oid = NULL, .oid_len = 0,
@@ -199,7 +181,7 @@ int main(void)
                 == WOLFCERT_ERR_BAD_ARG);
         REQUIRE(out.data == NULL);
     }
-    /* Attribute without values is rejected by the builder too. */
+    /* Builder rejects an Attribute without values. */
     {
         WolfCertCsrAttrItem bad_item = {
             .kind = WOLFCERT_CSRATTR_ATTRIBUTE,
@@ -210,9 +192,7 @@ int main(void)
         REQUIRE(wolfcert_csr_attrs_build(&bad_item, 1, &out)
                 == WOLFCERT_ERR_BAD_ARG);
     }
-    /* Builder with count=0 produces a valid empty CsrAttrs (outer
-     * SEQUENCE wrapping zero items). Round-trips through the parser
-     * to zero items. */
+    /* An empty build round-trips through the parser to zero items. */
     {
         WolfCertBuffer out = { 0 };
         REQUIRE(wolfcert_csr_attrs_build(NULL, 0, &out) == WOLFCERT_OK);
@@ -224,11 +204,7 @@ int main(void)
         wolfcert_buffer_free(&out);
     }
 
-    /* ---- New OID coverage: Ed25519, Ed448, ML-DSA all decode into a
-     *      preferred_key_type hint. Each test uses a single bare-OID
-     *      attr-or-oid so the parser's sigalg-classification branch
-     *      (which handles the edwards / ML-DSA OIDs) is the one under
-     *      test. */
+    /* Ed25519, Ed448 and ML-DSA bare OIDs set preferred_key_type. */
     {
         static const uint8_t OID_ED25519[]   = { 0x2B, 0x65, 0x70 };
         static const uint8_t OID_ED448[]     = { 0x2B, 0x65, 0x71 };
@@ -280,10 +256,8 @@ int main(void)
         }
     }
 
-    /* ---- wolfcert_csr_attrs_apply: overlay onto empty configs ------ */
+    /* Zeroed key_cfg and meta take ECC P-384 and SHA-384 from outer. */
     {
-        /* Re-parse the hint-rich blob we built up top (ECC + P-384 +
-         * SHA-384 + challengePassword required) and apply it. */
         WolfCertCsrAttrs a3;
         REQUIRE(wolfcert_est_parse_csr_attrs(outer, outer_len, &a3)
                 == WOLFCERT_OK);
@@ -298,14 +272,12 @@ int main(void)
         wolfcert_csr_attrs_free(&a3);
     }
 
-    /* ---- wolfcert_csr_attrs_apply: explicit caller values win ----- */
+    /* A caller's RSA-2048 and SHA-256 survive the ECC P-384 / SHA-384 hints. */
     {
         WolfCertCsrAttrs a4;
         REQUIRE(wolfcert_est_parse_csr_attrs(outer, outer_len, &a4)
                 == WOLFCERT_OK);
 
-        /* Caller already wants RSA-2048 and SHA-256; the server-pinned
-         * ECC-P384 + SHA-384 must NOT overwrite it. */
         WolfCertKeyCfg kc = {
             .type = WOLFCERT_KEY_RSA, .param = 2048,
         };
@@ -318,12 +290,7 @@ int main(void)
         wolfcert_csr_attrs_free(&a4);
     }
 
-    /* ---- wolfcert_csr_attrs_apply: type-only hint gets a default size ----
-     *
-     * A server can pin a key type with no accompanying size/curve: RSA
-     * never carries a modulus hint, and a bare signature-algorithm OID
-     * (e.g. ecdsa-with-SHA384) arrives without an id-ecPublicKey curve.
-     * _apply must still hand keygen a usable `param`, not leave it 0. */
+    /* RSA or ECC type hint with no size hint: param becomes 2048 or 256. */
 #ifdef WOLFCERT_HAVE_RSA
     {
         WolfCertCsrAttrs stub = { 0 };
@@ -346,29 +313,20 @@ int main(void)
     }
 #endif
 
-    /* ---- wolfcert_csr_attrs_apply: both args NULL-able --------- */
+    /* Empty attrs with NULL key_cfg and NULL meta returns OK. */
     {
         WolfCertCsrAttrs a5 = { 0 };
         REQUIRE(wolfcert_csr_attrs_apply(&a5, NULL, NULL) == WOLFCERT_OK);
     }
 
-    /* ---- wolfcert_csr_attrs_apply: NULL attrs is bad_arg ----- */
+    /* NULL attrs is BAD_ARG. */
     {
         WolfCertKeyCfg kc = { 0 };
         REQUIRE(wolfcert_csr_attrs_apply(NULL, &kc, NULL)
                 == WOLFCERT_ERR_BAD_ARG);
     }
 
-    /* ---- wolfcert_csr_attrs_apply: build-time-gated key types ----
-     *
-     * _apply returns WOLFCERT_ERR_UNSUPPORTED when it's about to leave
-     * `key_cfg->type` pointing at a key algorithm the current build
-     * wasn't compiled for. The exact outcome for each algorithm is
-     * conditional on the matching WOLFCERT_HAVE_* define, so the test
-     * mirrors the same conditional: if the feature is compiled in,
-     * _apply succeeds; if not, it refuses with UNSUPPORTED. That way
-     * the guard is exercised regardless of which knobs the build
-     * harness flipped on. */
+    /* Ed25519, Ed448, ML-DSA hints: OK if compiled in, else UNSUPPORTED. */
     {
         const WolfCertKeyType gated_types[] = {
             WOLFCERT_KEY_ED25519,

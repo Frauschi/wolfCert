@@ -18,9 +18,8 @@
  */
 
 /*
- * EST enrollment against a wolfcert-server on the host, reached through the
- * QEMU SLIRP gateway. The cases come from tests/integration/est_client_cases.h,
- * so this file only supplies the server config and the trust anchor.
+ * EST enrollment against a host wolfcert-server through the QEMU SLIRP
+ * gateway, running the cases in tests/integration/est_client_cases.h.
  */
 
 #include <wolfcert/wolfcert.h>
@@ -36,7 +35,6 @@
 #include <zephyr/net/net_ip.h>
 #include <zephyr/ztest.h>
 
-/* zephyr/README.md shows the host wolfcert-server command these match. */
 #define EST_URL  "https://10.0.2.2:8443/.well-known/est"
 #define EST_USER "alice"
 #define EST_PASS "hunter2"
@@ -57,7 +55,7 @@ static void log_sink(WolfCertLogLevel level, const char* module,
 }
 
 /* Zephyr resets the realtime clock after every ztest (a ZTEST_RULE in
- * lib/os/clock.c under CONFIG_ZTEST). Set it before each test, not once. */
+ * lib/os/clock.c under CONFIG_ZTEST), so this runs before each test. */
 static void est_set_clock(void* fixture)
 {
     struct timespec ts = { 0 };
@@ -85,8 +83,7 @@ static void* est_setup(void)
 
     addr4 = net_if_ipv4_get_global_addr(iface, NET_ADDR_PREFERRED);
     if (addr4 == NULL) {
-        /* ztest keeps running a setup function past a failed assertion, so
-         * stop here */
+        /* ztest continues a setup function past a failed assertion. */
         zassert_unreachable("no IPv4 address");
         return NULL;
     }

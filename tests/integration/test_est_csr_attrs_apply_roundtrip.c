@@ -17,18 +17,8 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * End-to-end coverage for auto-apply of /csrattrs hints during
- * enrolment. The test server publishes a CsrAttrs policy pinning
- * ECC P-384 + SHA-384 + challengePassword-required; the client
- * runs `wolfcert_client_enroll` with `srv.proto_opts.est.auto_csrattrs = 1` and an
- * empty `key_cfg` (type = 0). The result must be:
- *
- *   - effective key is ECC on curve P-384 (server pin applied);
- *   - issued cert is signed with SHA-384 (per the preferred-hash
- *     hint surfaced through meta->preferred_hash);
- *   - explicit caller-supplied key_cfg.type still wins when set.
- */
+/* auto_csrattrs picks ECC P-384 for an empty key_cfg, an explicit key_cfg.type
+ * wins, and fetch_meta surfaces the SHA-384 hint. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -59,7 +49,7 @@
         }                                                                   \
     } while (0)
 
-/* Server TLS trust anchor, pinned by the client (EST is TLS-only, RFC 7030). */
+/* Server TLS trust anchor, pinned by the client. */
 static const uint8_t* g_ca = NULL;
 static size_t         g_ca_len = 0;
 
@@ -80,13 +70,9 @@ static const uint8_t OID_EC_PUBLIC_KEY[] = {
 };
 static const uint8_t OID_SECP384R1[] = { 0x2B, 0x81, 0x04, 0x00, 0x22 };
 
-/* Build the CsrAttrs DER the server will serve. The blob is the
- * three-item policy described in the test header; shared by both
- * sub-tests below. */
 static int build_policy(WolfCertBuffer* out)
 {
-    /* values_der for the id-ecPublicKey Attribute is the TLV-encoded
-     * curve OID (inside the SET). */
+    /* The id-ecPublicKey attribute value is the TLV-encoded curve OID. */
     uint8_t curve_tlv[16];
     curve_tlv[0] = 0x06;
     curve_tlv[1] = (uint8_t)sizeof(OID_SECP384R1);
@@ -108,12 +94,7 @@ static int build_policy(WolfCertBuffer* out)
     return wolfcert_csr_attrs_build(items, 3, out);
 }
 
-/* Read the ECC curve id out of the issued cert's SubjectPublicKeyInfo.
- * This is enough to prove auto_csrattrs applied the server's
- * preferred_key_type + preferred_ecc_curve_bits - the `preferred_hash`
- * hint influences the caller's CSR signature, not the CA's issued-cert
- * signature, so it's not observable on the issued PEM. That path is
- * covered by the unit tests instead. */
+/* Read the ECC curve id out of the issued cert's public key. */
 #ifdef WOLFCERT_HAVE_ECC
 static int inspect_cert(const uint8_t* pem, size_t pem_len,
                         int* out_curve_id)
@@ -144,8 +125,6 @@ static int inspect_cert(const uint8_t* pem, size_t pem_len,
     return rc == 0 ? 0 : -1;
 }
 
-/* Sub-test 1: empty caller key_cfg + auto_csrattrs -> server pins
- * ECC P-384 + SHA-384. */
 static int auto_apply_pins_everything(WolfCertServer* s)
 {
     char url[128];
@@ -163,8 +142,6 @@ static int auto_apply_pins_everything(WolfCertServer* s)
     WolfCertClient* cli = NULL;
     REQUIRE(wolfcert_client_new(&cli) == WOLFCERT_OK);
 
-    /* Empty key_cfg - every field at default. auto_csrattrs must fill
-     * type + curve from the server's policy. */
     WolfCertKeyCfg key_cfg = { .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertCertMeta meta = {
         .subject_dn = "CN=csrattrs-auto-1",
@@ -181,7 +158,7 @@ static int auto_apply_pins_everything(WolfCertServer* s)
 
     int curve = 0;
     REQUIRE(inspect_cert(cert_pem.data, cert_pem.len, &curve) == 0);
-    REQUIRE(curve == ECC_SECP384R1);      /* server-pinned curve applied */
+    REQUIRE(curve == ECC_SECP384R1);
 
     wolfcert_buffer_free(&cert_pem);
     wolfcert_key_free(key);
@@ -190,7 +167,6 @@ static int auto_apply_pins_everything(WolfCertServer* s)
 }
 #endif /* WOLFCERT_HAVE_ECC */
 
-/* Sub-test 2: caller explicitly set RSA-2048 -> server hints ignored. */
 #ifdef WOLFCERT_HAVE_RSA
 static int explicit_caller_wins(WolfCertServer* s)
 {
@@ -208,7 +184,6 @@ static int explicit_caller_wins(WolfCertServer* s)
     WolfCertClient* cli = NULL;
     REQUIRE(wolfcert_client_new(&cli) == WOLFCERT_OK);
 
-    /* Caller pre-sets RSA-2048. apply() must NOT overwrite. */
     WolfCertKeyCfg key_cfg = {
         .type = WOLFCERT_KEY_RSA, .param = 2048,
         .dev_id = WOLFCERT_DEVID_SOFTWARE,
@@ -232,8 +207,6 @@ static int explicit_caller_wins(WolfCertServer* s)
 }
 #endif /* WOLFCERT_HAVE_RSA */
 
-/* Sub-test 3: wolfcert_client_fetch_meta surfaces the hash hint onto
- * an empty WolfCertCertMeta without any key_cfg in play. */
 static int fetch_meta_overlays_hash(WolfCertServer* s)
 {
     char url[128];
@@ -263,7 +236,6 @@ int main(void)
     WolfCertBuffer policy = { 0 };
     REQUIRE(build_policy(&policy) == WOLFCERT_OK);
 
-    /* EST runs over TLS (RFC 7030): pin a freshly minted server identity. */
     uint8_t *tls_cert = NULL, *tls_key = NULL;
     size_t tls_cert_len = 0, tls_key_len = 0;
     REQUIRE(gen_server_identity(&tls_cert, &tls_cert_len,

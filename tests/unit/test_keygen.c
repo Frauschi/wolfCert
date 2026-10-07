@@ -48,8 +48,7 @@ static int roundtrip(WolfCertKeyType type, int param)
     REQUIRE(wolfcert_key_from_pem(pem.data, pem.len, NULL, &k2) == WOLFCERT_OK);
     REQUIRE(k2 != NULL);
 
-    /* DER export + auto-detected DER re-import (wolfcert_key_from_pem accepts
-     * either encoding). DER starts with an ASN.1 SEQUENCE tag. */
+    /* Re-import the key from its DER export; 0x30 is the SEQUENCE tag. */
     WolfCertBuffer der = { 0 };
     REQUIRE(wolfcert_key_to_der(k, &der) == WOLFCERT_OK);
     REQUIRE(der.len > 0);
@@ -90,8 +89,6 @@ int main(void)
         return 1;
 #endif
 #ifdef WOLFCERT_HAVE_MLDSA
-    /* Each ML-DSA level can be disabled independently in wolfSSL
-     * (WOLFSSL_NO_ML_DSA_{44,65,87}); only exercise the ones present. */
 #ifndef WOLFSSL_NO_ML_DSA_44
     if (roundtrip(WOLFCERT_KEY_MLDSA44, 0))
         return 1;
