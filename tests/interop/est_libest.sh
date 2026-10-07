@@ -11,10 +11,6 @@
 #   cd libest && ./configure --disable-safec \
 #       --with-ssl-dir=$(pkg-config --variable prefix openssl)
 #   make && sudo make install
-#
-# The script exercises:
-#   [1] wolfcert-client enrolls against a libest estserver
-#   [2] libest estclient enrolls against wolfcert-server
 
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -30,10 +26,7 @@ WC_SERVER="$(wolfcert_bin wolfcert-server)"
 cd "$WOLFCERT_INTEROP_WORK"
 trap 'echo "--- work dir: $WOLFCERT_INTEROP_WORK"' EXIT
 
-# libest doesn't bootstrap its own CA; build one with openssl. The
-# example estserver shells out to OpenSSL for actual issuance and
-# needs an OpenSSL `ca` config plus a populated CA state dir
-# (`index.txt`, `serial`, `newcerts/`, private key, cert).
+# The example estserver issues through an OpenSSL `ca` config and state dir.
 echo "[setup] bootstrap a CA with openssl for libest"
 mkdir -p ca CA/estCA/private CA/estCA/newcerts
 : > CA/estCA/index.txt
@@ -77,15 +70,11 @@ stateOrProvinceName    = optional
 CNF
 export EST_OPENSSL_CACONFIG="$PWD/estCA.cnf"
 
-# ---- D1: wolfcert-client -> libest estserver -------------------------------
+# D1: wolfcert-client -> libest estserver
 echo "[1] wolfcert-client -> libest estserver"
 EST_PORT=$(free_port)
-# libest's estserver has no CLI flag for trust anchors / cacerts response;
-# the bundle is passed through env vars that point at files on disk:
-#   EST_CACERTS_RESP  - PKCS#7 certs-only PEM bundle, served from /cacerts
-#   EST_TRUSTED_CERTS - PEM bundle used to validate TLS client certs
-# libest reads both as PEM (text); the DER-PKCS#7 form is rejected by
-# its internal length-vs-strnlen check.
+# estserver takes /cacerts and its client-cert trust from env vars, and rejects
+# a DER PKCS#7 bundle in its length-vs-strnlen check, so both are PEM.
 openssl crl2pkcs7 -nocrl -certfile ca/ca.crt -out ca/cacerts.p7 \
     >/dev/null 2>&1
 export EST_CACERTS_RESP="$PWD/ca/cacerts.p7"
@@ -96,9 +85,7 @@ ES_PID=$!
 trap 'kill_if "$ES_PID"' EXIT
 wait_port 127.0.0.1 "$EST_PORT"
 
-# estserver's default self-signed cert has CN=localhost (see srv.crt
-# minting above); use the same hostname in the client URL so wolfSSL's
-# hostname check matches.
+# srv.crt has CN=localhost, so connect by that name.
 "$WC_CLIENT" enroll --proto est \
     --url   "https://localhost:$EST_PORT/.well-known/est" \
     --trust ca/ca.crt \
@@ -114,7 +101,7 @@ openssl verify -CAfile ca/ca.crt libest.crt >/dev/null
 echo "    PASS"
 kill_if "$ES_PID"; ES_PID=""
 
-# ---- D2: libest estclient -> wolfcert-server (native TLS) ------------------
+# D2: libest estclient -> wolfcert-server (native TLS)
 echo "[2] libest estclient -> wolfcert-server (HTTPS via built-in TLS)"
 EST_PORT=$(free_port)
 
@@ -130,10 +117,7 @@ WC_PID=$!
 trap 'kill_if "$WC_PID"' EXIT
 wait_port 127.0.0.1 "$EST_PORT"
 
-# estclient pins the server cert as its trust anchor via --trustanchor,
-# auto-generates an RSA identity key when none is supplied (-x), and writes the
-# enrolled cert to <out_dir>/cert-<thread>-<iter>.pkcs7 as base64 PKCS#7. -o is
-# an output DIRECTORY, not a file.
+# -o is an output directory; the cert lands there as base64 PKCS#7.
 mkdir -p d2out
 estclient -e -s "127.0.0.1" -p "$EST_PORT" \
           --common-name "libest-cli-1" \
@@ -141,10 +125,7 @@ estclient -e -s "127.0.0.1" -p "$EST_PORT" \
           -o d2out >estclient.log 2>&1 \
     || { echo "    FAIL (estclient enroll failed):"; cat estclient.log; exit 1; }
 
-# Decode the base64 PKCS#7 response and confirm wolfcert-server issued the
-# requested identity.
-# `|| true`: under `set -e`+pipefail an unmatched glob makes ls exit non-zero
-# and would abort here before the friendly guard below could report it.
+# An unmatched glob fails ls under pipefail, aborting before the guard below.
 cert_p7=$(ls d2out/cert-*.pkcs7 2>/dev/null | head -1 || true)
 [ -n "$cert_p7" ] || { echo "    FAIL (no cert emitted)"; cat estclient.log; exit 1; }
 openssl base64 -d -in "$cert_p7" -out d2out/cert.p7der

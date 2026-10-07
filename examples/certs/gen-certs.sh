@@ -56,7 +56,7 @@ gen_pki() {
     rm -rf "$dir"
     mkdir -p "$dir"
 
-    # --- self-signed CA -------------------------------------------------
+    # Self-signed CA
     openssl genpkey "$@" -out "$dir/ca-key.pem"
     openssl req -x509 -new -key "$dir/ca-key.pem" -days "$DAYS" \
         -subj "/CN=wolfCert Example $label CA" \
@@ -65,14 +65,14 @@ gen_pki() {
         -addext "subjectKeyIdentifier=hash" \
         -out "$dir/ca-cert.pem"
 
-    # --- TLS server leaf (CN + SAN so hostname verification passes) -----
+    # TLS server leaf (CN + SAN so hostname verification passes)
     # 10.0.2.2 is the QEMU SLIRP gateway, i.e. the host as seen from a Zephyr
     # guest, so the same leaf serves the emulator tests.
     gen_leaf "$dir" server "/CN=localhost" \
 "subjectAltName=DNS:localhost,IP:127.0.0.1,IP:::1,IP:10.0.2.2
 extendedKeyUsage=serverAuth" "$@"
 
-    # --- mTLS client leaf ----------------------------------------------
+    # mTLS client leaf
     gen_leaf "$dir" client "/CN=wolfCert Example Client" \
 "extendedKeyUsage=clientAuth" "$@"
 

@@ -19,7 +19,6 @@ target_compile_definitions(app PRIVATE
 target_include_directories(app PRIVATE
   ${ZEPHYR_WOLFCERT_MODULE_DIR}/tests/integration)
 
-# Embed the trust anchor rather than copying its bytes into a source file.
 generate_inc_file_for_target(app
   ${ZEPHYR_WOLFCERT_MODULE_DIR}/examples/certs/ecc/ca-cert.pem
   ${ZEPHYR_BINARY_DIR}/include/generated/est_ca_cert.inc)

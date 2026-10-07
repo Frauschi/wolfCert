@@ -1,20 +1,13 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# EST + SCEP interoperability against Smallstep's step-ca. Requires the
-# `step-ca` and `step` binaries (https://smallstep.com/docs/step-ca).
-# This script does NOT install them; it assumes they're in PATH.
+# EST + SCEP interoperability against Smallstep's step-ca. Needs the `step-ca`
+# and `step` binaries (https://smallstep.com/docs/step-ca) in PATH:
 #
-# Install hints (do any ONE):
 #   - apt keyring (Debian/Ubuntu): see https://smallstep.com/docs/step-ca/installation
 #   - Homebrew:   brew install step step-ca
 #   - go install: go install github.com/smallstep/certificates/cmd/step-ca@latest
 #                 go install github.com/smallstep/cli/cmd/step@latest
-#
-# The script bootstraps a throwaway step-ca PKI in the interop work dir,
-# starts step-ca with EST enabled, and drives wolfcert-client against
-# both the EST and SCEP endpoints step-ca exposes. All output lands in
-# $WOLFCERT_INTEROP_WORK.
 
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -31,7 +24,7 @@ mkdir -p "$STEPPATH"
 cd "$WOLFCERT_INTEROP_WORK"
 trap 'echo "--- work dir: $WOLFCERT_INTEROP_WORK"' EXIT
 
-# ---- bootstrap a CA --------------------------------------------------------
+# Bootstrap a CA
 echo "[setup] step ca init"
 export STEP_PASSWORD="interop"
 step ca init \
@@ -44,13 +37,9 @@ step ca init \
     --deployment-type standalone \
     >init.log 2>&1
 
-# RFC 8894 SCEP is RSA-only: the CA decrypts the pkcsPKIEnvelope with its
-# private key, which step-ca's default ECDSA chain cannot do (see
-# docs/INTEROP.md note 5). Swap in an RSA root + intermediate so the SCEP
-# decrypter - and every cert GetCACert hands the client - is RSA. step-ca uses
-# the intermediate as the SCEP decrypter when none is configured explicitly.
-# The intermediate key stays encrypted under STEP_PASSWORD (step-ca loads it at
-# startup); the throwaway root key is only needed here to sign the intermediate.
+# SCEP is RSA-only (RFC 8894) and step-ca's default chain is ECDSA, so swap in
+# an RSA root and intermediate; step-ca decrypts SCEP with the intermediate
+# (docs/INTEROP.md note 5).
 ROOT_CRT="$STEPPATH/certs/root_ca.crt"
 ROOT_KEY="$STEPPATH/secrets/root_ca_key"
 INT_CRT="$STEPPATH/certs/intermediate_ca.crt"
@@ -58,16 +47,14 @@ INT_KEY="$STEPPATH/secrets/intermediate_ca_key"
 step certificate create "wolfCert-interop RSA Root" "$ROOT_CRT" "$ROOT_KEY" \
     --profile root-ca --kty RSA --size 2048 --not-after 87600h \
     --force --no-password --insecure >rsa-root.log 2>&1
+# step-ca decrypts the intermediate key with STEP_PASSWORD at startup.
 step certificate create "wolfCert-interop RSA Intermediate" "$INT_CRT" "$INT_KEY" \
     --profile intermediate-ca --kty RSA --size 2048 --not-after 87600h \
     --ca "$ROOT_CRT" --ca-key "$ROOT_KEY" \
     --force --password-file <(echo -n "$STEP_PASSWORD") >rsa-int.log 2>&1
 
-# Enable SCEP provisioner (EST is on by default in recent step-ca).
-# Configure a challenge so we exercise RFC 8894 section 2.9 end-to-end.
-# --encryption-algorithm-identifier 1 selects AES-128-CBC for the CertRep
-# content encryption (step-ca defaults to legacy DES-CBC), matching what
-# wolfcert-client advertises via GetCACaps.
+# --encryption-algorithm-identifier 1 selects AES-128-CBC for CertRep;
+# step-ca defaults to DES-CBC.
 SCEP_CHALLENGE="wolfcert-interop-challenge"
 step ca provisioner add "SCEP" --type SCEP \
     --force-cn \
@@ -87,14 +74,10 @@ wait_port 127.0.0.1 "$CA_PORT"
 # Export the root cert so wolfcert-client can trust the TLS endpoint.
 cp "$STEPPATH/certs/root_ca.crt" ca-root.pem
 
-# ---- EST enrollment -------------------------------------------------------
+# EST enrollment
 
-# step-ca open-source (github.com/smallstep/certificates) does not ship
-# RFC 7030 EST support; the EST endpoints are only available in the
-# commercial "Smallstep Certificate Manager" build. A GET against
-# /.well-known/est/* returns 404 on OSS step-ca regardless of the
-# provisioner setup. We probe the endpoint rather than enroll and skip
-# if it isn't present.
+# Open-source step-ca has no EST (only Smallstep's commercial build does), so
+# probe the endpoint and skip when it is missing.
 echo "[1] EST: probe /.well-known/est/cacerts on step-ca"
 EST_HTTP=$(curl -sk -o /dev/null -w '%{http_code}' \
     "https://localhost:$CA_PORT/.well-known/est/cacerts" || echo "000")
@@ -118,15 +101,13 @@ else
     echo "           EST is only in Smallstep's commercial CM.)"
 fi
 
-# ---- SCEP enrollment ------------------------------------------------------
+# SCEP enrollment
 
 echo "[2] SCEP: wolfcert-client enroll against step-ca (RSA device key)"
 SCEP_URL="https://localhost:$CA_PORT/scep/SCEP"
 
-# --ca-id first: GetCACert does not verify a CertRep, so it still reports if an
-# enrollment regression takes the assertion below down. step-ca selects its
-# provisioner from the URL path rather than the message= parameter, so this
-# checks that adding the parameter does not upset the endpoint.
+# --ca-id goes first, since GetCACert still reports when enrollment breaks.
+# step-ca ignores message= and picks its provisioner from the URL path.
 "$WC_CLIENT" getcacerts --proto scep \
     --url   "$SCEP_URL" \
     --trust ca-root.pem \

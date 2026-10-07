@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Cross-verify wolfCert's output against OpenSSL as an independent
-# reference implementation. OpenSSL has no native SCEP/EST client, but its
-# `x509`, `pkcs7`, `pkey`, `req` and `verify` commands independently parse
-# and validate the PKCS#7 / X.509 / private-key artifacts wolfCert produces
-# and consumes - a useful lower-bound conformance / interop sanity check.
+# Cross-check the PKCS#7, X.509 and private keys wolfCert produces and consumes
+# with OpenSSL's x509, pkcs7, pkey, req and verify.
 
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -19,14 +16,8 @@ WC_CLIENT="$(wolfcert_bin wolfcert-client)"
 cd "$WOLFCERT_INTEROP_WORK"
 trap 'echo "--- work dir: $WOLFCERT_INTEROP_WORK"' EXIT
 
-# ------------------------------------------------------------
-# 0. EST mandates TLS (RFC 7030), so wolfcert-client refuses a plaintext
-#    http:// URL. Stand wolfcert-server up behind TLS with a throwaway CA
-#    and a server cert (SAN localhost / 127.0.0.1) that the client trusts
-#    via --trust -- this drives wolfCert's real TLS transport, not a
-#    curl-only shortcut. tls-* names keep these distinct from the EST CA
-#    (ca.pem) fetched below.
-# ------------------------------------------------------------
+# EST requires TLS, so wolfcert-server runs behind a throwaway CA; tls-* keeps
+# it apart from the EST CA in ca.pem.
 
 echo "[0] generating throwaway TLS CA + server certificate"
 openssl req -x509 -newkey rsa:2048 -nodes -keyout tls-ca.key -out tls-ca.crt \
@@ -38,12 +29,6 @@ openssl x509 -req -in tls-server.csr -CA tls-ca.crt -CAkey tls-ca.key \
     -CAcreateserial -out tls-server.crt -days 2 \
     -extfile <(printf 'subjectAltName=DNS:localhost,IP:127.0.0.1\nbasicConstraints=CA:FALSE\n') \
     >/dev/null 2>&1
-
-# ------------------------------------------------------------
-# 1. wolfcert-server's EST /cacerts response is a base64 PKCS#7
-#    certs-only. Decode + verify OpenSSL can parse every cert and
-#    cross-check its subject.
-# ------------------------------------------------------------
 
 echo "[1] EST /cacerts -> OpenSSL pkcs7 parse"
 PORT=$(free_port)
@@ -64,21 +49,9 @@ openssl x509 -in ca.pem -noout -subject \
     | grep -q "CN *= *wolfCert Test CA"
 echo "    PASS  (OpenSSL parses wolfCert /cacerts output, CA subject matches)"
 
-# ------------------------------------------------------------
-# 2. Enroll one cert per supported key type and cross-check each against
-#    OpenSSL: the issued cert parses + chains to the CA, and the private
-#    key the client wrote out parses with its public half matching the
-#    cert (proving the emitted key pair is internally consistent, not
-#    merely well-formed ASN.1). Exercises wolfCert's per-algorithm key /
-#    CSR / cert encoding against an independent implementation, not just ECC.
-# ------------------------------------------------------------
-
 # Classical + EdDSA key types OpenSSL has parsed since 1.1.1.
 KEY_TYPES="rsa:2048 ecc:256 ecc:384 ecc:521 ed25519 ed448"
-# ML-DSA (PQC) parsing needs OpenSSL >= 3.5. Probe for it and add the
-# mldsa:* types only when supported, so the job stays green on older
-# runners (ubuntu-24.04 ships OpenSSL 3.0) while an OpenSSL upgrade
-# auto-enables the PQC cross-check with no change to this script.
+# ML-DSA parsing needs OpenSSL >= 3.5; ubuntu-24.04 ships 3.0.
 if openssl list -signature-algorithms 2>/dev/null | grep -qi 'ml-dsa'; then
     KEY_TYPES="$KEY_TYPES mldsa:44 mldsa:65 mldsa:87"
 else
@@ -113,11 +86,6 @@ done
 
 kill_if "$WC_PID"; WC_PID=""
 
-# ------------------------------------------------------------
-# 3. OpenSSL-built CSR -> wolfcert-server /simpleenroll.
-#    Confirms wolfCert's server accepts an externally-produced CSR.
-# ------------------------------------------------------------
-
 echo "[3] OpenSSL-generated CSR -> wolfcert-server EST enroll"
 PORT=$(free_port)
 "$WC_SERVER" --proto est --listen "127.0.0.1:$PORT" \
@@ -133,12 +101,8 @@ openssl req -new -newkey rsa:2048 -nodes \
     -batch >/dev/null 2>&1
 openssl req -in openssl.csr -outform DER -out openssl.csr.der >/dev/null
 
-# POST the OpenSSL-built CSR through curl (not through wolfcert-client,
-# so the request body is independent of wolfCert code). curl trusts the
-# throwaway TLS CA via --cacert.
-# Encode with `openssl base64` rather than the base64(1) CLI: GNU wants
-# `base64 -w0` while BSD/macOS wants `-i` and rejects a positional file,
-# so neither is portable. `tr -d '\n'` strips openssl's line wrapping.
+# POST through curl so the request body is independent of wolfCert. GNU and
+# BSD base64(1) take different flags, hence `openssl base64`.
 openssl base64 -e -in openssl.csr.der | tr -d '\n' > openssl.csr.b64
 curl -s --cacert tls-ca.crt -o est.resp -w '%{http_code}' \
     -X POST -H "Content-Type: application/pkcs10" \

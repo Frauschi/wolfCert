@@ -25,9 +25,7 @@ runs:
       with:
         config: full
         ref: ${{ inputs.wolfssl-ref }}
-        save: "false"   # restore-only: nightly.yml owns the shared `full` cache
-                        # (interop's 5 jobs run concurrently and would otherwise
-                        # race to save the same key).
+        save: "false"   # nightly.yml owns `full`; parallel jobs would race
 
     - name: Build wolfCert (CLIs + server)
       shell: bash
@@ -39,6 +37,5 @@ runs:
           -DWOLFCERT_ENABLE_SERVER=ON
         cmake --build build -j "$(nproc)"
         echo "WOLFCERT_BUILD=${{ github.workspace }}/build" >> "$GITHUB_ENV"
-        # wolfCert links wolfSSL from the install prefix; make it findable at
-        # runtime for the CLI binaries the interop scripts invoke.
+        # The CLIs load libwolfssl from the install prefix at runtime.
         echo "LD_LIBRARY_PATH=$WOLFSSL_PREFIX/lib:${LD_LIBRARY_PATH:-}" >> "$GITHUB_ENV"

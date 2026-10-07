@@ -73,8 +73,7 @@ CFLAGS=(-c -mcpu="$CPU" -mthumb -ffreestanding
 
 echo "Compiling $n_srcs sources with $CC_BIN (-mcpu=$CPU), no POSIX:"
 status=0
-# Fed by here-doc rather than an array: macOS ships bash 3.2, which has no
-# mapfile.
+# No mapfile: macOS ships bash 3.2.
 while IFS= read -r s; do
     obj="$STAGE/obj/$(echo "$s" | tr '/' '_').o"
     if "$CC_BIN" "${CFLAGS[@]}" -o "$obj" "$ROOT/$s" 2> "$STAGE/err.log"; then

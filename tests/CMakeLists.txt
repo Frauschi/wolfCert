@@ -110,8 +110,7 @@ if(WOLFCERT_ENABLE_EST)
     endif()
 endif()
 
-# Protocol-agnostic server coverage: gated on the server alone, so a build with
-# either protocol disabled keeps it.
+# Protocol-agnostic server tests.
 if(WOLFCERT_ENABLE_SERVER)
     add_executable(test_server_stop_idle integration/test_server_stop_idle.c)
     target_link_libraries(test_server_stop_idle PRIVATE wolfcert Threads::Threads)
@@ -154,15 +153,12 @@ if(WOLFCERT_ENABLE_SCEP AND WOLFCERT_ENABLE_SERVER)
 
 endif()
 
-# The CLI's protocol scoping and keyword validation. Most cases need no
-# network; the --ca-fingerprint group binds wolfcert-server to 127.0.0.1 on a
-# port from 18088 up, and skips when none is free or the server was not built.
+# The wolfcert-server cases bind 127.0.0.1 ports from 18088 up.
 if(WOLFCERT_ENABLE_CLI AND WOLFCERT_ENABLE_EST AND WOLFCERT_ENABLE_SCEP AND UNIX)
     add_test(NAME cli_proto_scoping
              COMMAND ${CMAKE_COMMAND} -E env bash
                      ${CMAKE_CURRENT_SOURCE_DIR}/integration/cli_proto_scoping.sh
                      $<TARGET_FILE:wolfcert-client>)
-    # The script exits 77 when the CLI cannot initialise, which is the case on a
-    # wolfSSL built WOLFSSL_NO_MALLOC: no pool is installed for it.
+    # The script exits 77 when the CLI cannot initialise (WOLFSSL_NO_MALLOC).
     set_tests_properties(cli_proto_scoping PROPERTIES SKIP_RETURN_CODE 77)
 endif()

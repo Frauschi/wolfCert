@@ -5,9 +5,7 @@ if(CONFIG_WOLFCERT)
 
   set(WOLFCERT_DIR ${ZEPHYR_CURRENT_MODULE_DIR})
 
-  # ---- generated wolfcert/options.h ----------------------------------------
-  # Render options.h.in from Kconfig, so wolfcert/types.h reads its config the
-  # same way it does under CMake and autoconf.
+  # Render wolfcert/options.h from Kconfig.
   macro(_wc_opt out flag sym)
     if(${flag})
       set(${out} "#define ${sym} 1")
@@ -42,13 +40,12 @@ if(CONFIG_WOLFCERT)
   configure_file(${WOLFCERT_DIR}/wolfcert/options.h.in
                  ${WOLFCERT_GEN_DIR}/wolfcert/options.h @ONLY)
 
-  # Generated directory first, so an in-source wolfcert/options.h left behind
-  # by a host ./configure cannot shadow the one Kconfig just produced. Apps
-  # inherit this order; they must not add the module root themselves.
+  # Generated dir first, so a host ./configure's in-tree options.h cannot shadow
+  # it; an app that adds the module root itself undoes this.
   zephyr_include_directories(${WOLFCERT_GEN_DIR})
   zephyr_include_directories(${WOLFCERT_DIR})
 
-  # ---- library sources ------------------------------------------------------
+  # Library sources
   zephyr_library()
   zephyr_library_sources(
     ${WOLFCERT_DIR}/src/wolfcert.c

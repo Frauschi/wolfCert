@@ -6,18 +6,12 @@ AC_INIT([wolfCert], [0.1.0], [https://github.com/wolfSSL/wolfCert/issues])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIRS([m4])
 AC_CONFIG_SRCDIR([src/wolfcert.c])
-# No AC_CONFIG_HEADERS: wolfCert's compile-time configuration lives in the
-# generated wolfcert/options.h (see AC_CONFIG_FILES below), not a config.h that
-# no source includes.
+# No AC_CONFIG_HEADERS: configuration lives in the generated wolfcert/options.h.
 
 AM_INIT_AUTOMAKE([1.14 foreign subdir-objects -Wall -Werror])
 AM_SILENT_RULES([yes])
 
-# Suppress AC_PROG_CC's habit of defaulting CFLAGS to "-g -O2" when the caller
-# sets none. Like wolfSSL, wolfCert manages optimization/debug itself via
-# AM_CFLAGS (see the build-options section); leaving the autoconf default in
-# CFLAGS would override those because automake emits "$(AM_CFLAGS) $(CFLAGS)".
-# A user-supplied CFLAGS is still respected and still wins.
+# Keep AC_PROG_CC's default "-g -O2" out of CFLAGS, which follows AM_CFLAGS.
 : ${CFLAGS=""}
 
 AC_PROG_CC
@@ -34,17 +28,8 @@ case "$host_os" in
     *) AC_MSG_WARN([wolfCert is only tested on Linux and macOS; host is $host_os]) ;;
 esac
 
-# ---- build options ----------------------------------------------------------
-# Optimization / debug flags, handled the wolfSSL way: split OPTIMIZE_CFLAGS vs
-# DEBUG_CFLAGS and inject the chosen set through AM_CFLAGS (precedes $(CFLAGS)
-# on the compile line; the default CFLAGS was emptied above so these win).
-#
-# --enable-debug drops optimizations and emits full debug info. The non-debug
-# default mirrors CMake's RelWithDebInfo (-O2 -g -DNDEBUG), so both build
-# systems agree. This is a compiler-flag change only; the runtime logging
-# infrastructure (wolfcert/log.h) is untouched - verbosity stays a runtime
-# decision via wolfcert_set_log_level(). The CMake analogue is
-# -DCMAKE_BUILD_TYPE=Debug.
+# Build options
+# The non-debug default matches CMake's RelWithDebInfo.
 OPTIMIZE_CFLAGS="-O2 -g -DNDEBUG"
 DEBUG_CFLAGS="-O0 -g3"
 AC_ARG_ENABLE([debug],
@@ -56,12 +41,10 @@ AS_IF([test "x$enable_debug" = "xyes"],
       [WOLFCERT_OPT_CFLAGS="$OPTIMIZE_CFLAGS"])
 AC_SUBST([WOLFCERT_OPT_CFLAGS])
 
-# ---- feature flags ----------------------------------------------------------
+# Feature flags
 AC_ARG_ENABLE([est],
     [AS_HELP_STRING([--disable-est], [disable EST (RFC 7030) support])],
     [enable_est=$enableval], [enable_est=yes])
-# EST/SCEP/SERVER feature macros are emitted into wolfcert/options.h (see the
-# WOLFCERT_OPT calls below); the AM_CONDITIONALs gate which sources are built.
 AM_CONDITIONAL([WOLFCERT_HAVE_EST],  [test "x$enable_est"  = "xyes"])
 
 AC_ARG_ENABLE([scep],
@@ -95,8 +78,7 @@ cannot supply a custom one])])
 round-trip tests drive the client over real sockets])])
 ])
 
-# store.c is always compiled; only its POSIX file backend is gated, so this
-# needs no AM_CONDITIONAL.
+# Only the POSIX backend inside store.c is gated, so no AM_CONDITIONAL.
 AC_ARG_ENABLE([posix-store],
     [AS_HELP_STRING([--disable-posix-store],
         [do not build the POSIX file storage backend])],
@@ -105,9 +87,6 @@ AC_ARG_ENABLE([posix-store],
 AC_ARG_ENABLE([tests],
     [AS_HELP_STRING([--enable-tests], [build unit and integration tests])],
     [enable_tests=$enableval], [enable_tests=no])
-# WOLFCERT_BUILD_TESTING reaches the compiler via Makefile.am (-D, conditional
-# on this); it is a per-build-variant flag, not a library feature, so it stays
-# out of wolfcert/options.h.
 AM_CONDITIONAL([WOLFCERT_BUILD_TESTS], [test "x$enable_tests" = "xyes"])
 
 AC_ARG_ENABLE([examples],
@@ -115,13 +94,8 @@ AC_ARG_ENABLE([examples],
     [enable_examples=$enableval], [enable_examples=no])
 AM_CONDITIONAL([WOLFCERT_BUILD_EXAMPLES], [test "x$enable_examples" = "xyes"])
 
-# Header-based configuration: the user_settings.h analogue of wolfSSL's
-# WOLFSSL_USER_SETTINGS. When enabled, wolfcert/options.h is neither generated
-# nor installed; instead the build defines WOLFCERT_USER_SETTINGS and the
-# integrator supplies user_settings.h on the include path (see
-# --with-user-settings and examples/user_settings.h.example). The
-# --enable/--disable-est/scep/server flags still select which sources build, so
-# keep them in sync with the macros in your user_settings.h.
+# The est/scep/server flags still pick the sources under user settings, so
+# they must match the macros in user_settings.h.
 AC_ARG_ENABLE([user-settings],
     [AS_HELP_STRING([--enable-user-settings],
       [take feature config from a user-supplied user_settings.h instead of the generated options.h])],
@@ -138,19 +112,13 @@ AS_IF([test "x$enable_user_settings" = "xyes"],
   [WOLFCERT_USER_SETTINGS_CPPFLAGS=""])
 AC_SUBST([WOLFCERT_USER_SETTINGS_CPPFLAGS])
 
-# Install CMake package-config files ($(libdir)/cmake/wolfCert) so an autoconf
-# `make install` is consumable via find_package(wolfCert), like a native CMake
-# install. See AC_CONFIG_FILES + Makefile.am (CMAKE_INSTALL).
 AC_ARG_ENABLE([cmake-install],
     [AS_HELP_STRING([--disable-cmake-install],
       [do not install CMake package-config files])],
     [enable_cmake_install=$enableval], [enable_cmake_install=yes])
 AM_CONDITIONAL([CMAKE_INSTALL], [test "x$enable_cmake_install" = "xyes"])
 
-# ---- wolfSSL ----------------------------------------------------------------
-# Optional convenience: --with-wolfssl=PATH points at a wolfSSL install
-# prefix whose lib/pkgconfig/wolfssl.pc the PKG_CHECK_MODULES below should
-# pick up. Equivalent to prepending PATH/lib/pkgconfig to PKG_CONFIG_PATH.
+# wolfSSL
 AC_ARG_WITH([wolfssl],
     [AS_HELP_STRING([--with-wolfssl=PATH],
       [wolfSSL install prefix (PATH/lib/pkgconfig/wolfssl.pc must exist)])],
@@ -195,17 +163,15 @@ AC_DEFUN([WOLFCERT_REJECT_NEG],
     AC_MSG_ERROR([wolfSSL was built with $1 defined; wolfCert needs $2.
       Rebuild wolfSSL without --disable-$(echo $2 | tr 'A-Z' 'a-z').])])])
 
-# WOLFCERT_OPT(SUBST_VAR, $cond_value, MACRO): emit a "#define MACRO 1" line for
-# wolfcert/options.h when $cond_value is "yes", otherwise a disabled comment,
-# then AC_SUBST it. (@%:@ is the m4 quadrigraph for '#'.)
+# WOLFCERT_OPT(SUBST_VAR, $cond_value, MACRO): an options.h line for MACRO.
 AC_DEFUN([WOLFCERT_OPT],
 [AS_IF([test "x$2" = "xyes"],
    [$1="@%:@define $3 1"],
    [$1="/* $3 not enabled */"])
  AC_SUBST([$1])])
 
-# WOLFCERT_PLAT(SUBST_VAR, $cond_value, HAVE_MACRO, NO_MACRO): platform gates
-# always define a macro: HAVE_MACRO when enabled, NO_MACRO when disabled.
+# WOLFCERT_PLAT(SUBST_VAR, $cond_value, HAVE_MACRO, NO_MACRO): defines
+# HAVE_MACRO when $cond_value is yes, else NO_MACRO.
 AC_DEFUN([WOLFCERT_PLAT],
 [AS_IF([test "x$2" = "xyes"],
    [$1="@%:@define $3 1"],
@@ -245,14 +211,11 @@ extern char GetLength(void);]],
      Rebuild wolfSSL with CPPFLAGS="-DWOLFSSL_PUBLIC_ASN".])])
 LIBS="$save_LIBS"
 
-# wolfSSL default-on features that wolfCert requires unconditionally: AES,
-# SHA-256. Each must NOT be marked disabled by a NO_* macro.
+# Default-on wolfSSL features wolfCert requires.
 WOLFCERT_REJECT_NEG([NO_AES],          [AES])
 WOLFCERT_REJECT_NEG([NO_SHA256],       [SHA-256])
 
-# RSA: default-on in wolfSSL. Required by SCEP (RSA-only per RFC 8894), but
-# optional for an EST-only build (ECC / Ed25519 / Ed448 / ML-DSA).
-# WOLFCERT_HAVE_RSA gates the RSA key algorithm.
+# RSA is required by SCEP (RFC 8894) and optional for an EST-only build.
 AC_MSG_CHECKING([whether wolfSSL provides RSA])
 AC_COMPILE_IFELSE(
   [AC_LANG_PROGRAM(WOLFCERT_WOLFSSL_PROLOGUE,
@@ -283,8 +246,7 @@ AS_IF([test "x$enable_scep" = "xyes"],
         wolfSSL without NO_AES_128, NO_AES_CBC or NO_AES_DECRYPT, or configure
         with --disable-scep.])])])
 
-# TLS: the HTTPS transport needs at least TLS 1.2 or TLS 1.3; the endpoints pin
-# their floor to whichever lower version is available.
+# The HTTPS transport needs TLS 1.2 or TLS 1.3.
 AC_MSG_CHECKING([whether wolfSSL provides TLS 1.2])
 AC_COMPILE_IFELSE(
   [AC_LANG_PROGRAM(WOLFCERT_WOLFSSL_PROLOGUE,
@@ -303,8 +265,7 @@ AS_IF([test "x$have_tls12" = "xno" && test "x$have_tls13" = "xno"],
   [AC_MSG_ERROR([wolfSSL provides neither TLS 1.2 nor TLS 1.3; wolfCert needs
     at least one for its HTTPS transport.])])
 
-# Optional key algorithms: ECC / Ed25519 / Ed448 / ML-DSA. Absent => warn.
-# (RSA is handled above.) Recorded as shell vars for wolfcert/options.h.
+# Optional key algorithms.
 AC_CHECK_DECL([HAVE_ECC], [have_ecc=yes],
     [have_ecc=no; AC_MSG_WARN([wolfSSL was built without HAVE_ECC; ECC key
       types will return WOLFCERT_ERR_UNSUPPORTED. Rebuild with --enable-ecc.])],
@@ -326,14 +287,12 @@ AC_CHECK_DECL([WOLFSSL_HAVE_MLDSA], [have_mldsa=yes],
     WOLFCERT_WOLFSSL_PROLOGUE)
 CPPFLAGS="$save_CPPFLAGS"
 
-# Require at least one key algorithm.
 AS_IF([test "x$have_rsa" = "xno" && test "x$have_ecc" = "xno" \
     && test "x$have_ed25519" = "xno" && test "x$have_ed448" = "xno" \
     && test "x$have_mldsa" = "xno"],
   [AC_MSG_ERROR([wolfSSL provides none of RSA/ECC/Ed25519/Ed448/ML-DSA;
     wolfCert needs at least one key algorithm.])])
 
-# Render the wolfcert/options.h lines from the resolved feature set.
 WOLFCERT_OPT([WOLFCERT_OPT_EST],     [$enable_est],    [WOLFCERT_HAVE_EST])
 WOLFCERT_OPT([WOLFCERT_OPT_SCEP],    [$enable_scep],   [WOLFCERT_HAVE_SCEP])
 WOLFCERT_OPT([WOLFCERT_OPT_SERVER],  [$enable_server], [WOLFCERT_HAVE_SERVER])
@@ -347,9 +306,7 @@ WOLFCERT_OPT([WOLFCERT_OPT_ED25519], [$have_ed25519],  [WOLFCERT_HAVE_ED25519])
 WOLFCERT_OPT([WOLFCERT_OPT_ED448],   [$have_ed448],    [WOLFCERT_HAVE_ED448])
 WOLFCERT_OPT([WOLFCERT_OPT_MLDSA],   [$have_mldsa],    [WOLFCERT_HAVE_MLDSA])
 
-# Resolve the install paths to absolutes so the generated CMake targets file
-# can point find_library / include dirs at the real install tree (autoconf
-# leaves $prefix as NONE and $libdir as ${exec_prefix}/lib until evaluated).
+# The CMake targets file needs absolute paths; $prefix is NONE until evaluated.
 WOLFCERT_PREFIX_ABS=$prefix
 test "x$WOLFCERT_PREFIX_ABS" = "xNONE" && WOLFCERT_PREFIX_ABS=$ac_default_prefix
 WOLFCERT_EXEC_PREFIX_ABS=$exec_prefix
@@ -370,8 +327,6 @@ AC_CONFIG_FILES([
     Makefile
     wolfcert.pc
 ])
-# Under --enable-user-settings the integrator supplies user_settings.h, so we
-# neither generate nor ship wolfcert/options.h.
 AS_IF([test "x$enable_user_settings" != "xyes"],
   [AC_CONFIG_FILES([wolfcert/options.h])])
 AS_IF([test "x$enable_cmake_install" = "xyes"], [

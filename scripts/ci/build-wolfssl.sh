@@ -1,12 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Build and install a named wolfSSL configuration for wolfCert CI (and for
-# local developers who want to reproduce a CI config).
-#
-# This script is the single source of truth mapping a short config name to the
-# exact wolfSSL ./configure flags. CI hashes `--print-flags <name>` into its
-# cache key, so the cached prefix and a local build can never disagree.
+# Build and install a named wolfSSL configuration for wolfCert CI. CI hashes
+# `--print-flags <name>` into its cache key.
 #
 # Usage:
 #   build-wolfssl.sh <config> [--prefix DIR] [--ref REF] [--jobs N] [--src DIR]
@@ -14,30 +10,18 @@
 #   build-wolfssl.sh --list                   # list known config names
 #
 # Defaults: --ref master, --prefix $PWD/.wolfssl-install/<config>, --jobs nproc.
-#
-# The build is idempotent: if <prefix>/lib/pkgconfig/wolfssl.pc already exists,
-# the build is skipped (a warm CI cache short-circuits, local re-runs are fast).
+# Skipped when <prefix>/lib/pkgconfig/wolfssl.pc already exists.
 
 set -euo pipefail
 
 WOLFSSL_REPO="${WOLFSSL_REPO:-https://github.com/wolfSSL/wolfssl.git}"
 
-# ----------------------------------------------------------------------------
-# Config-name -> wolfSSL ./configure argument array.
-#
-# The canonical base (satisfies every hard wolfCert requirement plus all
-# optional key algorithms) mirrors README.md / AGENTS.md. Each variant layers
-# a delta onto that base. VAR=VALUE assignments are passed to configure as
-# single argv elements so embedded spaces survive word-splitting.
-# ----------------------------------------------------------------------------
-
-# wolfCert never links wolfSSL's own testsuite/benchmark, so skip building them
-# -- a large CI wall-clock saving with no effect on the installed library.
+# wolfCert never uses wolfSSL's own examples or crypt tests.
 _ci_flags() {
     printf '%s\n' --disable-examples --disable-crypttests
 }
 
-# Canonical "everything on" wolfSSL feature set.
+# Canonical "everything on" wolfSSL feature set, as in AGENTS.md.
 _base_flags() {
     _ci_flags
     printf '%s\n' \
@@ -49,19 +33,14 @@ _base_flags() {
         'CPPFLAGS=-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL -DKEEP_PEER_CERT -DWOLFSSL_HAVE_TLS_UNIQUE -DWOLFSSL_PUBLIC_ASN'
 }
 
-# List of every config name this script understands (kept in sync with the
-# case in resolve_flags; used by --list and to validate input).
+# Must match the cases in resolve_flags.
 KNOWN_CONFIGS=(
     full full-tsan full-opensslextra full-all
     est-only-nonrsa rsa-min ecc-only-est
     no-des3 tls13-only
     mldsa-44off mldsa-65off mldsa-87off
     static-mem no-malloc
-    # Negative configs consumed by assert-configure-fails.sh: a valid wolfSSL
-    # that wolfCert configure MUST reject. Only the ones below are buildable --
-    # wolfSSL's own configure refuses to drop AES/SHA-256/all-TLS/all-key-algs
-    # (those are cascade-required), so wolfCert's compile-time #error guards for
-    # them in check_config.h cannot be fed by a real wolfSSL build.
+    # Negative configs for assert-configure-fails.sh.
     neg-no-rsa neg-no-pkcs7 neg-no-public-asn neg-no-aes128
 )
 
@@ -72,13 +51,8 @@ resolve_flags() {
         full)
             _base_flags ;;
         full-tsan)
-            # -Wno-error=tsan: wolfSSL's default GCC build turns on -Werror, and
-            # GCC's -Wtsan fires on wc_port.h's C11 atomic_thread_fence() under
-            # -fsanitize=thread ("not supported with -fsanitize=thread"), which
-            # otherwise aborts the wolfSSL build before any test runs. Demote it
-            # back to a warning. It precedes wolfSSL's trailing -Werror on the
-            # command line, and an explicit -Wno-error= survives a later bare
-            # -Werror, so the exemption holds.
+            # GCC's -Wtsan fires on wc_port.h's atomic_thread_fence() and
+            # wolfSSL builds with -Werror; -Wno-error=tsan survives that.
             _base_flags
             printf '%s\n' 'CFLAGS=-fsanitize=thread -g -O1 -Wno-error=tsan' \
                           'LDFLAGS=-fsanitize=thread' ;;
@@ -97,8 +71,7 @@ resolve_flags() {
             _base_flags
             printf '%s\n' --enable-all ;;
         est-only-nonrsa)
-            # EST-capable, RSA absent (NO_RSA). ECC + Ed + ML-DSA still present.
-            # RSA is default-on in wolfSSL, so --disable-rsa is the only delta.
+            # RSA absent; ECC, Ed and ML-DSA still present.
             _base_flags
             printf '%s\n' --disable-rsa ;;
         rsa-min)
@@ -141,16 +114,13 @@ resolve_flags() {
             _base_flags
             printf '%s\n' --enable-staticmemory --enable-singlethreaded ;;
         no-malloc)
-            # WOLFSSL_NO_MALLOC: no dynamic allocator at all, so pair it with
-            # static-memory pools (the only allocation source). Tests load a
-            # pool and register it as wolfCert's default heap. SCEP server needs
-            # MAX_SIGNED_ATTRIBS_SZ>=9 to carry the full RFC 8894 signed-
-            # attribute set without heap growth.
+            # Static pools are the only allocator. The SCEP server needs
+            # MAX_SIGNED_ATTRIBS_SZ>=9 for the RFC 8894 signed attributes.
             _base_flags
             printf '%s\n' --enable-staticmemory \
                 'CPPFLAGS=-DWOLFSSL_ALT_NAMES -DWOLFSSL_CERT_NAME_ALL -DKEEP_PEER_CERT -DWOLFSSL_HAVE_TLS_UNIQUE -DWOLFSSL_PUBLIC_ASN -DWOLFSSL_NO_MALLOC -DMAX_SIGNED_ATTRIBS_SZ=9' ;;
 
-        # -------- negative configs (a buildable wolfSSL wolfCert MUST reject) --
+        # Negative configs: buildable wolfSSL builds that wolfCert rejects
         neg-no-rsa)
             # NO_RSA with SCEP still requested -> "SCEP is RSA-only".
             _base_flags
@@ -178,9 +148,7 @@ resolve_flags() {
     esac
 }
 
-# ----------------------------------------------------------------------------
 # Argument parsing
-# ----------------------------------------------------------------------------
 if [ "$#" -eq 0 ]; then
     echo "ERROR: no config given. Try --list." >&2
     exit 2
@@ -212,9 +180,8 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# Validate config early (resolve_flags exits 2 on unknown). Read into the
-# array with a while-read loop rather than `mapfile`: mapfile is bash 4+, but
-# this script runs under the macOS runners' /bin/bash 3.2 on a cache miss.
+# One flag per line keeps the spaces inside CPPFLAGS. No mapfile: macOS
+# runners run this under /bin/bash 3.2 on a cache miss.
 CONFIGURE_FLAGS=()
 while IFS= read -r _flag; do
     CONFIGURE_FLAGS+=("$_flag")
@@ -239,9 +206,7 @@ echo "    flags:  ${CONFIGURE_FLAGS[*]}"
 # Clone (shallow) at the requested ref if we don't have the source yet.
 if [ ! -d "$SRC/.git" ]; then
     rm -rf "$SRC"
-    # Fast path: a branch/tag ref clones directly (shallow). Fallback: $REF is
-    # a raw SHA, which --branch can't take, so do a full clone and check the
-    # commit out explicitly -- otherwise we'd silently build the default branch.
+    # A raw SHA cannot go through --branch, so fall back to a full clone.
     git clone --depth 1 --branch "$REF" "$WOLFSSL_REPO" "$SRC" 2>/dev/null \
         || { git clone "$WOLFSSL_REPO" "$SRC" \
                 && git -C "$SRC" checkout "$REF"; }

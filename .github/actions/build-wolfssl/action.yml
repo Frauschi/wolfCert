@@ -43,11 +43,8 @@ runs:
         # Exact configure flags -> the single source of truth for the key.
         flags="$("$script" --print-flags "${{ inputs.config }}")"
 
-        # Resolve the ref to a commit so a moving branch (master) refreshes the
-        # cache when upstream advances. A raw 40-hex SHA is used as-is (it
-        # cannot be ls-remote'd); for a branch/tag we REQUIRE resolution to
-        # succeed -- otherwise a transient network failure would silently fall
-        # back to the literal ref, producing a cache key that never refreshes.
+        # Resolve the ref so a moving branch refreshes the key. A failed
+        # ls-remote must not fall back to the literal ref.
         ref='${{ inputs.ref }}'
         if printf '%s' "$ref" | grep -Eq '^[0-9a-f]{40}$'; then
           sha="$ref"
@@ -72,10 +69,8 @@ runs:
           echo "key=$key"
         } >> "$GITHUB_OUTPUT"
 
-    # Exact-key match only (no restore-keys): a stale prefix from a different
-    # wolfSSL commit or flag set would carry a valid-looking wolfssl.pc, and the
-    # idempotent build script would then short-circuit on it and silently use
-    # the wrong config. Forcing a clean rebuild on any key change avoids that.
+    # No restore-keys: the build script would short-circuit on a stale prefix's
+    # wolfssl.pc and use the wrong config.
     - name: Restore cached wolfSSL prefix
       id: restore
       uses: actions/cache/restore@v4

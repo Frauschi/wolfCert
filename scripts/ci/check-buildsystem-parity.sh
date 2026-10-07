@@ -1,22 +1,15 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Guard the "CMake is primary, autoconf is kept at parity" invariant. A source
-# added to one build system but not the other is a common and easy-to-miss
-# drift; this fails CI when it happens. Three independent sets are compared:
-#
-#   1. Library sources (src/*.c): CMakeLists.txt vs Makefile.am.
-#   2. Test sources (tests/{unit,integration}/*.c): tests/CMakeLists.txt vs
-#      Makefile.am -- so `make check` and CTest register the same test set.
-#   3. Library sources: CMakeLists.txt vs zephyr/CMakeLists.txt, less the test
-#      server's, which the Zephyr module does not build.
+# Fail on library or test source drift between CMake and autoconf, or Zephyr
+# module sources that differ from the client set.
 
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../.." && pwd)"
 
-indent() {  # prefix each input line with two spaces
+indent() {
     while IFS= read -r line; do printf '  %s\n' "$line"; done
 }
 
@@ -25,15 +18,13 @@ extract_lib() {
     grep -oE 'src/[A-Za-z0-9_/]+\.c' "$1" | sort -u
 }
 
-# extract_tests_am <Makefile.am>: sorted-unique test sources, normalized to
-# the unit/*.c | integration/*.c form (the tests/ prefix is stripped).
+# extract_tests_am <Makefile.am>: test sources with the tests/ prefix stripped.
 extract_tests_am() {
     grep -oE 'tests/(unit|integration)/[A-Za-z0-9_]+\.c' "$1" \
         | sed 's|^tests/||' | sort -u
 }
 
-# extract_tests_cmake <tests/CMakeLists.txt>: same normalized form (paths are
-# already relative to tests/).
+# extract_tests_cmake <tests/CMakeLists.txt>: test sources, same form.
 extract_tests_cmake() {
     grep -oE '(unit|integration)/[A-Za-z0-9_]+\.c' "$1" | sort -u
 }

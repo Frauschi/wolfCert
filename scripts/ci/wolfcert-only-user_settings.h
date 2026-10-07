@@ -18,12 +18,9 @@
  */
 
 /*
- * scripts/ci/wolfcert-only-user_settings.h - fixture for the optionsh-decoy
- * case of check-config-resolution.sh.
- *
- * Carries wolfCert's half of the config and no wolfSSL macros, so the case can
- * tell whether the staged <wolfssl/options.h> was consulted: the tier-2 checks
- * are met only if it was. Do not add wolfSSL feature macros here.
+ * Fixture for the optionsh-decoy case of check-config-resolution.sh. It holds
+ * no wolfSSL macros, so the tier-2 checks pass only if the staged
+ * <wolfssl/options.h> was consulted; a wolfSSL feature macro here defeats it.
  */
 
 #ifndef WOLFSSL_USER_SETTINGS_H
