@@ -27,9 +27,8 @@
 extern "C" {
 #endif
 
-/* Protocol-agnostic orchestration. srv->protocol selects EST vs SCEP.
- * These are the functions an application will usually call; they internally
- * invoke the lower-level est_* / scep_* primitives. */
+/* High-level orchestration over the est_* / scep_* primitives. Only
+ * wolfcert_client_get_ca supports SCEP; the rest are EST-only. */
 
 typedef struct WolfCertClient WolfCertClient;
 
@@ -51,8 +50,8 @@ WOLFCERT_API int  wolfcert_client_get_ca(WolfCertClient* client,
                                          WolfCertEncoding encoding,
                                          WolfCertBuffer* out_ca);
 
-/* Query server for CSR attributes / SCEP capabilities. Fields already set
- * in meta are preserved; unset ones may be filled from the server. */
+/* Query the EST server's CSR attributes. Fields already set in meta are
+ * preserved; unset ones may be filled from the server. */
 WOLFCERT_API int  wolfcert_client_fetch_meta(WolfCertClient* client,
                                              const WolfCertServerCfg* srv,
                                              WolfCertCertMeta* meta);

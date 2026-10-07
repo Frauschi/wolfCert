@@ -215,16 +215,18 @@ All `WolfCertBuffer` outputs remember which heap they came from, so the same
 
 ## Interoperability
 
-Beyond its own client↔server test suite, wolfCert is checked by hand against
-third-party EST and SCEP implementations using the scripts under
-`tests/interop/`. EST interop passes — Cisco libest, globalsign/est, and
-OpenSSL `cms`/`pkcs7` cross-verification of wolfCert's PKCS#7 output. A few
-caveats apply to SCEP and to some servers:
+Beyond its own client↔server test suite, wolfCert is checked against
+third-party EST and SCEP implementations by the scripts under
+`tests/interop/`, which the nightly `Interop` workflow runs. All of them
+pass: Cisco libest, globalsign/est, micromdm/scep in both directions,
+step-ca SCEP, and OpenSSL `cms`/`pkcs7` cross-verification of wolfCert's
+PKCS#7 output. `docs/INTEROP.md` has the details. A few caveats apply:
 
-- On wolfSSL ≥ 5.9, micromdm's `scepserver` (signs its CertRep with SHA-1)
-  and Smallstep step-ca's SCEP (EnvelopedData key-wrap algorithm) are
-  rejected by wolfSSL's stricter PKCS#7 verification.
-- step-ca's EST endpoints are only in the commercial build, not open-source.
+- micromdm content-encrypts with single DES, so it needs a wolfSSL built
+  with `--enable-des3`.
+- step-ca's SCEP needs an RSA CA chain in place of its default ECDSA one,
+  since SCEP is RSA-only.
+- Open-source step-ca has no EST endpoints, so only its SCEP is tested.
 - When serving strict third-party SCEP *clients*, wolfCert's CertRep carries
   the full RFC 8894 signed-attribute set including `recipientNonce`. This
   works on any malloc-enabled wolfSSL (its PKCS#7 encoder grows the

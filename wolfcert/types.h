@@ -251,7 +251,7 @@ typedef struct {
     const char*      server_url;     /* e.g. https://ca.example/.well-known/est */
     const uint8_t*   trust_anchors; /* bootstrap trust for TLS; PEM or DER; optional */
     size_t           trust_anchors_len;
-    int              verify_server;  /* 0 = explicit-TA bootstrap, 1 = full verify */
+    int              verify_server;  /* must be 1 for EST and https:// SCEP */
     int              timeout_ms;     /* per-request timeout; 0 = default */
 
     /* Optional client identity for mutual TLS. Set both `client_cert`

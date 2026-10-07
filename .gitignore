@@ -85,3 +85,7 @@ cmake/wolfCertTargets.cmake
 *~
 .DS_Store
 .cache
+
+# Local (untracked) agent instruction files
+AGENTS.local.md
+CLAUDE.local.md

@@ -106,12 +106,14 @@ The layering rules that matter to an integrator:
   pulls the protocol headers based on what was compiled in, so an application
   can include it without caring whether EST or SCEP is present.
 - **`wolfcert_client_*` is the high-level orchestrator.**
-  `wolfcert_client_enroll` / `_reenroll` route to EST or SCEP based on
-  `WolfCertServerCfg.protocol`. `_reenroll` copies the Subject and SAN of the
-  certificate being renewed into its CSR byte for byte (RFC 7030 section
-  4.2.2) and refuses a `WolfCertCertMeta` that sets either. Callers that want
-  finer control reach directly into the `wolfcert_est_*` / `wolfcert_scep_*`
-  primitives.
+  `wolfcert_client_get_ca` routes to EST or SCEP based on
+  `WolfCertServerCfg.protocol`; `_fetch_meta`, `_enroll` and `_reenroll` are
+  EST-only and return `WOLFCERT_ERR_UNSUPPORTED` for SCEP, which enrolls
+  through the `wolfcert_scep_*` primitives. `_reenroll` copies the Subject
+  and SAN of the certificate being renewed into its CSR byte for byte (RFC
+  7030 section 4.2.2) and refuses a `WolfCertCertMeta` that sets either.
+  Callers that want finer control reach directly into the `wolfcert_est_*` /
+  `wolfcert_scep_*` primitives.
 - **Protocol modules depend on subsystems, never the reverse**, and the test
   server lives below the public API — an embedder can hand it an
   already-accepted socket via `wolfcert_server_serve_fd()` instead of using
@@ -320,7 +322,7 @@ registers the backend; wolfCert threads the devId through every crypto call:
 
 ```c
 /* Application startup: register the CryptoCb with wolfSSL. */
-wolfCrypt_CryptoCb_RegisterDevice(MY_DEVID, my_callback, my_ctx);
+wc_CryptoCb_RegisterDevice(MY_DEVID, my_callback, my_ctx);
 
 /* Generate a key that lives behind the CryptoCb. */
 WolfCertKeyCfg cfg = {
@@ -518,7 +520,7 @@ that then leaves `transport` zeroed fails with `WOLFCERT_ERR_BAD_ARG`.
 
 ```c
 /* 1. Startup */
-wolfCrypt_CryptoCb_RegisterDevice(MY_DEVID, my_callback, my_ctx);
+wc_CryptoCb_RegisterDevice(MY_DEVID, my_callback, my_ctx);
 wolfcert_init(my_static_heap_hint);
 wolfcert_set_log_cb(my_log, NULL);
 

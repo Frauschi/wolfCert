@@ -1,6 +1,6 @@
 # Third-party interoperability
 
-wolfCert's EST (RFC 7030) and SCEP (RFC 8894) clients and test server are exercised against independent implementations under `tests/interop/`. These scripts are **hand-run and best-effort** - they are driven by the nightly `Interop` GitHub workflow (`.github/workflows/interop.yml`) but are not part of `ctest`.
+wolfCert's EST (RFC 7030) and SCEP (RFC 8894) clients and test server are exercised against independent implementations under `tests/interop/`. The nightly `Interop` GitHub workflow (`.github/workflows/interop.yml`) runs these scripts; they are not part of `ctest`.
 
 ## Best-effort / skip convention
 
