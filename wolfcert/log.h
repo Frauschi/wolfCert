@@ -19,13 +19,8 @@
 
 /**
  * @file log.h
- * Pluggable diagnostic logging for wolfCert.
- *
- * Embedded targets rarely have a stderr to print to; hosts may want
- * structured logs. Every library-internal diagnostic goes through one
- * callback, set once at init. The default callback is a no-op, so by
- * default wolfCert stays silent. Applications that want logs install
- * their own sink via wolfcert_set_log_cb.
+ * Pluggable diagnostic logging. wolfCert stays silent until a callback is
+ * installed with wolfcert_set_log_cb.
  */
 
 #ifndef WOLFCERT_LOG_H
@@ -44,17 +39,15 @@ typedef enum {
     WOLFCERT_LOG_DEBUG = 3
 } WolfCertLogLevel;
 
-/* Callback signature. msg is a printf-style formatted string owned by the
- * library; must not be stored past the call. ctx is whatever was passed
- * into wolfcert_set_log_cb. */
+/* msg is the formatted message, owned by the library and valid only during
+ * the call; ctx is the value given to wolfcert_set_log_cb. */
 typedef void (*WolfCertLogCb)(WolfCertLogLevel level,
                               const char* module, const char* msg,
                               void* ctx);
 
 WOLFCERT_API void wolfcert_set_log_cb(WolfCertLogCb cb, void* ctx);
 
-/* Maximum level that will be forwarded to the callback; above it, calls
- * are dropped cheaply without formatting. Default: WOLFCERT_LOG_WARN. */
+/* Highest level forwarded to the callback; default WOLFCERT_LOG_WARN. */
 WOLFCERT_API void wolfcert_set_log_level(WolfCertLogLevel lvl);
 WOLFCERT_API WolfCertLogLevel wolfcert_log_level(void);
 

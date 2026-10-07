@@ -48,11 +48,8 @@
 extern "C" {
 #endif
 
-/* One-time process-level init. Calls wolfSSL_Init() internally so
- * applications that only link against wolfCert don't have to know about
- * that. `heap` installs a default heap hint that wolfCert uses whenever
- * an explicit per-call hint is not supplied (pass NULL for the usual
- * system allocator). Safe to call multiple times in matched pairs with
+/* Process init, including wolfSSL_Init(). heap sets the default heap hint
+ * (NULL = system allocator). Calls nest in matched pairs with
  * wolfcert_cleanup(). */
 WOLFCERT_API int wolfcert_init(void* heap);
 WOLFCERT_API void wolfcert_cleanup(void);

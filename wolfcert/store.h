@@ -27,20 +27,15 @@
 extern "C" {
 #endif
 
-/* ---- pluggable storage backend -----------------------------------------
- *
- * wolfCert doesn't own your persistence: an embedded build stores certs
- * and keys in flash slots, a Linux build writes POSIX files, a test uses
- * an in-memory map. A backend is a small vtable plus an opaque context;
- * slots within a backend are addressed by caller-defined string keys
- * (e.g. "device.crt", "slot/3", "tpm:/handles/0x01800001"). */
+/* Pluggable storage backend: a vtable plus an opaque context, with slots
+ * addressed by caller-defined string keys (e.g. "device.crt", "slot/3"). */
 
 typedef struct {
-    /* Read the value associated with `key` into a freshly allocated buffer.
-     * Return WOLFCERT_OK on success; WOLFCERT_ERR_NOT_FOUND if absent. */
+    /* Read key into a newly allocated buffer; WOLFCERT_ERR_NOT_FOUND if
+     * absent. */
     int  (*read) (void* ctx, const char* key, WolfCertBuffer* out);
-    /* Write/replace `key` atomically. `sensitive` hints that the value is
-     * secret and backends should enforce tight access modes. */
+    /* Write or replace key atomically; sensitive marks a secret value that
+     * needs tight access modes. */
     int  (*write)(void* ctx, const char* key,
                   const uint8_t* data, size_t len, int sensitive);
     /* Remove `key` if present; not-an-error if already absent. */
@@ -51,21 +46,19 @@ typedef struct {
     void* ctx;
 } WolfCertStoreOps;
 
-/* Default POSIX-file backend. `root_dir` is prepended to every key and
- * must exist. Keys may contain '/' to create nested paths. Safe to
- * wolfcert_free() when the backend is no longer needed. Returns NULL on
- * host platforms that lack POSIX file I/O. */
+/* POSIX-file backend under an existing root_dir; a '/' in a key names a
+ * subdirectory, which must already exist. Returns NULL on failure or in a
+ * build without WOLFCERT_HAVE_POSIX_STORE. */
 WOLFCERT_API WolfCertStoreOps* wolfcert_store_posix_open(const char* root_dir,
                                                          void* heap);
 WOLFCERT_API void wolfcert_store_posix_close(WolfCertStoreOps* ops);
 
-/* In-memory backend, useful for tests and for hosts where the application
- * drives its own persistence (e.g. an MCU that wraps wolfCert's output
- * with its own flash-slot code). */
+/* In-memory backend, for tests or an application that persists the output
+ * itself. */
 WOLFCERT_API WolfCertStoreOps* wolfcert_store_memory_open(void* heap);
 WOLFCERT_API void wolfcert_store_memory_close(WolfCertStoreOps* ops);
 
-/* ---- high-level cert / key helpers -------------------------------------- */
+/* Cert and key helpers over a store. */
 
 WOLFCERT_API int wolfcert_store_write_cert(WolfCertStoreOps* store,
                                            const char* key,

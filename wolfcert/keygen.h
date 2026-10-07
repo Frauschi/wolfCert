@@ -28,14 +28,12 @@ extern "C" {
 
 typedef struct WolfCertKey WolfCertKey;
 
-/* Generate a new private key according to cfg. If cfg->dev_id != -1, the
- * key lives inside whatever backend is registered under that devId via
- * wolfSSL's CryptoCb; the returned handle only references it. cfg->heap
- * (or wolfcert_default_heap() if NULL) is used for the handle's allocs. */
+/* Generate a key per cfg. With cfg->dev_id != -1 the key lives in the
+ * CryptoCb backend registered under that id and the handle only references
+ * it. The handle is allocated from cfg->heap, or the default heap if NULL. */
 WOLFCERT_API int wolfcert_key_generate(const WolfCertKeyCfg* cfg, WolfCertKey** out_key);
 
-/* Load a software key from PEM or raw DER bytes. The encoding is
- * auto-detected, so the same entry point handles both. */
+/* Load a software key from PEM or DER; the encoding is auto-detected. */
 WOLFCERT_API int wolfcert_key_from_pem(const uint8_t* data, size_t data_len,
                                        void* heap, WolfCertKey** out_key);
 

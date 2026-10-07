@@ -27,9 +27,8 @@
 extern "C" {
 #endif
 
-/* Minimal EST/SCEP test servers. Not hardened for production use - they
- * exist so the library and CLIs can be exercised end-to-end without an
- * external PKI. */
+/* Minimal EST/SCEP test servers for development and interop; not hardened
+ * for production use. */
 
 typedef struct WolfCertServer WolfCertServer;
 
@@ -38,12 +37,9 @@ typedef struct {
     const char*      bind_host;          /* numeric IPv4, NULL = all
                                           * interfaces */
     uint16_t         bind_port;
-    WolfCertStoreOps* ca_store;          /* optional: persist the local CA
-                                            across runs; NULL = regen on
-                                            each start. A store that fails
-                                            to read or write fails the
-                                            start rather than falling back
-                                            to an ephemeral CA. */
+    WolfCertStoreOps* ca_store;          /* optional CA persistence; NULL =
+                                            new CA on each start. A store
+                                            error fails the start. */
     const char*      challenge_password; /* SCEP challengePassword to accept; NULL disables */
     const char*      http_basic_user;    /* EST HTTP Basic credentials to accept; NULL disables */
     const char*      http_basic_pass;    /* must be non-empty when http_basic_user is set */
@@ -52,22 +48,11 @@ typedef struct {
     WolfCertKeyType  ca_key_type;        /* WOLFCERT_KEY_RSA default */
     int              ca_key_param;       /* 2048 default for RSA, 256 for ECC */
 
-    /* TLS identity. If tls_cert_pem + tls_key_pem are set, the server
-     * terminates TLS on every accepted connection before dispatching to
-     * the protocol handler. tls_client_ca_pem, when set, enables mutual
-     * TLS (WOLFSSL_VERIFY_PEER) against the supplied client-CA bundle.
-     * EST /simplereenroll needs it (else 403) and a wolfSSL built with
-     * KEEP_PEER_CERT (else 500).
-     *
-     * Mandatory for WOLFCERT_PROTO_EST, which RFC 7030 section 3.1 defines
-     * over TLS only: wolfcert_server_start() returns WOLFCERT_ERR_TLS
-     * without them.
-     * Optional for WOLFCERT_PROTO_SCEP, which authenticates at the
-     * pkiMessage layer and may be served over cleartext HTTP.
-     *
-     * All three point at caller-owned PEM bytes; wolfCert copies what it
-     * needs during wolfcert_server_start() and does not retain the
-     * pointers. */
+    /* TLS identity, required for EST (wolfcert_server_start() returns
+     * WOLFCERT_ERR_TLS without it) and optional for SCEP. tls_client_ca_pem
+     * enables mutual TLS; EST /simplereenroll needs it (else 403) and a
+     * wolfSSL built with KEEP_PEER_CERT (else 500). All three PEM buffers
+     * are copied by wolfcert_server_start(). */
     const uint8_t*   tls_cert_pem;
     size_t           tls_cert_pem_len;
     const uint8_t*   tls_key_pem;
@@ -75,42 +60,24 @@ typedef struct {
     const uint8_t*   tls_client_ca_pem;  /* optional mutual-TLS client CA */
     size_t           tls_client_ca_pem_len;
 
-    /* SCEP manual-approval mode. When set, PKCSReq/RenewalReq return
-     * pkiStatus=PENDING instead of issuing immediately, or FAILURE when the
-     * CSR signature does not verify; the client must poll with
-     * GetCertInitial. The test server's built-in policy auto-approves a
-     * pending request on the first poll that quotes its transactionID and
-     * is signed with the parked CSR's key. */
+    /* SCEP manual approval: PKCSReq/RenewalReq answer PENDING, or FAILURE
+     * for a bad CSR signature. The first GetCertInitial that quotes the
+     * transactionID and is signed with the parked CSR's key approves it. */
     int              scep_require_approval;
 
-    /* SCEP CA roll-over. When set, the server advertises GetNextCACert
-     * in GetCACaps and answers the operation by generating a second CA
-     * keypair on demand (cached for the process lifetime). The current
-     * CA is not replaced - rollover is the caller's decision. */
+    /* SCEP CA roll-over: advertise GetNextCACert and answer it with a second
+     * CA generated on demand. The current CA is not replaced. */
     int              scep_enable_next_ca;
 
-    /* SCEP GetCert (RFC 8894 section 3.3.4, messageType 21). Off by default:
-     * the operation hands any client that can sign a pkiMessage any
-     * certificate this CA has issued, named by serial, and RFC 8894
-     * section 7.8 prefers an HTTP certificate store or LDAP for the job.
-     * Only the 16 most recently issued certificates stay retrievable; older
-     * ones are evicted and answer badCertId.
-     * scep_require_approval and the challengePassword gate enrollment, not
-     * this. While clear, a GetCert is answered as if unimplemented. */
+    /* SCEP GetCert (RFC 8894 section 3.3.4), answered badRequest while clear.
+     * When set, any client that can sign a pkiMessage can fetch the 16 most
+     * recently issued certificates by serial; older ones answer badCertId. */
     int              scep_enable_get_cert;
 
-    /* EST manual-approval mode (RFC 7030 section 4.2.3). When set, the first
-     * /simpleenroll or /simplereenroll POST for a given CSR returns
-     * `202 Accepted` with a `Retry-After: <est_retry_after_sec>` header;
-     * the next POST with the same CSR issues the certificate normally, so
-     * the client must re-POST the same CSR - which is what
-     * `wolfcert_est_simple_enroll_ex` does when a caller loops on the
-     * PENDING status. A CSR that does not decode or whose signature does
-     * not verify is answered with 400 and never parked.
-     *
-     * `est_retry_after_sec` is the value emitted in the `Retry-After`
-     * header; defaults to 1 when zero. This is a test-server
-     * convenience - a production RA has a richer approval workflow. */
+    /* EST manual approval (RFC 7030 section 4.2.3): the first POST of a CSR
+     * gets 202 Accepted with Retry-After: est_retry_after_sec (1 when 0), and
+     * the next POST of the same CSR is issued. A CSR that fails to decode or
+     * verify gets 400 and is never parked. */
     int              est_require_approval;
     int              est_retry_after_sec;
 
@@ -121,29 +88,13 @@ typedef struct {
      * WOLFSSL_HAVE_TLS_UNIQUE; see docs/ARCHITECTURE.md. */
     int              tls_post_handshake_auth;
 
-    /* EST /csrattrs body. When set, the EST server returns this
-     * DER-encoded CsrAttrs blob (RFC 7030 section 4.5.2) as the body of
-     * GET /.well-known/est/csrattrs (base64-encoded on the wire).
-     * When NULL / zero, the server answers 204 No Content and the
-     * client's wolfcert_est_get_csr_attrs returns success with an
-     * empty buffer. wolfCert copies the bytes during
-     * wolfcert_server_start(), so the caller's buffer can be freed
-     * right after. Assemble via wolfcert_csr_attrs_build or hand-
-     * roll the DER; either way the client can decode with
-     * wolfcert_est_parse_csr_attrs. */
+    /* DER CsrAttrs (RFC 7030 section 4.5.2) served at /csrattrs; NULL or 0
+     * answers 204 No Content. Copied by wolfcert_server_start(). */
     const uint8_t*   csr_attributes_der;
     size_t           csr_attributes_len;
 
-    /* When set, the EST server parses every incoming /simpleenroll +
-     * /simplereenroll CSR and rejects (with HTTP 400) those that do
-     * not carry every bare-OID Attribute advertised in
-     * `csr_attributes_der`. Currently presence-only enforcement;
-     * attribute values are not compared. No-op when
-     * csr_attributes_der is empty (nothing to enforce).
-     *
-     * Test-server convenience for exercising the client-side
-     * `srv->proto_opts.est.auto_csrattrs` round-trip end to end;
-     * real deployments wire this policy into a proper RA. */
+    /* Answer 400 to an EST enroll CSR lacking an attribute named by a bare
+     * OID in csr_attributes_der; Attribute items are ignored. */
     int              est_require_csr_attributes;
 
     /* Heap hint for server-internal allocations. */
@@ -163,11 +114,10 @@ WOLFCERT_API void wolfcert_server_free(WolfCertServer* srv);
 /* Returns the port the server is bound to. Useful after binding on port 0. */
 WOLFCERT_API uint16_t wolfcert_server_port(const WolfCertServer* srv);
 
-/* Embed wolfCert's protocol handling in an existing event loop: hand the
- * library an already-accepted connection; it services exactly one request
- * and returns, leaving the caller to close the fd.
- * WOLFCERT_SERVER_REQUEST_TIMEOUT_MS does not apply. The fd carries no TLS, so
- * EST enrollment on it needs http_basic_user or est_allow_anonymous_enroll. */
+/* Service exactly one request on an already-accepted connection; the caller
+ * closes fd. WOLFCERT_SERVER_REQUEST_TIMEOUT_MS does not apply. The fd carries
+ * no TLS, so EST enrollment on it needs http_basic_user or
+ * est_allow_anonymous_enroll. */
 WOLFCERT_API int wolfcert_server_serve_fd(WolfCertServer* srv, int fd);
 
 #ifdef __cplusplus
