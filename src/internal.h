@@ -141,7 +141,7 @@ struct WolfCertServer {
      * retries in wolfcert_io_{recv,send} are allowed only then. */
     int                     poll_timeouts_armed;
     void*                   heap;
-    long                    deadline_ms; /* 0 when none is armed */
+    int64_t                 deadline_ms; /* 0 when none is armed */
 };
 
 /* wolfSSL_read/write on a TLS connection, else recv()/send(). */
@@ -151,7 +151,7 @@ ssize_t wolfcert_io_send(WolfCertServer* srv, int fd, const void* buf, size_t le
 /* Best-effort SO_NOSIGPIPE; a no-op where unsupported or fd is not a socket. */
 WOLFCERT_TEST_VIS void wolfcert_sock_nosigpipe(int fd);
 
-long wolfcert_mono_ms(void);
+int64_t wolfcert_mono_ms(void);
 
 WOLFCERT_API const WolfCertServerOps* wolfcert_est_server_ops(void);
 WOLFCERT_API const WolfCertServerOps* wolfcert_scep_server_ops(void);

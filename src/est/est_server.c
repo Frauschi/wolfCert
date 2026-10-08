@@ -615,7 +615,7 @@ static int ensure_post_handshake_auth(WolfCertServer* s)
     size_t fin_len;
     size_t cur_len;
     char probe;
-    long deadline;
+    int64_t deadline;
     int r;
     int err;
 
