@@ -394,7 +394,7 @@ static int parse_request_in(WolfCertServer* s, int fd, EstRequest* out,
             if (csz == 0)
                 break;
 
-            if (ri + csz > raw_len || body_sz + csz > BODY_CAP) {
+            if (csz > raw_len - ri || csz > BODY_CAP - body_sz) {
                 WOLFCERT_XFREE(body, heap);
                 WOLFCERT_XFREE(raw, heap);
                 return WOLFCERT_ERR_PROTOCOL;
