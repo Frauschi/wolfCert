@@ -29,7 +29,7 @@ int main(void)
         fprintf(stderr, "static mem init failed\n");
         return 1;
     }
-    if (wolfcert_init(NULL) != WOLFCERT_OK) {
+    if (wolfcert_init(test_heap_hint()) != WOLFCERT_OK) {
         fprintf(stderr, "wolfcert_init failed\n");
         return 1;
     }
