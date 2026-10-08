@@ -34,7 +34,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
-#include <time.h>
 #include <unistd.h>
 
 #define REQUIRE(cond) \
@@ -44,13 +43,6 @@
             return 1;                                                       \
         }                                                                   \
     } while (0)
-
-static long mono_ms(void)
-{
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
-}
 
 static volatile sig_atomic_t g_sigpipe_raised;
 
@@ -151,9 +143,9 @@ int main(void)
     close(ls);
 
     /* An unroutable address must fail well under the OS default (~75s). */
-    long t0 = mono_ms();
+    int64_t t0 = wolfcert_mono_ms();
     int fd2 = wolfcert_posix_connect("10.255.255.1", 9, 250, NULL);
-    long elapsed = mono_ms() - t0;
+    int64_t elapsed = wolfcert_mono_ms() - t0;
     REQUIRE(fd2 < 0);
     REQUIRE(elapsed < 3000);
 
@@ -170,6 +162,6 @@ int main(void)
         return 1;
 #endif
 
-    printf("OK (unreachable connect returned in %ldms)\n", elapsed);
+    printf("OK (unreachable connect returned in %ldms)\n", (long)elapsed);
     return 0;
 }
