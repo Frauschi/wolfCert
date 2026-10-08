@@ -83,7 +83,7 @@ typedef enum {
 
 typedef struct {
     WolfCertKeyType type;
-    int             param;       /* RSA bits (2048/3072/4096) or ECC curve id */
+    int             param;       /* RSA 2048/3072/4096 or ECC 256/384/521 bits */
     int             dev_id;      /* wolfSSL CryptoCb devId; -1 for software */
     const char*     key_label;   /* optional backend identifier for persistent keys */
     void*           heap;        /* optional heap hint; NULL = default */
