@@ -69,6 +69,20 @@ static int assign_rdn(CertName* subject, const char* key, size_t klen,
                 return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "csr",
                     "subject %.*s is %zu bytes, limit %zu", (int)klen, key,
                     vlen, rdn_fields[i].cap - 1);
+            /* wolfSSL encodes these two as PrintableString. */
+            if ((rdn_fields[i].off == offsetof(CertName, country) ||
+                    rdn_fields[i].off == offsetof(CertName, serialDev)) &&
+                    !wolfcert_is_printable_string((const uint8_t*)val, vlen))
+                return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "csr",
+                    "subject %.*s is not a PrintableString", (int)klen, key);
+            /* And emailAddress as IA5String, which is 7-bit. */
+            if (rdn_fields[i].off == offsetof(CertName, email)) {
+                for (size_t j = 0; j < vlen; ++j) {
+                    if ((unsigned char)val[j] >= 0x80)
+                        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "csr",
+                            "subject %.*s is not an IA5String", (int)klen, key);
+                }
+            }
             memcpy(dst, val, vlen);
             dst[vlen] = '\0';
             return WOLFCERT_OK;

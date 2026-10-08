@@ -100,7 +100,10 @@ typedef struct {
                                             * Values cannot hold ',';
                                             * customize can set one. A
                                             * CTC_NAME_SIZE-byte or longer
-                                            * value is WOLFCERT_ERR_BAD_ARG. */
+                                            * value, a C or serialNumber
+                                            * that is not a PrintableString,
+                                            * or a non-ASCII emailAddress is
+                                            * WOLFCERT_ERR_BAD_ARG. */
     const char* const* san_dns;            /* array of length san_dns_len */
     size_t             san_dns_len;
     const char* const* san_ip;             /* textual IPv4/IPv6 */
