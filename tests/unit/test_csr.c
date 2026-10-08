@@ -84,6 +84,56 @@ static int build_and_reparse(WolfCertKeyType kt, int param)
     return 0;
 }
 
+/* An ECC CSR uses its curve's hash, or the strongest one wolfSSL has. */
+static int ecc_sig_follows_curve(void)
+{
+    static const struct { int param; int sig; } want[] = {
+        { 256, CTC_SHA256wECDSA },
+#if defined(HAVE_ECC384) || defined(HAVE_ALL_CURVES)
+#ifdef WOLFSSL_SHA384
+        { 384, CTC_SHA384wECDSA },
+#else
+        { 384, CTC_SHA256wECDSA },
+#endif
+#endif
+#if defined(HAVE_ECC521) || defined(HAVE_ALL_CURVES)
+#if defined(WOLFSSL_SHA512)
+        { 521, CTC_SHA512wECDSA },
+#elif defined(WOLFSSL_SHA384)
+        { 521, CTC_SHA384wECDSA },
+#else
+        { 521, CTC_SHA256wECDSA },
+#endif
+#endif
+    };
+    WolfCertCertMeta meta = { .subject_dn = "CN=device-1" };
+
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        WolfCertKeyCfg cfg = { .type = WOLFCERT_KEY_ECC,
+                               .param = want[i].param,
+                               .dev_id = WOLFCERT_DEVID_SOFTWARE };
+        WolfCertKey* key = NULL;
+        WolfCertBuffer der = { 0 };
+        DecodedCert dc;
+        int sig;
+
+        REQUIRE(wolfcert_key_generate(&cfg, &key) == WOLFCERT_OK);
+        REQUIRE(wolfcert_csr_build(key, &meta, &der) == WOLFCERT_OK);
+        wc_InitDecodedCert(&dc, der.data, (word32)der.len, NULL);
+        REQUIRE(wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL) == 0);
+        sig = (int)dc.signatureOID;
+        wc_FreeDecodedCert(&dc);
+        wolfcert_buffer_free(&der);
+        wolfcert_key_free(key);
+        if (sig != want[i].sig) {
+            fprintf(stderr, "FAIL P-%d signed with %d, want %d\n",
+                    want[i].param, sig, want[i].sig);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* UID, rfc822Name and iPAddress meta fields reach the built CSR. */
 static int build_with_extras(void)
 {
@@ -906,6 +956,8 @@ int main(void)
     if (renewal_size_limits())
         return 1;
     if (build_and_reparse(WOLFCERT_KEY_ECC, 256))
+        return 1;
+    if (ecc_sig_follows_curve())
         return 1;
 #endif
 #ifdef WOLFCERT_HAVE_RSA
