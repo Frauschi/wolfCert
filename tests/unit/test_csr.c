@@ -84,6 +84,107 @@ static int build_and_reparse(WolfCertKeyType kt, int param)
     return 0;
 }
 
+#ifdef WOLFCERT_HAVE_ECC
+/* An ECC CSR uses its curve's hash, or the strongest one wolfSSL has. */
+static int ecc_sig_follows_curve(void)
+{
+    static const struct { int param; int sig; } want[] = {
+        { 256, CTC_SHA256wECDSA },
+#if defined(HAVE_ECC384) || defined(HAVE_ALL_CURVES)
+#ifdef WOLFSSL_SHA384
+        { 384, CTC_SHA384wECDSA },
+#else
+        { 384, CTC_SHA256wECDSA },
+#endif
+#endif
+#if defined(HAVE_ECC521) || defined(HAVE_ALL_CURVES)
+#if defined(WOLFSSL_SHA512)
+        { 521, CTC_SHA512wECDSA },
+#elif defined(WOLFSSL_SHA384)
+        { 521, CTC_SHA384wECDSA },
+#else
+        { 521, CTC_SHA256wECDSA },
+#endif
+#endif
+    };
+    WolfCertCertMeta meta = { .subject_dn = "CN=device-1" };
+
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]); i++) {
+        WolfCertKeyCfg cfg = { .type = WOLFCERT_KEY_ECC,
+                               .param = want[i].param,
+                               .dev_id = WOLFCERT_DEVID_SOFTWARE };
+        WolfCertKey* key = NULL;
+        WolfCertBuffer der = { 0 };
+        DecodedCert dc;
+        int sig;
+
+        REQUIRE(wolfcert_key_generate(&cfg, &key) == WOLFCERT_OK);
+        REQUIRE(wolfcert_csr_build(key, &meta, &der) == WOLFCERT_OK);
+        wc_InitDecodedCert(&dc, der.data, (word32)der.len, NULL);
+        REQUIRE(wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL) == 0);
+        sig = (int)dc.signatureOID;
+        wc_FreeDecodedCert(&dc);
+        wolfcert_buffer_free(&der);
+        wolfcert_key_free(key);
+        if (sig != want[i].sig) {
+            fprintf(stderr, "FAIL P-%d signed with %d, want %d\n",
+                    want[i].param, sig, want[i].sig);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* An ECC CSR signs with preferred_hash, or fails when wolfSSL lacks it. */
+static int ecc_sig_follows_preferred_hash(void)
+{
+    static const struct { int hash; int sig; } want[] = {
+        { 256, CTC_SHA256wECDSA },
+#ifdef WOLFSSL_SHA384
+        { 384, CTC_SHA384wECDSA },
+#else
+        { 384, 0 },
+#endif
+#ifdef WOLFSSL_SHA512
+        { 512, CTC_SHA512wECDSA },
+#else
+        { 512, 0 },
+#endif
+    };
+    WolfCertKeyCfg cfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
+                           .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* key = NULL;
+    int ret = 0;
+
+    REQUIRE(wolfcert_key_generate(&cfg, &key) == WOLFCERT_OK);
+    for (size_t i = 0; i < sizeof(want) / sizeof(want[0]) && ret == 0; i++) {
+        WolfCertCertMeta meta = { .subject_dn = "CN=device-1",
+                                  .preferred_hash = want[i].hash };
+        WolfCertBuffer der = { 0 };
+        DecodedCert dc;
+        int sig = 0;
+        int rc = wolfcert_csr_build(key, &meta, &der);
+
+        if (rc == WOLFCERT_OK) {
+            wc_InitDecodedCert(&dc, der.data, (word32)der.len, NULL);
+            if (wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL) == 0)
+                sig = (int)dc.signatureOID;
+            wc_FreeDecodedCert(&dc);
+        }
+        if (want[i].sig == 0)
+            ret = rc != WOLFCERT_ERR_UNSUPPORTED || der.data != NULL;
+        else
+            ret = sig != want[i].sig;
+        if (ret != 0)
+            fprintf(stderr, "FAIL SHA-%d gave rc %d sig %d, want sig %d\n",
+                    want[i].hash, rc, sig, want[i].sig);
+        wolfcert_buffer_free(&der);
+    }
+    wolfcert_key_free(key);
+    return ret;
+}
+#endif
+
 /* UID, rfc822Name and iPAddress meta fields reach the built CSR. */
 static int build_with_extras(void)
 {
@@ -906,6 +1007,10 @@ int main(void)
     if (renewal_size_limits())
         return 1;
     if (build_and_reparse(WOLFCERT_KEY_ECC, 256))
+        return 1;
+    if (ecc_sig_follows_curve())
+        return 1;
+    if (ecc_sig_follows_preferred_hash())
         return 1;
 #endif
 #ifdef WOLFCERT_HAVE_RSA
