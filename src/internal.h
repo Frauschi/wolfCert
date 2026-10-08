@@ -228,6 +228,12 @@ WOLFCERT_TEST_VIS int  wolfcert_http_url_origin(const WolfCertUrl* u, void* heap
 
 /* strncasecmp() with ASCII-only case folding */
 int wolfcert_ascii_ncasecmp(const char* a, const char* b, size_t n);
+/* 1 when the header line's field name is `name`, followed directly by ':'. */
+int wolfcert_http_hdr_is(const char* line, size_t llen, const char* name);
+/* -1 on whitespace before the colon (RFC 9112 section 5.1), else 0 with the
+ * value after leading whitespace, or *val NULL when the line has no colon. */
+int wolfcert_http_hdr_split(const char* line, size_t llen, const char** val,
+                            size_t* vlen);
 
 /* `_encode` emits one line; `_encode_mime` wraps at 64 columns, which libest's
  * BIO_f_base64 body parser requires. `_decode` accepts both. */

@@ -79,6 +79,36 @@ int wolfcert_ascii_ncasecmp(const char* a, const char* b, size_t n)
     return 0;
 }
 
+int wolfcert_http_hdr_is(const char* line, size_t llen, const char* name)
+{
+    size_t n = strlen(name);
+
+    return llen > n && line[n] == ':' &&
+           wolfcert_ascii_ncasecmp(line, name, n) == 0;
+}
+
+int wolfcert_http_hdr_split(const char* line, size_t llen, const char** val,
+                            size_t* vlen)
+{
+    const char* end = line + llen;
+    const char* v = (const char*)memchr(line, ':', llen);
+
+    *val = NULL;
+    *vlen = 0;
+    if (v == NULL)
+        return 0;
+    if (v > line && (v[-1] == ' ' || v[-1] == '\t'))
+        return -1;
+
+    ++v;
+    while (v < end && (*v == ' ' || *v == '\t'))
+        ++v;
+
+    *val = v;
+    *vlen = (size_t)(end - v);
+    return 0;
+}
+
 WOLFCERT_TEST_VIS void wolfcert_http_url_free(WolfCertUrl* u)
 {
     if (u == NULL)
@@ -566,21 +596,18 @@ static int dyn_append(DynBuf* d, const void* data, size_t len)
 
 static char* find_header(const char* headers, const char* name, void* heap)
 {
-    size_t nlen = strlen(name);
     const char* p = headers;
 
     while (*p) {
-        if (wolfcert_ascii_ncasecmp(p, name, nlen) == 0 && p[nlen] == ':') {
-            const char* v = p + nlen + 1;
-            while (*v == ' ' || *v == '\t') {
-                ++v;
-            }
+        const char* nl = strstr(p, "\r\n");
+        if (nl == NULL)
+            break;
 
-            const char* e = strstr(v, "\r\n");
-            if (e == NULL)
-                return NULL;
-
-            size_t n = (size_t)(e - v);
+        size_t llen = (size_t)(nl - p);
+        const char* v;
+        size_t n;
+        if (wolfcert_http_hdr_is(p, llen, name) &&
+            wolfcert_http_hdr_split(p, llen, &v, &n) == 0) {
             char* s = (char*)WOLFCERT_XMALLOC(n + 1, heap);
             if (s == NULL)
                 return NULL;
@@ -590,10 +617,6 @@ static char* find_header(const char* headers, const char* name, void* heap)
 
             return s;
         }
-
-        const char* nl = strstr(p, "\r\n");
-        if (nl == NULL)
-            break;
 
         p = nl + 2;
     }
