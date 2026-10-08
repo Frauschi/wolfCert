@@ -31,25 +31,13 @@ extern "C" {
 WOLFCERT_API int wolfcert_est_get_cacerts(const WolfCertServerCfg* srv,
                                           WolfCertBuffer* out_ca_pem);
 
-/* GET /.well-known/est/csrattrs - raw server response body is returned
- * in `out_attrs_der` (may be empty; len==0 and data==NULL means the
- * server returned 204 No Content). Callers typically hand the bytes
- * through to WolfCertCertMeta::csr_attributes_der when building the CSR. */
+/* GET /.well-known/est/csrattrs - returns the CsrAttrs DER for
+ * wolfcert_est_parse_csr_attrs, empty (NULL, 0) on 204, 404 or no body. */
 WOLFCERT_API int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
                                             WolfCertBuffer* out_attrs_der);
 
-/* ---- CsrAttrs structured decode (RFC 7030 section 4.5.2) ------------------------
- *
- *   CsrAttrs ::= SEQUENCE SIZE (0..MAX) OF AttrOrOID
- *   AttrOrOID ::= CHOICE { oid OBJECT IDENTIFIER, attribute Attribute }
- *   Attribute ::= SEQUENCE { type OID, values SET OF AttributeValue }
- *
- * A bare OID tells the client "include an attribute of this type in
- * the CSR"; an Attribute (OID + values) is a stronger directive - the
- * server is dictating the exact value(s) the client must use (e.g.
- * the signature algorithm OID it expects). The parser walks the
- * top-level SEQUENCE and fills the `items` list plus a handful of
- * structured hint fields for the attributes wolfCert recognizes. */
+/* Decoded CsrAttrs (RFC 7030 section 4.5.2). A bare OID asks for an attribute
+ * of that type; an Attribute also dictates its values. */
 typedef enum {
     WOLFCERT_CSRATTR_BARE_OID  = 0,
     WOLFCERT_CSRATTR_ATTRIBUTE = 1
@@ -57,13 +45,10 @@ typedef enum {
 
 typedef struct {
     WolfCertCsrAttrKind kind;
-    /* Raw OID body (i.e. content of the OBJECT IDENTIFIER, not its
-     * outer tag/length). Stable pointer into the parsed buffer. */
+    /* OID content without tag and length; points into _backing. */
     const uint8_t*      oid;
     size_t              oid_len;
-    /* Only for kind == WOLFCERT_CSRATTR_ATTRIBUTE: the concatenated
-     * TLVs inside the `SET OF AttributeValue`. NULL + 0 for bare
-     * OIDs. */
+    /* Concatenated AttributeValue TLVs; NULL and 0 for a bare OID. */
     const uint8_t*      values_der;
     size_t              values_len;
 } WolfCertCsrAttrItem;
@@ -72,24 +57,19 @@ typedef struct {
     WolfCertCsrAttrItem* items;
     size_t               count;
 
-    /* Structured hints derived from recognised OIDs. Callers can use
-     * these directly or walk `items` for protocol-specific handling. */
+    /* Hints from recognised OIDs; 0 means no hint. */
     int require_challenge_password;  /* PKCS#9 challengePassword */
     int require_extension_request;   /* PKCS#9 extensionRequest */
-    /* Preferred signature hash, populated when the server pins a
-     * signatureAlgorithm OID. 0 if no hint.
-     *   256 -> SHA-256, 384 -> SHA-384, 512 -> SHA-512. */
+    /* 256, 384 or 512 when the server pins a signatureAlgorithm. */
     int preferred_hash;
-    /* Preferred key algorithm, encoded as WolfCertKeyType. 0 if no hint. */
+    /* A WolfCertKeyType. */
     int preferred_key_type;
-    /* When preferred_key_type indicates RSA: pinned modulus size; 0 = any. */
+    /* RSA modulus size; 0 = any. */
     int preferred_rsa_bits;
-    /* When preferred_key_type indicates ECC: pinned curve size (256/384/521);
-     * 0 = any. */
+    /* ECC curve size (256/384/521); 0 = any. */
     int preferred_ecc_curve_bits;
 
-    /* Backing buffer; owns the DER copy that `oid` / `values_der`
-     * point into. Managed by wolfcert_csr_attrs_free. */
+    /* Owns the DER the items point into; freed by wolfcert_csr_attrs_free. */
     uint8_t* _backing;
     size_t   _backing_len;
     void*    heap;
@@ -99,82 +79,38 @@ WOLFCERT_API int  wolfcert_est_parse_csr_attrs(const uint8_t* der, size_t der_le
                                                WolfCertCsrAttrs* out);
 WOLFCERT_API void wolfcert_csr_attrs_free(WolfCertCsrAttrs* attrs);
 
-/* Overlay the parsed structured hints onto a caller-supplied
- * WolfCertKeyCfg / WolfCertCertMeta, filling fields the caller left at
- * their zero-value defaults while preserving any value the caller set
- * explicitly (explicit wins). Specifically:
- *
- *   key_cfg->type   <- attrs->preferred_key_type   (when type  == 0)
- *   key_cfg->param  <- RSA bits or ECC curve size  (when param == 0
- *                     and the new `type` is RSA / ECC; ignored for
- *                     Ed25519 / Ed448 / ML-DSA which have no `param`)
- *   meta->preferred_hash <- attrs->preferred_hash  (when zero)
- *
- * `require_challenge_password` / `require_extension_request` are
- * informational on the client: this function doesn't synthesise a
- * challengePassword or SANs that the caller didn't supply - it only
- * fills in key-algorithm / hash choices the server pinned.
- *
- * Returns WOLFCERT_ERR_UNSUPPORTED if the resulting `key_cfg->type`
- * names a key algorithm (Ed25519 / Ed448 / ML-DSA) that the current
- * wolfCert + wolfSSL build does not have. Either `key_cfg` or `meta`
- * may be NULL to skip that half of the overlay. */
+/* When key_cfg->type is zero, take the hinted type and, for RSA/ECC with a
+ * zero param, the hinted size (else 2048 bits / P-256). A zero
+ * meta->preferred_hash takes the hinted hash. Either pointer may be NULL to
+ * skip it. Returns WOLFCERT_ERR_UNSUPPORTED when the resulting type is
+ * Ed25519, Ed448 or ML-DSA and not in this build. */
 WOLFCERT_API int wolfcert_csr_attrs_apply(const WolfCertCsrAttrs* attrs,
                                           WolfCertKeyCfg* key_cfg,
                                           WolfCertCertMeta* meta);
 
-/* Lookup helper. Returns a pointer into `attrs->items` or NULL if the
- * OID is not present. `oid_body` is the raw OID content (no tag). */
+/* Returns the item in attrs->items matching the raw OID body (no tag), or
+ * NULL. */
 WOLFCERT_API const WolfCertCsrAttrItem*
     wolfcert_csr_attrs_find(const WolfCertCsrAttrs* attrs,
                             const uint8_t* oid_body, size_t oid_len);
 
-/* Serialise a list of items back into CsrAttrs DER. The inverse of
- * wolfcert_est_parse_csr_attrs. Items of kind WOLFCERT_CSRATTR_BARE_OID
- * contribute a bare `OBJECT IDENTIFIER` choice; items of kind
- * WOLFCERT_CSRATTR_ATTRIBUTE contribute a SEQUENCE { OID, SET OF
- * AttributeValue } where `values_der` is the caller-supplied
- * concatenated TLVs of the values (one or more; e.g. an OID naming a
- * curve). Passing a zero-length items array produces an empty outer
- * SEQUENCE (valid CsrAttrs, same shape as what the server would emit
- * in place of a 204 No Content). */
+/* Encode items as CsrAttrs DER, the inverse of wolfcert_est_parse_csr_attrs.
+ * An ATTRIBUTE item's values_der holds its concatenated value TLVs; zero
+ * items give an empty SEQUENCE. */
 WOLFCERT_API int wolfcert_csr_attrs_build(const WolfCertCsrAttrItem* items,
                                           size_t count,
                                           WolfCertBuffer* out_der);
 
-/* ---- EST enrollment result (RFC 7030 section 4.2) -----------------------------
- *
- * RFC 7030 section 4.2.3 lets a server respond to /simpleenroll (or
- * /simplereenroll) with `202 Accepted` + `Retry-After` when the
- * request has been accepted but the certificate is not yet ready -
- * typically because the deployment requires manual approval. This is the
- * EST analogue of SCEP's `pkiStatus=PENDING`. The client is expected to
- * wait at least `retry_after_sec` seconds and then re-POST the identical
- * request (same CSR, same URL, same credentials).
- *
- * Every `_ex` enroll call below, one-shot or session, reports the outcome in
- * a `WolfCertEstResult`:
- *   status == SUCCESS   -> the call returns `WOLFCERT_OK`; `cert_pem` holds
- *                         the issued cert (PEM).
- *   status == PENDING   -> the call returns `WOLFCERT_OK`; `cert_pem` is
- *                         empty; `retry_after_sec` carries
- *                         the server's hint in seconds (0 when the
- *                         server did not send a usable Retry-After; see
- *                         `WolfCertHttpResponse.retry_after_sec`).
- *   status == FAILURE   -> any other HTTP status came back; the call returns
- *                         `WOLFCERT_ERR_AUTH` for 401/403, else
- *                         `WOLFCERT_ERR_HTTP`.
- *   status == UNSET     -> no usable reply (bad argument, config or
- *                         allocation failure, a refused call, transport
- *                         or parse error, or a 200 with no body); inspect
- *                         the int return code.
- * Each enroll call without the `_ex` suffix returns PENDING as
- * `WOLFCERT_ERR_PENDING` and drops the hint; use its `_ex` form to get it.
- *
- * `WolfCertEstStatus`'s values mirror `WolfCertScepStatus` on purpose so
- * callers that want a single "status -> action" switch across protocols
- * can write it once. UNSET is the zero value so a zero-initialised
- * result never looks like a success. */
+/* Outcome of the _ex enroll calls (RFC 7030 section 4.2), matching the
+ * WolfCertScepStatus values:
+ *   SUCCESS - returns WOLFCERT_OK; cert_pem holds the issued cert.
+ *   PENDING - returns WOLFCERT_OK; cert_pem is empty and the caller re-POSTs
+ *             the identical request after retry_after_sec (section 4.2.3).
+ *   FAILURE - any other HTTP status; returns WOLFCERT_ERR_AUTH for 401/403,
+ *             else WOLFCERT_ERR_HTTP.
+ *   UNSET   - no usable reply; the int return code says why.
+ * The non-_ex calls return PENDING as WOLFCERT_ERR_PENDING and drop
+ * retry_after_sec. */
 typedef enum {
     WOLFCERT_EST_STATUS_UNSET   = 0,
     WOLFCERT_EST_STATUS_SUCCESS = 1,
@@ -186,19 +122,15 @@ typedef struct {
     WolfCertEstStatus status;
     /* Populated and owned iff status == SUCCESS. */
     WolfCertBuffer    cert_pem;
-    /* Server's suggested wait before the client should re-POST. Only
-     * meaningful when status == PENDING. 0 when the server sent no usable
-     * `Retry-After` (see `WolfCertHttpResponse.retry_after_sec`); callers may
-     * apply their own backoff policy in that case. */
+    /* Seconds to wait before re-POSTing when PENDING; 0 if the server sent
+     * no usable Retry-After. */
     int               retry_after_sec;
     void*             heap;
 } WolfCertEstResult;
 
-/* Every wolfcert_est_* entry point taking a WolfCertEstResult* defines *out
- * before any other argument check, so a caller that frees the result on every
- * outcome is safe even on an early WOLFCERT_ERR_BAD_ARG; unless out is NULL.
- * The converse follows: *out is not carried across calls, so free a populated
- * result before passing it again. */
+/* Every wolfcert_est_* call taking a WolfCertEstResult* initializes a
+ * non-NULL *out first, so freeing it after any outcome is safe. A populated
+ * result must be freed before it is passed again. */
 WOLFCERT_API void wolfcert_est_result_free(WolfCertEstResult* r);
 
 /* POST /.well-known/est/simpleenroll. */
@@ -224,29 +156,12 @@ WOLFCERT_API int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
                                                  const uint8_t* csr_der, size_t csr_der_len,
                                                  WolfCertEstResult* out);
 
-/* ---- keep-alive EST session --------------------------------------------
- *
- * A single TCP+TLS connection that carries multiple EST requests. The
- * canonical deployment shape is:
- *
- *   1. Open the session with a client cert/key (factory identity),
- *      WolfCertServerCfg.verify_server on, and
- *      WolfCertServerCfg.proto_opts.est.allow_post_handshake_auth = 1.
- *   2. Call wolfcert_est_session_get_cacerts - goes out on an anonymous
- *      TLS connection (server doesn't ask for the identity yet).
- *   3. Call wolfcert_est_session_simple_enroll - server requests the
- *      client cert via TLS 1.3 post-handshake auth (RFC 8446 section 4.6.2);
- *      wolfSSL answers from the pre-loaded identity without further
- *      caller involvement.
- *
- * HTTP Basic (RFC 7030 section 3.2.3) works just as well as a client
- * certificate here: proto_opts.est.username / .password are copied at
- * session open and replayed on every request the session issues, blocking
- * and async alike.
- *
- * On a build where wolfSSL lacks WOLFSSL_POST_HANDSHAKE_AUTH the
- * session_open call fails with WOLFCERT_ERR_UNSUPPORTED when the caller
- * asked for PHA. */
+/* Keep-alive EST session carrying several requests over one TLS connection.
+ * With proto_opts.est.allow_post_handshake_auth set, the server can request
+ * the preloaded client cert via TLS 1.3 post-handshake auth (RFC 8446 section
+ * 4.6.2); open then fails with WOLFCERT_ERR_UNSUPPORTED if wolfSSL lacks
+ * WOLFSSL_POST_HANDSHAKE_AUTH. HTTP Basic credentials are copied at open and
+ * sent on every request. */
 typedef struct WolfCertEstSession WolfCertEstSession;
 
 WOLFCERT_API int wolfcert_est_session_open(const WolfCertServerCfg* srv,
@@ -270,22 +185,12 @@ WOLFCERT_API void wolfcert_est_session_close(WolfCertEstSession* s);
  * -1 when a caller-supplied WolfCertTransport backs it (no descriptor). */
 WOLFCERT_API int wolfcert_est_session_fd(const WolfCertEstSession* s);
 
-/* Async variants. The session must have been opened via a
- * WolfCertServerCfg built from a WolfCertHttpSessionCfg with
- * nonblocking=1; at that API level, pass
- * srv->proto_opts.est.allow_post_handshake_auth and/or other options plus
- * the new wolfcert_est_session_open_async().
- *
- * Each _nb call drives the HTTP session state machine forward and returns
- *   WOLFCERT_OK              - the output is populated.
- *   WOLFCERT_ERR_WANT_READ   - wait for readable, then call again
- *                              with the same arguments.
- *   WOLFCERT_ERR_WANT_WRITE  - wait for writable, then call again.
- *   other negative values    - the request ended with that error.
- * One request runs at a time: while a _nb request is in flight, a blocking
- * session request or a _nb call for a different operation or output pointer
- * returns WOLFCERT_ERR_BAD_ARG and leaves the in-flight one intact.
- */
+/* Non-blocking variants, for a session from wolfcert_est_session_open_async.
+ * Each _nb call returns WOLFCERT_OK once the output is populated, or
+ * WOLFCERT_ERR_WANT_READ / _WANT_WRITE to be repeated with the same arguments
+ * when the fd is ready; any other value ends the request. While a _nb request
+ * is in flight, any other request on the session returns WOLFCERT_ERR_BAD_ARG
+ * and leaves it intact. */
 WOLFCERT_API int wolfcert_est_session_open_async(const WolfCertServerCfg* srv,
                                                  WolfCertEstSession** out);
 

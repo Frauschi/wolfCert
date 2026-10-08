@@ -642,7 +642,7 @@ one key algorithm must be present.
 - [`README.md`](../README.md) — quick start, CLI examples, build instructions,
   and third-party interop status.
 - [`EMBEDDED.md`](EMBEDDED.md) — RAM-sizing knobs for constrained targets.
-- `wolfcert/*.h` — the authoritative API reference; every function and struct
-  field carries an inline contract / ownership note.
+- `wolfcert/*.h` — the authoritative API reference; each public function and
+  field states its contract, alone or in a group comment.
 - `examples/enroll_est.c`, `examples/enroll_scep.c`,
   `examples/enroll_cryptocb.c` — runnable minimal integrations.

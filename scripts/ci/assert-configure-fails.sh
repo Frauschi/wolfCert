@@ -49,10 +49,8 @@ while [ "$#" -gt 0 ]; do
     esac
 done
 
-# ----------------------------------------------------------------------------
 # Case table. Fields (":"-separated):
 #   name : wolfssl-config : cmake-extra-opts : autoconf-extra-opts : grep -E pattern
-# ----------------------------------------------------------------------------
 CASE_TABLE=(
   "no-rsa-scep:neg-no-rsa:::SCEP is RSA-only"
   "no-pkcs7:neg-no-pkcs7:::HAVE_PKCS7|missing a required feature"
@@ -107,9 +105,7 @@ run_autoconf() {  # <wolfssl-prefix> <extra-opts> <pattern> <case>
     if [ ! -x "$REPO_ROOT/configure" ]; then
         ( cd "$REPO_ROOT" && ./autogen.sh >/dev/null 2>&1 )
     fi
-    # A VPATH build refuses to run when the source tree is already configured
-    # in-tree (leftover config.status). Clean it so local runs match CI's fresh
-    # checkout.
+    # A VPATH build refuses to run over an in-tree config.status.
     if [ -f "$REPO_ROOT/config.status" ]; then
         ( cd "$REPO_ROOT" && make distclean >/dev/null 2>&1 ) || true
         ( cd "$REPO_ROOT" && ./autogen.sh >/dev/null 2>&1 )

@@ -17,16 +17,13 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* Combined wolfSSL + wolfCert config for the freestanding ARM gate
- * (scripts/ci/compile-freestanding.sh), read via -DWOLFSSL_USER_SETTINGS
- * -DWOLFCERT_USER_SETTINGS. One file for both, as docs/EMBEDDED.md advises.
- * Deliberately absent: the built-in transport, POSIX store, server and
- * HAVE_SNI, so this no-sockets target keeps those paths compiled out. */
+/* Combined wolfSSL + wolfCert config for compile-freestanding.sh. The
+ * built-in transport, POSIX store, server and HAVE_SNI stay out on purpose. */
 
 #ifndef WOLFSSL_USER_SETTINGS_H
 #define WOLFSSL_USER_SETTINGS_H
 
-/* --- target shape: no OS, no filesystem, app-supplied I/O --- */
+/* No OS, no filesystem, app-supplied I/O */
 #define SINGLE_THREADED
 #define NO_FILESYSTEM
 #define NO_WRITEV
@@ -36,7 +33,7 @@
 #define NO_WOLFSSL_DIR
 #define WOLFSSL_NO_SOCK
 
-/* --- the ten wolfCert requires --- */
+/* wolfCert requirements */
 #define HAVE_PKCS7
 #define WOLFSSL_CERT_GEN
 #define WOLFSSL_CERT_REQ
@@ -47,7 +44,7 @@
 #define WOLFSSL_ALT_NAMES
 #define WOLFSSL_CERT_NAME_ALL
 
-/* --- algorithms PKCS#7 + TLS need --- */
+/* Algorithms for PKCS#7 and TLS */
 #define HAVE_AES_CBC
 #define HAVE_AESGCM
 #define WOLFSSL_AES_DIRECT
@@ -67,7 +64,7 @@
 #define HAVE_ENCRYPT_THEN_MAC
 
 
-/* ---- wolfCert: no sockets, no filesystem ---- */
+/* wolfCert: no sockets, no filesystem */
 #define WOLFCERT_NO_SNI
 #define WOLFCERT_NO_BUILTIN_TRANSPORT
 #define WOLFCERT_NO_POSIX_STORE

@@ -195,8 +195,8 @@ wolfcert_cleanup();
 | `zephyr/samples/wolfcert_est_client/` | EST client on Zephyr (qemu_x86, FRDM-MCXN947) |
 | `src/` | Implementation; `src/internal.h` is not for applications |
 
-The headers are the API reference: their comments document every field and
-function contract.
+The headers are the API reference: each public function and field states its
+contract, alone or in a group comment.
 
 ## Porting hooks
 

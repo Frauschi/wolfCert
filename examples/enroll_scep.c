@@ -39,10 +39,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-/* NOTE: RFC 8894 mandates an RSA signer for the SCEP pkiMessage and an
- * RSA-key recipient for the EnvelopedData. wolfCert enforces this at
- * wolfcert_scep_pkcs_req (returns WOLFCERT_ERR_UNSUPPORTED for any other
- * key type). To enroll an Ed25519 / Ed448 / ML-DSA device key, use EST. */
+/* SCEP is RSA-only (RFC 8894); other key types enroll over EST. */
 
 int main(int argc, char** argv)
 {
@@ -56,7 +53,7 @@ int main(int argc, char** argv)
 
     WolfCertServerCfg srv = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = argv[1] };
 
-    /* 1) GetCACert -> PEM, convert to DER (SCEP envelope wants DER). */
+    /* 1) GetCACert, converted to DER for the SCEP envelope. */
     WolfCertBuffer ca_pem = { 0 };
     if (wolfcert_scep_get_ca_cert(&srv, &ca_pem) != WOLFCERT_OK) {
         fprintf(stderr, "GetCACert failed\n");

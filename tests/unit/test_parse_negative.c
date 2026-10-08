@@ -17,12 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Negative-path tests for the parsers that ingest untrusted bytes:
- * the URL parser, base64 decoder, PKCS#7 certs-only extractor, and CSR
- * PEM->DER path. Each fuzz-style input should produce an error without
- * crashing, reading past the buffer, or allocating unboundedly.
- */
+/* Negative-path tests for the parsers that ingest untrusted bytes. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -52,8 +47,7 @@
 static int test_url(void)
 {
     WolfCertUrl u;
-    /* A missing scheme is not an error - it defaults to TLS (see test_http);
-     * but a schemeless URL with a bad port is still rejected. */
+    /* A missing scheme defaults to TLS, so only the bad port fails. */
     REQUIRE(wolfcert_http_url_parse("no-scheme:0/p", &u, NULL) == WOLFCERT_ERR_PARSE);
     /* Empty bracketed IPv6. */
     REQUIRE(wolfcert_http_url_parse("http://[:/p", &u, NULL) == WOLFCERT_ERR_PARSE);
@@ -123,12 +117,8 @@ static int oid_present(const uint8_t* hay, size_t hl,
     return 0;
 }
 
-/* The RFC 8894 GetCACaps "AES" keyword advertises AES-128-CBC as the
- * content cipher. wolfcert_scep_envelop must emit exactly the cipher the
- * caller selects, not silently fall back to AES-256-CBC which a
- * minimally-compliant peer cannot decrypt. The non-AES fallback (a peer that
- * does not advertise "AES") selects triple DES-CBC, so verify that DES3b
- * emits the 3DES-CBC OID too. */
+/* AES128CBCb envelopes carry the AES-128-CBC OID and no AES-256-CBC OID;
+ * DES3b envelopes carry the 3DES-CBC OID. */
 static int test_scep_envelop_alg(void)
 {
     static const uint8_t OID_AES128_CBC[] =
@@ -155,9 +145,8 @@ static int test_scep_envelop_alg(void)
     REQUIRE(wc_InitRsaKey(&key, NULL) == 0);
     REQUIRE(wc_MakeRsaKey(&key, 2048, 65537L, &rng) == 0);
 
-    /* wolfcert_scep_self_signed_rsa now derives the signer subject from an
-     * enclosed PKCS#10 request (RFC 8894 section 2.3), so build a minimal CSR
-     * to feed it. The subject is irrelevant to this test's cipher check. */
+    /* A minimal CSR for wolfcert_scep_self_signed_rsa, which copies its subject
+     * into the signer cert; the CN value is arbitrary. */
     req = wc_CertNew(NULL);
     REQUIRE(req != NULL);
     wc_InitCert_ex(req, NULL, INVALID_DEVID);
@@ -207,8 +196,6 @@ static int test_scep_envelop_alg(void)
 
 static int test_ip_literal(void)
 {
-    /* The output lands verbatim in a certificate iPAddress SAN, so pin the
-     * byte layout the "::" slide produces, not just the accept/reject call. */
     static const struct {
         const char*   text;
         size_t        len;

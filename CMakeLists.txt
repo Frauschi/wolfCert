@@ -10,13 +10,7 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
-# Default to RelWithDebInfo (-O2 -g) when the caller gives no build type, so a
-# bare `cmake -S . -B build` produces an optimized-with-symbols library instead
-# of the compiler default (-O0, no symbols). This matches the autoconf path,
-# whose non-debug default is likewise -O2 -g -DNDEBUG. Skipped for multi-config
-# generators (Xcode, Visual Studio, Ninja Multi-Config), which pick the config
-# at build time rather than configure time. For an unoptimized debug build use
-# -DCMAKE_BUILD_TYPE=Debug (the analogue of autoconf's --enable-debug).
+# Default to RelWithDebInfo, matching autoconf's -O2 -g.
 get_property(_wolfcert_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
 if(NOT _wolfcert_multi_config AND NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING
@@ -42,13 +36,8 @@ option(WOLFCERT_ENABLE_POSIX_STORE "Build the POSIX file storage backend" ON)
 option(WOLFCERT_ENABLE_BUILTIN_TRANSPORT
     "Build the built-in POSIX socket transport" ON)
 option(WOLFCERT_WERROR         "Treat warnings as errors"               OFF)
-# Header-based configuration (the user_settings.h analogue of wolfSSL's
-# WOLFSSL_USER_SETTINGS). When ON, wolfCert does not generate or install
-# wolfcert/options.h; instead it compiles with -DWOLFCERT_USER_SETTINGS and the
-# integrator supplies a user_settings.h on the include path (see
-# WOLFCERT_USER_SETTINGS_DIR and examples/user_settings.h.example). The
-# WOLFCERT_ENABLE_EST/SCEP/SERVER options still select which source files
-# compile, so keep them in sync with the macros in your user_settings.h.
+# The EST/SCEP/SERVER options still pick the sources under user settings, so
+# they must match the macros in user_settings.h.
 option(WOLFCERT_USER_SETTINGS  "Take feature config from a user-supplied user_settings.h instead of the generated options.h" OFF)
 set(WOLFCERT_USER_SETTINGS_DIR "" CACHE PATH
     "Directory containing user_settings.h (used when WOLFCERT_USER_SETTINGS=ON)")
@@ -65,10 +54,8 @@ if(NOT WOLFCERT_ENABLE_BUILTIN_TRANSPORT)
             "the client over real sockets")
     endif()
 endif()
-# ----- wolfSSL ---------------------------------------------------------------
-# Optional convenience: -DWITH_WOLFSSL=PATH points at a wolfSSL install
-# prefix. Adds it to CMAKE_PREFIX_PATH (for find_package CONFIG mode) and
-# prepends PATH/lib/pkgconfig to PKG_CONFIG_PATH (for the pkg-config fallback).
+# wolfSSL
+# -DWITH_WOLFSSL=PATH: wolfSSL install prefix for find_package and pkg-config.
 set(WITH_WOLFSSL "" CACHE PATH "Path to a wolfSSL install prefix")
 if(WITH_WOLFSSL)
     if(NOT IS_DIRECTORY "${WITH_WOLFSSL}")
@@ -181,8 +168,7 @@ if(NOT _have_asn_helpers)
         "GetLength). Rebuild wolfSSL with CPPFLAGS=\"-DWOLFSSL_PUBLIC_ASN\".")
 endif()
 
-# Features that default-on in wolfSSL and that wolfCert depends on
-# unconditionally. Detect explicit disable markers and reject.
+# Default-on wolfSSL features wolfCert requires.
 foreach(entry IN ITEMS "NO_AES;AES;--enable-aes"
                        "NO_SHA256;SHA-256;--enable-sha256")
     list(GET entry 0 _neg)
@@ -203,9 +189,7 @@ foreach(entry IN ITEMS "NO_AES;AES;--enable-aes"
     endif()
 endforeach()
 
-# RSA: default-on in wolfSSL. Required by SCEP (RSA-only per RFC 8894), but
-# optional for an EST-only build (ECC / Ed25519 / Ed448 / ML-DSA). The
-# WOLFCERT_HAVE_RSA definition gates the RSA key algorithm.
+# RSA is required by SCEP (RFC 8894) and optional for an EST-only build.
 unset(_off_NO_RSA CACHE)
 check_c_source_compiles("${_wc_wolfssl_prologue}
     #ifdef NO_RSA
@@ -244,8 +228,7 @@ if(WOLFCERT_ENABLE_SCEP)
     endif()
 endif()
 
-# TLS: the HTTPS transport needs at least TLS 1.2 or TLS 1.3; the endpoints pin
-# their floor to whichever lower version is available.
+# The HTTPS transport needs TLS 1.2 or TLS 1.3.
 unset(_have_tls12 CACHE)
 check_c_source_compiles("${_wc_wolfssl_prologue}
     #ifdef WOLFSSL_NO_TLS12
@@ -266,8 +249,7 @@ if(NOT _have_tls12 AND NOT _have_tls13)
         "one for its HTTPS transport.")
 endif()
 
-# Optional wolfSSL features: probed here, gating definitions applied after
-# the wolfcert target is created (see below).
+# Optional key algorithms.
 foreach(entry IN ITEMS "HAVE_ECC;ECC;--enable-ecc"
                        "HAVE_ED25519;ED25519;--enable-ed25519"
                        "HAVE_ED448;ED448;--enable-ed448"
@@ -290,9 +272,7 @@ foreach(entry IN ITEMS "HAVE_ECC;ECC;--enable-ecc"
     endif()
 endforeach()
 
-# Resolve the final feature set and require at least one key algorithm.
-# Normalize the raw check_c_source_compiles results to ON/OFF so every
-# WOLFCERT_HAVE_* carries the same truthiness convention as WOLFCERT_HAVE_RSA.
+# Normalize the probe results to ON/OFF and require one key algorithm.
 foreach(pair IN ITEMS "WOLFCERT_HAVE_ECC;_have_HAVE_ECC"
                       "WOLFCERT_HAVE_ED25519;_have_HAVE_ED25519"
                       "WOLFCERT_HAVE_ED448;_have_HAVE_ED448"
@@ -312,9 +292,7 @@ if(NOT WOLFCERT_HAVE_RSA AND NOT WOLFCERT_HAVE_ECC AND NOT WOLFCERT_HAVE_ED25519
         "at least one key algorithm.")
 endif()
 
-# ---- Generate wolfcert/options.h (replaces -D feature flags) ----------------
-# Skipped under WOLFCERT_USER_SETTINGS: the integrator supplies user_settings.h
-# instead, so there is no generated options.h to produce, ship, or shadow.
+# Generate wolfcert/options.h
 if(NOT WOLFCERT_USER_SETTINGS)
     macro(_wc_opt out flag sym)
         if(${flag})
@@ -348,7 +326,7 @@ if(NOT WOLFCERT_USER_SETTINGS)
                    "${CMAKE_CURRENT_BINARY_DIR}/wolfcert/options.h" @ONLY)
 endif()
 
-# ----- library sources -------------------------------------------------------
+# Library sources
 set(WOLFCERT_SOURCES
     src/wolfcert.c
     src/version.c
@@ -413,10 +391,7 @@ target_compile_definitions(wolfcert
     INTERFACE $<$<BOOL:${WOLFCERT_BUILD_SHARED}>:WOLFCERT_USE_DLL>
               $<$<BOOL:${WOLFCERT_ENABLE_TESTS}>:WOLFCERT_BUILD_TESTING>)
 
-# Feature flags (WOLFCERT_HAVE_*) are not passed via -D; they live
-# in the generated wolfcert/options.h, included by wolfcert/types.h - unless
-# WOLFCERT_USER_SETTINGS is on, in which case types.h pulls a user-supplied
-# user_settings.h and we only define the switch + add its directory.
+# WOLFCERT_HAVE_* come from options.h or user_settings.h, never from -D.
 if(WOLFCERT_USER_SETTINGS)
     target_compile_definitions(wolfcert PUBLIC WOLFCERT_USER_SETTINGS)
     if(WOLFCERT_USER_SETTINGS_DIR)
@@ -431,7 +406,7 @@ elseif(TARGET PkgConfig::WOLFSSL)
     target_link_libraries(wolfcert PUBLIC PkgConfig::WOLFSSL)
 endif()
 
-# ----- CLIs ------------------------------------------------------------------
+# CLIs
 if(WOLFCERT_ENABLE_CLI)
     add_executable(wolfcert-client cli/wolfcert_client.c)
     target_link_libraries(wolfcert-client PRIVATE wolfcert)
@@ -442,7 +417,7 @@ if(WOLFCERT_ENABLE_CLI)
     endif()
 endif()
 
-# ----- tests / examples ------------------------------------------------------
+# Tests / examples
 if(WOLFCERT_ENABLE_TESTS)
     enable_testing()
     add_subdirectory(tests)
@@ -451,7 +426,7 @@ if(WOLFCERT_ENABLE_EXAMPLES)
     add_subdirectory(examples)
 endif()
 
-# ----- install ---------------------------------------------------------------
+# Install
 install(TARGETS wolfcert
     EXPORT  wolfCertTargets
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
@@ -460,9 +435,7 @@ install(TARGETS wolfcert
 # Install only the public headers (skips options.h.in and any non-header file).
 install(DIRECTORY wolfcert DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
         FILES_MATCHING PATTERN "*.h")
-# The generated options.h lives in the build tree; install it alongside.
-# Under WOLFCERT_USER_SETTINGS none is generated, and the integrator owns
-# user_settings.h, so there is nothing to install here.
+# The generated options.h lives in the build tree.
 if(NOT WOLFCERT_USER_SETTINGS)
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/wolfcert/options.h"
             DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/wolfcert)

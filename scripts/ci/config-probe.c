@@ -18,19 +18,14 @@
  */
 
 /*
- * scripts/ci/config-probe.c - one translation unit, one wolfCert entry header.
- *
- * Driven by check-config-resolution.sh. WOLFCERT_PROBE_HEADER selects the
- * header under test. Each macro below becomes a declaration naming itself, so
- * `cc -E` alone reports the resolved wolfSSL feature set, and the report
- * survives a tier-2 #error earlier in the file.
- *
- * WC_PROBE takes each macro name as a literal token: ## suppresses expansion,
- * which matters because wolfSSL's feature macros are defined empty.
+ * Reports the wolfSSL feature set seen through WOLFCERT_PROBE_HEADER for
+ * check-config-resolution.sh. Each macro becomes a declaration naming itself,
+ * so `cc -E` alone reports it, even past a tier-2 #error earlier in the file.
  */
 
 #include WOLFCERT_PROBE_HEADER
 
+/* ## keeps name unexpanded; wolfSSL's feature macros are defined empty. */
 #define WC_PROBE(name, v) extern int wcprobe_##name##_is_##v;
 
 
@@ -138,7 +133,7 @@ WC_PROBE(WOLFSSL_TLS13, 1)
 WC_PROBE(WOLFSSL_TLS13, 0)
 #endif
 
-/* Allocator shape, the reason wolfcert/memory.h resolves the config at all. */
+/* Allocator shape, as wolfcert/memory.h resolves it. */
 #ifdef WOLFSSL_STATIC_MEMORY
 WC_PROBE(WOLFSSL_STATIC_MEMORY, 1)
 #else

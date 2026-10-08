@@ -1,8 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 name: Lint
 
-# Cheap, wolfSSL-free checks that fail fast before the expensive build matrix
-# matters: source license headers and CMake<->autoconf source-list parity.
+# Cheap, wolfSSL-free checks: license headers and build-system source parity.
 on:
   # See pr.yml: push only on default branches so PR runs aren't doubled.
   pull_request:

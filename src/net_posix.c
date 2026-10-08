@@ -17,12 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Built-in POSIX/BSD-sockets WolfCertTransport, used when a config leaves
- * `transport` zeroed. It lives in its own translation unit so the core HTTP/TLS
- * logic holds no syscalls, and so a platform without BSD sockets can supply
- * its own transport and leave this file out of the link.
- */
+/* Built-in BSD-sockets WolfCertTransport. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -43,8 +38,7 @@
 #include <time.h>
 #include <unistd.h>
 
-/* WOLFCERT_SEND_FLAGS suppresses SIGPIPE per send(), leaving the process
- * signal disposition to the embedding application. */
+/* Suppress SIGPIPE per send(); the process disposition is the application's. */
 #ifdef MSG_NOSIGNAL
 #define WOLFCERT_SEND_FLAGS MSG_NOSIGNAL
 #else
@@ -56,8 +50,6 @@ void wolfcert_sock_nosigpipe(int fd)
 #ifdef SO_NOSIGPIPE
     int on = 1;
 
-    /* Advisory: an fd that is not a socket fails here with ENOTSOCK, which is
-     * not an error for the caller. */
     (void)setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
 #else
     (void)fd;
@@ -71,10 +63,7 @@ long wolfcert_mono_ms(void)
     return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-/* Connect `fd` to `addr`, giving up after timeout_ms (<= 0 = block until the
- * OS gives up). Returns 0 on success, -1 on error/timeout. The socket is left
- * in blocking mode on success so the rest of the stack (and wolfSSL) sees a
- * normal fd. */
+/* timeout_ms <= 0 blocks. Returns 0 on success, -1 on error or timeout. */
 static int connect_timeout(int fd, const struct sockaddr* addr, socklen_t alen,
                            int timeout_ms)
 {
@@ -93,7 +82,6 @@ static int connect_timeout(int fd, const struct sockaddr* addr, socklen_t alen,
         return -1;
 
     if (fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        /* nothing changed; nothing to restore */
         return -1;
     }
 
@@ -107,7 +95,6 @@ static int connect_timeout(int fd, const struct sockaddr* addr, socklen_t alen,
         while (pr < 0 && errno == EINTR);
 
         if (pr <= 0) {
-            /* timeout (0) or poll error (<0) */
             rc = -1;
         }
         else {
@@ -120,11 +107,9 @@ static int connect_timeout(int fd, const struct sockaddr* addr, socklen_t alen,
         }
     }
     else if (rc != 0) {
-        /* immediate failure */
         rc = -1;
     }
 
-    /* restore blocking mode */
     (void)fcntl(fd, F_SETFL, flags);
 
     return rc;
@@ -147,9 +132,7 @@ int wolfcert_posix_connect(const char* host, int port, int timeout_ms, void* ctx
     if (getaddrinfo(host, port_s, &hints, &res) != 0)
         return -1;
 
-    /* timeout_ms bounds the whole connect, not each candidate address: with a
-     * multi-homed host we shrink the per-attempt budget by what already
-     * elapsed so the total stays within the caller's deadline. */
+    /* timeout_ms bounds the whole connect across all candidate addresses. */
     long deadline = (timeout_ms > 0) ? wolfcert_mono_ms() + timeout_ms : 0;
 
     int fd = -1;
@@ -158,7 +141,6 @@ int wolfcert_posix_connect(const char* host, int port, int timeout_ms, void* ctx
         if (timeout_ms > 0) {
             attempt_ms = (int)(deadline - wolfcert_mono_ms());
             if (attempt_ms <= 0) {
-                /* budget exhausted */
                 break;
             }
         }
@@ -179,10 +161,7 @@ int wolfcert_posix_connect(const char* host, int port, int timeout_ms, void* ctx
     return fd;
 }
 
-/* ---- WolfCertTransport instance ----------------------------------------- */
-
-/* Wait for readiness on fd. `want` is the caller's WANT_READ or WANT_WRITE,
- * returned when nothing is ready and timeout_ms asked not to block. */
+/* Returns `want` when fd is not ready and timeout_ms is 0. */
 static int posix_wait(int fd, short events, int timeout_ms, int want)
 {
     struct pollfd pfd;
@@ -204,16 +183,13 @@ static int posix_wait(int fd, short events, int timeout_ms, int want)
     return WOLFCERT_OK;
 }
 
-/* A failed transfer is an I/O error unless it merely would block, so this is
- * the one errno the byte path reads. */
 #if defined(EWOULDBLOCK) && EWOULDBLOCK != EAGAIN
     #define WOLFCERT_WOULDBLOCK(e) ((e) == EAGAIN || (e) == EWOULDBLOCK)
 #else
     #define WOLFCERT_WOULDBLOCK(e) ((e) == EAGAIN)
 #endif
 
-/* poll() only promises that one byte can move, so the transfer must never
- * block; the wait is poll's job. Sockets the transport owns stay O_NONBLOCK. */
+/* poll() readiness only promises one byte, so owned sockets stay O_NONBLOCK. */
 static int set_nonblock(int fd)
 {
     int fl = fcntl(fd, F_GETFL, 0);
@@ -236,7 +212,6 @@ static int posix_connect(void* ctx, const char* host, int port,
     if (fd < 0)
         return WOLFCERT_ERR_IO;
 
-    /* This socket is ours, so poll() can own the timeout semantics. */
     if (set_nonblock(fd) != WOLFCERT_OK) {
         (void)close(fd);
         return WOLFCERT_ERR_IO;
@@ -274,8 +249,7 @@ static int posix_read(void* ctx, void* conn, uint8_t* buf, size_t len,
         if (n == 0)
             return WOLFCERT_ERR_CONN_CLOSED;
 
-        /* poll() can report a readiness the transfer then declines. Only an
-         * unbounded caller waits again; the others report it. */
+        /* Readiness can be spurious; only an unbounded caller retries. */
         if (!WOLFCERT_WOULDBLOCK(errno))
             return WOLFCERT_ERR_IO;
         if (timeout_ms >= 0)

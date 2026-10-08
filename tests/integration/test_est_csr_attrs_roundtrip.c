@@ -17,18 +17,8 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * End-to-end coverage for the EST /csrattrs round-trip:
- *   server publishes a CsrAttrs blob via WolfCertServerCfgSrv
- *   -> client fetches via wolfcert_est_get_csr_attrs
- *   -> client decodes via wolfcert_est_parse_csr_attrs
- *   -> asserts both the recognized hints and the raw items list.
- *
- * Separately, asserts that a server started without
- * csr_attributes_der replies HTTP 204 and the client returns
- * WOLFCERT_OK with an empty buffer, and that a 404 on /csrattrs
- * (e.g. a misrouted URL) is likewise read as "no attributes".
- */
+/* EST /csrattrs round trip; a 204 or a 404 from /csrattrs reads as no
+ * attributes. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -74,12 +64,7 @@ int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
-    /* Assemble a CsrAttrs DER blob that a real EST server might ship:
-     *   - bare OID challengePassword (client must add a password attr),
-     *   - bare OID ecdsa-with-SHA384 (pin the signature algorithm),
-     *   - Attribute { id-ecPublicKey, SET { secp384r1 } } (pin curve).
-     * The values_der for the Attribute is the encoded TLV of the
-     * curve OID (the SET wrapping is added by the builder). */
+    /* id-ecPublicKey value: the secp384r1 OID as one TLV. */
     uint8_t curve_oid_tlv[16];
     curve_oid_tlv[0] = 0x06;
     curve_oid_tlv[1] = (uint8_t)sizeof(OID_SECP384R1);
@@ -99,13 +84,11 @@ int main(void)
     REQUIRE(wolfcert_csr_attrs_build(items, 3, &blob) == WOLFCERT_OK);
     REQUIRE(blob.len > 0);
 
-    /* EST runs over TLS (RFC 7030): mint a server identity, pin it client-side. */
     uint8_t *tls_cert = NULL, *tls_key = NULL;
     size_t tls_cert_len = 0, tls_key_len = 0;
     REQUIRE(gen_server_identity(&tls_cert, &tls_cert_len,
                                 &tls_key, &tls_key_len) == 0);
 
-    /* --- Case 1: server advertises the blob, client decodes. */
     WolfCertServerCfgSrv cfg = {
         .protocol            = WOLFCERT_PROTO_EST,
         .bind_host           = "127.0.0.1",
@@ -144,8 +127,6 @@ int main(void)
     REQUIRE(wolfcert_csr_attrs_find(&parsed,
             OID_CHALLENGE_PASSWORD, sizeof(OID_CHALLENGE_PASSWORD)) != NULL);
 
-    /* Overlay the parsed hints onto an empty key_cfg + meta; the
-     * caller-visible side of the /csrattrs contract. */
     WolfCertKeyCfg   kc = { 0 };
     WolfCertCertMeta cm = { 0 };
     REQUIRE(wolfcert_csr_attrs_apply(&parsed, &kc, &cm) == WOLFCERT_OK);
@@ -153,8 +134,7 @@ int main(void)
     REQUIRE(kc.param == 384);
     REQUIRE(cm.preferred_hash == 384);
 
-    /* Explicit caller wins: a caller-pinned RSA-2048 + SHA-256 must
-     * survive the overlay. */
+    /* Caller-set RSA-2048 and SHA-256 are left unchanged by apply. */
     WolfCertKeyCfg   kc2 = { .type = WOLFCERT_KEY_RSA, .param = 2048 };
     WolfCertCertMeta cm2 = { .preferred_hash = 256 };
     REQUIRE(wolfcert_csr_attrs_apply(&parsed, &kc2, &cm2) == WOLFCERT_OK);
@@ -168,8 +148,7 @@ int main(void)
     pthread_join(tid, NULL);
     wolfcert_server_free(srv);
 
-    /* --- Case 2: server without csr_attributes_der answers 204;
-     *            client gets OK + empty buffer. */
+    /* Server with no csr_attributes_der: get_csr_attrs gives (NULL, 0). */
     WolfCertServerCfgSrv cfg2 = {
         .protocol = WOLFCERT_PROTO_EST,
         .bind_host = "127.0.0.1", .bind_port = 0,
@@ -195,10 +174,7 @@ int main(void)
     REQUIRE(empty.data == NULL);
     REQUIRE(empty.len  == 0);
 
-    /* --- Case 3: a base URL with a stray path segment makes /csrattrs
-     *            resolve to an unknown suffix, so the server answers 404.
-     *            The client reads 404 like 204: WOLFCERT_OK + empty buffer,
-     *            rather than surfacing a transport error. */
+    /* The stray path segment makes the server answer 404 for /csrattrs. */
     char url404[160];
     snprintf(url404, sizeof(url404),
              "https://127.0.0.1:%u/.well-known/est/nope",

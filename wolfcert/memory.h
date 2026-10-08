@@ -19,24 +19,8 @@
 
 /**
  * @file memory.h
- * Heap-hint based memory allocation for wolfCert.
- *
- * All dynamic allocation in wolfCert goes through these macros so that an
- * application can route every byte through a wolfSSL static-memory pool or
- * a custom allocator. The semantics match wolfSSL's XMALLOC/XFREE/XREALLOC:
- * each call takes an opaque `heap` hint that the backing allocator can
- * interpret any way it likes (wolfSSL static memory uses it to select a
- * bucket; host builds ignore it).
- *
- * By default the macros expand to wolfSSL's own XMALLOC/XFREE so wolfCert
- * shares exactly the pool that the rest of the application's wolfSSL code
- * uses. When wolfSSL's static-memory option is enabled the pool is
- * hard-capped; wolfCert will honour that limit.
- *
- * Callers that want to pin wolfCert's allocations to a specific heap
- * register the hint through wolfcert_set_default_heap(); individual APIs
- * also accept an explicit `heap` where the allocation needs to outlive
- * the default.
+ * Heap-hint allocation macros. By default they expand to wolfSSL's XMALLOC
+ * family, so wolfCert shares the application's wolfSSL heap or static pool.
  */
 
 #ifndef WOLFCERT_MEMORY_H
@@ -51,12 +35,9 @@
 extern "C" {
 #endif
 
-/* Pluggable allocator. If the application doesn't override it, we use
- * wolfSSL's XMALLOC family which in turn respects WOLFSSL_STATIC_MEMORY.
- * Embedded integrators that define WOLFCERT_CUSTOM_ALLOC supply the three
- * macros themselves. */
 #if defined(WOLFCERT_CUSTOM_ALLOC)
-  /* Project defines these macros externally. */
+  /* The application defines WOLFCERT_XMALLOC, WOLFCERT_XREALLOC and
+   * WOLFCERT_XFREE. */
 #else
 #  include <wolfssl/wolfcrypt/types.h>
 #  define WOLFCERT_XMALLOC(sz, heap)        XMALLOC((sz),  (heap), DYNAMIC_TYPE_TMP_BUFFER)

@@ -72,8 +72,7 @@ int main(int argc, char** argv)
     if (wolfcert_init(NULL) != WOLFCERT_OK)
         return 1;
 
-    /* 1) Generate an Ed25519 key (fall back to ECC P-256 if wolfSSL was
-     *    built without Ed25519 support). */
+    /* 1) Generate an Ed25519 key, or P-256 when wolfSSL lacks Ed25519. */
 #ifdef WOLFCERT_HAVE_ED25519
     WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ED25519, .param = 0,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };

@@ -27,8 +27,6 @@
 #include <stdio.h>
 #include <string.h>
 
-/* ---- default heap, logging, last-error --------------------------------- */
-
 static void*            g_default_heap = NULL;
 static WolfCertLogCb    g_log_cb       = NULL;
 static void*            g_log_ctx      = NULL;
@@ -50,8 +48,6 @@ typedef struct {
 } WolfCertErrState;
 
 static WOLFCERT_TLS WolfCertErrState g_err;
-
-/* ---- public memory / log / status APIs --------------------------------- */
 
 void  wolfcert_set_default_heap(void* heap)
 {
@@ -123,9 +119,6 @@ void wolfcert_clear_error(void)
     memset(&g_err, 0, sizeof(g_err));
 }
 
-
-/* ---- IP literal parsing ------------------------------------------------- */
-
 /* One decimal octet, refusing an octal-ambiguous leading zero. Returns the
  * value or -1, advancing *p. */
 static int parse_octet(const char** p)
@@ -179,7 +172,7 @@ static int hex_digit(char c)
     return -1;
 }
 
-/* Is the group starting at s a dotted-quad tail rather than a hex group? */
+/* 1 if the group at s is a dotted-quad tail. */
 static int group_is_ipv4(const char* s)
 {
     int i;
@@ -246,7 +239,6 @@ static int parse_ipv6(const char* s, uint8_t out[16])
             s++;
         }
         else if (*s == '\0') {
-            /* a trailing single colon is not a valid address */
             return WOLFCERT_ERR_PARSE;
         }
     }
@@ -291,8 +283,6 @@ WOLFCERT_TEST_VIS int wolfcert_parse_ip(const char* s, uint8_t out[16],
     return WOLFCERT_ERR_PARSE;
 }
 
-/* ---- internal log + error helpers -------------------------------------- */
-
 void wolfcert_logv(WolfCertLogLevel lvl, const char* module,
                     const char* fmt, ...)
 {
@@ -326,7 +316,6 @@ int wolfcert_set_error(int wolfcert_rc, int wolfssl_rc,
     vsnprintf(g_err.message, sizeof(g_err.message), fmt, ap);
     va_end(ap);
 
-    /* Also emit at WARN via the log callback so applications see it. */
     wolfcert_logv(WOLFCERT_LOG_WARN, module ? module : "wolfcert",
                    "%s (rc=%d wc=%d)", g_err.message, wolfcert_rc, wolfssl_rc);
 
@@ -420,20 +409,12 @@ WOLFCERT_TEST_VIS int wolfcert_base64_encode(const uint8_t* in, size_t in_len,
     return WOLFCERT_OK;
 }
 
-/* MIME-wrapped (RFC 4648 section 3.1, 64 chars per line) base64 encoder. Used
- * only for HTTP-body payloads where a strict downstream parser - notably
- * OpenSSL's `BIO_f_base64` in libest's estserver - rejects unwrapped
- * input. Most wolfCert call sites should keep using
- * `wolfcert_base64_encode` (no wrapping): HTTP Basic Auth header values
- * and wolfCert's own server-side decode path are single-line by
- * contract. */
 WOLFCERT_TEST_VIS int wolfcert_base64_encode_mime(const uint8_t* in, size_t in_len,
                                                   WolfCertBuffer* out, void* heap)
 {
     if (in == NULL || out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    /* Capacity includes one `\n` per 64 output chars plus a small pad. */
     word32 cap = (word32)(((in_len + 2) / 3) * 4 + (in_len / 48 + 2) + 4);
     uint8_t* buf = (uint8_t*)WOLFCERT_XMALLOC(cap, heap);
     if (buf == NULL)

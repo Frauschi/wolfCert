@@ -17,12 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Server lifecycle + protocol dispatch. Per-protocol handlers live under
- * src/est/ and src/scep/ and register themselves via a WolfCertServerOps
- * vtable, so adding a new protocol doesn't require another ifdef branch
- * here.
- */
+/* Server lifecycle and protocol dispatch through WolfCertServerOps. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -52,22 +47,18 @@
 #define WOLFCERT_SEND_FLAGS 0
 #endif
 
-/* How often wolfcert_server_run() wakes to re-check the stopping flag while
- * idle at the listener. Bounds shutdown latency; not performance-critical. */
+/* Listener poll interval, which bounds shutdown latency. */
 #ifndef WOLFCERT_SERVER_POLL_MS
 #define WOLFCERT_SERVER_POLL_MS 200
 #endif
 
-/* Send/receive timeout on an accepted connection: how often a blocked read or
- * write wakes to call io_should_stop(). Every expiry is a retry, so lowering
- * this spins the handler rather than speeding shutdown. */
+/* Send/receive timeout on an accepted connection; each expiry is a retry
+ * that re-checks io_should_stop(). */
 #ifndef WOLFCERT_SERVER_IO_TIMEOUT_MS
 #define WOLFCERT_SERVER_IO_TIMEOUT_MS WOLFCERT_SERVER_POLL_MS
 #endif
 
-/* Time limit for the TLS handshake and for each request. A connection that
- * runs over it is closed so the next client can be served. 0 or less means no
- * limit. */
+/* Time limit for the TLS handshake and each request; 0 or less disables it. */
 #ifndef WOLFCERT_SERVER_REQUEST_TIMEOUT_MS
 #define WOLFCERT_SERVER_REQUEST_TIMEOUT_MS 10000
 #endif
@@ -106,9 +97,8 @@ ssize_t wolfcert_io_recv(WolfCertServer* srv, int fd, void* buf, size_t len)
     if (srv != NULL && io_should_stop(srv))
         return -1;
 
-    /* A connection the accept loop armed carries a receive timeout, so its
-     * expiry is a retry rather than an error: wolfSSL reports it as a want,
-     * a raw socket as EAGAIN. */
+    /* An armed receive timeout expires as a want in wolfSSL and as EAGAIN on
+     * a raw socket; both are retried. */
     if (srv != NULL && srv->tls_current != NULL) {
         int tr;
 
@@ -142,9 +132,6 @@ ssize_t wolfcert_io_send(WolfCertServer* srv, int fd, const void* buf, size_t le
     if (srv != NULL && io_should_stop(srv))
         return -1;
 
-    /* Mirrors wolfcert_io_recv: the send timeout bounds a peer that stops
-     * reading, and its expiry is a retry rather than an error. Callers write
-     * through send_all(), so a short write is already handled. */
     if (srv != NULL && srv->tls_current != NULL) {
         int tr;
 
@@ -186,9 +173,6 @@ static int tls_setup(WolfCertServer* s, const WolfCertServerCfgSrv* cfg)
         return WOLFCERT_ERR_BAD_ARG;
     }
 
-    /* Flex method: negotiates the highest mutually-supported TLS version
-     * (prefers TLS 1.3). The floor is TLS 1.2, or TLS 1.3 when wolfSSL is
-     * built without TLS 1.2 (WOLFSSL_NO_TLS12). */
     WOLFSSL_CTX* ctx = wolfSSL_CTX_new(wolfTLS_server_method());
     if (ctx == NULL)
         return WOLFCERT_ERR_CRYPTO;
@@ -317,11 +301,6 @@ int wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out)
     if (s == NULL)
         return WOLFCERT_ERR_MEMORY;
 
-    /* Zero-init covers every field, including the wolfSSL_Atomic_Int `stopping`
-     * flag: it is a lock-free integer atomic, so an all-zero representation is
-     * a valid initialized value of 0. Nothing else touches `s` until the caller
-     * publishes it to the serving thread (pthread_create is the happens-before
-     * edge), so no atomic_init()/barrier is needed here. */
     memset(s, 0, sizeof(*s));
     s->cfg       = *cfg;
     s->listen_fd = -1;
@@ -362,9 +341,8 @@ int wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out)
         rc = wolfcert_ca_load(&s->ca, cfg->ca_store, heap);
         if (rc == WOLFCERT_OK)
             have_ca = 1;
-        /* Only an empty store means "no CA yet"; an I/O, memory or parse
-         * failure must not silently replace a CA the caller still has.
-         * wolfcert_ca_load() already recorded which one it was. */
+        /* Only an empty store means no CA yet; any other failure must not
+         * replace the stored CA. */
         else if (rc != WOLFCERT_ERR_NOT_FOUND)
             goto fail;
     }
@@ -434,12 +412,8 @@ int wolfcert_server_run(WolfCertServer* srv)
     if (srv == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    /* Poll the listener with a short timeout rather than blocking in accept(),
-     * so the loop re-checks the stopping flag on its own. This keeps shutdown
-     * portable -- neither shutdown() nor close() from another thread reliably
-     * wakes a blocked accept() on BSD/macOS -- and race-free: listen_fd is
-     * touched only by start() (before the serving thread exists) and free()
-     * (after it has been joined), never concurrently with this loop. */
+    /* Neither shutdown() nor close() from another thread reliably wakes a
+     * blocked accept() on BSD/macOS, so the listener is polled. */
     while (!WOLFSSL_ATOMIC_LOAD(srv->stopping)) {
         pfd.fd     = srv->listen_fd;
         pfd.events = POLLIN;
@@ -452,36 +426,24 @@ int wolfcert_server_run(WolfCertServer* srv)
             return WOLFCERT_ERR_IO;
         }
         if (pr == 0)
-            continue;   /* timed out -- re-check stopping */
+            continue;
 
-        /* poll() reports the listener ready for either a pending connection
-         * (POLLIN) or an error/hangup condition (POLLERR/POLLHUP/POLLNVAL).
-         * Accept only on POLLIN: an error condition on the listener is fatal,
-         * and accepting on it could block or spin the loop. */
         if ((pfd.revents & POLLIN) == 0)
             return WOLFCERT_ERR_IO;
 
-        /* stopping may have been set between poll() returning and here; honour
-         * it now rather than serving one more connection. */
         if (WOLFSSL_ATOMIC_LOAD(srv->stopping))
             break;
 
         cs = accept(srv->listen_fd, NULL, NULL);
         if (cs < 0) {
-            /* A single misbehaving peer must not take the listener down. A
-             * reset between poll() reporting POLLIN and accept() running
-             * surfaces as ECONNABORTED (ECONNRESET on some systems); EINTR is
-             * a delivered signal. Retry those -- only a genuine listener
-             * failure is fatal. */
+            /* A peer reset between poll() and accept() is not fatal. */
             if (errno == EINTR || errno == ECONNABORTED || errno == ECONNRESET)
                 continue;
 
             return WOLFCERT_ERR_IO;
         }
 
-        /* Bound how long a read or write on this connection can block, so a
-         * peer that goes silent or stops reading cannot hold the handler past
-         * wolfcert_server_stop(). */
+        /* A silent peer must not outlast wolfcert_server_stop(). */
         poll_to.tv_sec  = WOLFCERT_SERVER_IO_TIMEOUT_MS / 1000;
         poll_to.tv_usec = (WOLFCERT_SERVER_IO_TIMEOUT_MS % 1000) * 1000;
         if (setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, &poll_to,
@@ -498,8 +460,6 @@ int wolfcert_server_run(WolfCertServer* srv)
         arm_deadline(srv);
 
         if (srv->tls_ctx != NULL) {
-            /* Terminate TLS on this accepted fd. The protocol handler sees
-             * plaintext HTTP through wolfcert_io_{recv,send}. */
             WOLFSSL* ssl = wolfSSL_new(srv->tls_ctx);
             if (ssl != NULL) {
                 wolfSSL_set_fd(ssl, cs);
@@ -516,13 +476,8 @@ int wolfcert_server_run(WolfCertServer* srv)
                 if (ret == WOLFSSL_SUCCESS) {
                     srv->tls_current = ssl;
 
-                    /* Keep-alive loop: protocol handlers read one
-                     * request at a time and return. We keep calling
-                     * them until the handler reports the peer closed
-                     * the connection (an I/O error while reading the
-                     * next request line). This lets an EST client
-                     * hit /cacerts anonymously and /simpleenroll with
-                     * PHA-provided auth on the same TLS connection. */
+                    /* Keep-alive lets an EST client fetch /cacerts
+                     * anonymously and enroll with PHA on one connection. */
                     do {
                         srv->keep_alive = 1;
                         arm_deadline(srv);
@@ -542,7 +497,6 @@ int wolfcert_server_run(WolfCertServer* srv)
             }
         }
         else {
-            /* Plaintext: no TLS. */
             do {
                 srv->keep_alive = 1;
                 arm_deadline(srv);
@@ -575,12 +529,6 @@ int wolfcert_server_stop(WolfCertServer* srv)
     if (srv == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    /* Signal the accept loop to exit. The listener poll and the reads on an
-     * accepted connection are both bounded and re-check this flag, so no fd
-     * surgery is needed here --
-     * wolfcert_server_free() closes listen_fd after the serving thread is
-     * joined. Setting the flag from another thread (test harness) or a signal
-     * handler (wolfcert-server CLI) is safe: the store is atomic. */
     WOLFSSL_ATOMIC_STORE(srv->stopping, 1);
 
     return WOLFCERT_OK;

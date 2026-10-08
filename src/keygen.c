@@ -80,17 +80,8 @@ int wolfcert_key_generate(const WolfCertKeyCfg* cfg, WolfCertKey** out_key)
     if (k == NULL)
         return WOLFCERT_ERR_MEMORY;
 
-    /* Initialize the RNG before the algorithm's backing key struct. Two
-     * reasons:
-     *   1. We fail fast on a broken RNG without leaking a half-allocated
-     *      key handle.
-     *   2. ML-DSA's backing key is an 8 KiB struct; generation later
-     *      allocates ~28 KiB of scratch. With some glibc versions,
-     *      interleaving those mallocs with a small DRBG-state alloc in
-     *      between tripped the malloc.c:2599 sysmalloc assertion.
-     *      Allocating the DRBG first keeps the heap arena in a state
-     *      where the larger dilithium allocations land cleanly.
-     */
+    /* The RNG is set up first; a DRBG alloc between the large ML-DSA
+     * allocations tripped a glibc sysmalloc assertion. */
     WC_RNG rng;
     int rc = wc_InitRng_ex(&rng, heap, cfg->dev_id);
     if (rc != 0) {
@@ -116,9 +107,7 @@ int wolfcert_key_generate(const WolfCertKeyCfg* cfg, WolfCertKey** out_key)
     return WOLFCERT_OK;
 }
 
-/* PEM -> DER -> iterate every registered algorithm's priv_decode; first win
- * defines the key type. This lets Ed25519 / Ed448 / ML-DSA slot in simply
- * by adding a row in key_algs.c. */
+/* The first algorithm whose priv_decode accepts the DER sets the key type. */
 int wolfcert_key_from_pem(const uint8_t* data, size_t data_len,
                           void* heap, WolfCertKey** out_key)
 {
@@ -128,10 +117,7 @@ int wolfcert_key_from_pem(const uint8_t* data, size_t data_len,
     if (heap == NULL)
         heap = wolfcert_default_heap();
 
-    /* The input may be raw DER or PEM. DER feeds the per-algorithm decoders
-     * directly; PEM is first run through wc_PemToDer with a sequence of PEM
-     * types (first one wolfSSL accepts gives us DER bytes). For ML-DSA we use
-     * the canonical FIPS 204 PEM types. */
+    /* PEM input converts with the first PEM type wolfSSL accepts. */
     static const int pem_try_types[] = {
         PRIVATEKEY_TYPE, ECC_PRIVATEKEY_TYPE
 #ifdef WOLFCERT_HAVE_ED25519
@@ -184,7 +170,6 @@ int wolfcert_key_from_pem(const uint8_t* data, size_t data_len,
         der_len   = der->length;
     }
 
-    /* Now try each registered algorithm's private-key DER decoder. */
     const WolfCertKeyAlg* const* list = wolfcert_key_algs_all();
     for (; *list != NULL; ++list) {
         const WolfCertKeyAlg* a = *list;
@@ -225,7 +210,6 @@ static int key_export_der(const WolfCertKey* key, uint8_t** out_der,
 
     size_t der_cap = alg->der_cap_hint;
     if (key->type == WOLFCERT_KEY_RSA) {
-        /* DER size grows with modulus; give it head room. */
         size_t bits = key->rsa_bits ? (size_t)key->rsa_bits : 4096;
         der_cap = bits + 2048;
     }

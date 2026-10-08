@@ -2,14 +2,10 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
 # SCEP interoperability against micromdm/scep (Debian/Ubuntu: `apt install
-# scep`). Exercises both directions and REQUIRES both to succeed:
-#
-#   [D2]  wolfcert-client  ->  scepserver      : enroll against micromdm
-#   [D1]  scepclient       ->  wolfcert-server : enroll against wolfCert
+# scep`), in both directions.
 #
 # Needs a wolfSSL built --enable-des3: micromdm content-encrypts its
-# pkcsPKIEnvelope with single DES-CBC (1.3.14.3.2.7), which wolfSSL disables by
-# default (NO_DES3). The `full` CI config enables it (build-wolfssl.sh).
+# pkcsPKIEnvelope with single DES-CBC (1.3.14.3.2.7).
 
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -25,7 +21,6 @@ WC_CLIENT="$(wolfcert_bin wolfcert-client)"
 cd "$WOLFCERT_INTEROP_WORK"
 trap 'echo "--- work dir: $WOLFCERT_INTEROP_WORK"' EXIT
 
-# ------------------------------------------------------------------------ D2
 echo "[D2] wolfcert-client -> micromdm scepserver"
 mkdir -p d2 && cd d2 && mkdir -p depot
 scepserver ca -init -depot "$PWD/depot" -organization "wolfCert-interop" \
@@ -36,10 +31,8 @@ SRV_PID=$!
 trap 'kill_if "$SRV_PID"' EXIT
 wait_port 127.0.0.1 "$PORT"
 
-# --ca-id: a single-CA responder ignores the message= parameter, so this only
-# has to keep working rather than select anything. Placed ahead of the enrolls
-# because GetCACert does not verify a CertRep, so it still reports if an
-# enrollment regression takes the assertions below down.
+# --ca-id goes first, since GetCACert still reports when enrollment breaks.
+# A single-CA responder ignores message=.
 "$WC_CLIENT" getcacerts \
     --proto scep \
     --url  "http://127.0.0.1:$PORT/scep" \
@@ -68,9 +61,7 @@ echo "    PASS  (cert chains to scepserver CA)"
 # The remaining variants reuse the same server and CA. Each takes a fresh CN so
 # that -allowrenew 0 never sees a repeated subject.
 
-# --txid-mode pubkey sends 64 hex characters where the default sends 32. A peer
-# that truncates or rejects the longer transactionID fails here, which is the
-# whole reason the option exists.
+# --txid-mode pubkey sends a 64-character transactionID instead of 32.
 "$WC_CLIENT" enroll \
     --proto scep \
     --url  "http://127.0.0.1:$PORT/scep" \
@@ -84,9 +75,7 @@ echo "    PASS  (cert chains to scepserver CA)"
 openssl verify -CAfile depot/ca.pem txid.crt.pem >/dev/null
 echo "    PASS  (--txid-mode pubkey accepted)"
 
-# --content-cipher aes256. No GetCACaps keyword advertises AES-256, so this
-# started as a non-fatal probe; the 2026-07-30 run showed micromdm decrypts it,
-# so it is a strict assertion now and a regression here is a real one.
+# No GetCACaps keyword advertises AES-256, but micromdm decrypts it.
 "$WC_CLIENT" enroll \
     --proto scep \
     --url  "http://127.0.0.1:$PORT/scep" \
@@ -104,7 +93,6 @@ kill_if "$SRV_PID"; SRV_PID=""
 
 cd ..
 
-# ------------------------------------------------------------------------ D1
 echo "[D1] micromdm scepclient -> wolfcert-server"
 PORT=$(free_port)
 "$WC_SERVER" --proto scep --listen "127.0.0.1:$PORT" \

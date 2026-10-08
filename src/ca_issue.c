@@ -17,11 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * CA generation, persistence, and "issue from CSR" helpers shared by the
- * EST and SCEP test servers. Extends naturally to whatever key types the
- * dispatch table (src/key_algs.c) supports.
- */
+/* Test-server CA: generation, persistence and issuance from a CSR. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -49,10 +45,7 @@
 #include <stdio.h>
 #include <string.h>
 
-/* The CA uses the same algorithm dispatch as device keys. We borrow the
- * WolfCertKey alloc_init / make / priv_to_der / free_ routines by having
- * a small shim struct that looks like a WolfCertKey so the table
- * entries can act on it. */
+/* Wrap the CA key in a WolfCertKey so the key_algs table can act on it. */
 static WolfCertKey* ca_as_key(WolfCertCa* ca, WolfCertKey* shim)
 {
     memset(shim, 0, sizeof(*shim));
@@ -68,8 +61,6 @@ static void ca_sync_from_shim(WolfCertCa* ca, const WolfCertKey* shim)
     ca->impl = shim->impl;
 }
 
-/* ---- self-sign the CA cert ---------------------------------------------- */
-
 static int gen_self_signed_cert(WolfCertCa* ca)
 {
     const WolfCertKeyAlg* alg = wolfcert_key_alg(ca->type);
@@ -82,16 +73,13 @@ static int gen_self_signed_cert(WolfCertCa* ca)
 
     wc_InitCert_ex(cert, ca->heap, WOLFCERT_DEVID_SOFTWARE);
 
-    /* Bounded copies: snprintf always NUL-terminates and truncates rather
-     * than overflowing the fixed CTC_NAME_SIZE subject fields. */
     snprintf(cert->subject.commonName, sizeof(cert->subject.commonName),
              "%s", "wolfCert Test CA");
     snprintf(cert->subject.org, sizeof(cert->subject.org), "%s", "wolfCert");
     snprintf(cert->subject.country, sizeof(cert->subject.country), "%s", "US");
 
     cert->isCA       = 1;
-    /* RFC 5280 section 4.2.1.9 MUST: a CA whose key validates certificate
-     * signatures marks basicConstraints critical. */
+    /* RFC 5280 section 4.2.1.9: a CA marks basicConstraints critical. */
     cert->basicConstCrit = 1;
     cert->selfSigned = 1;
     cert->daysValid  = 3650;
@@ -146,8 +134,6 @@ static int gen_self_signed_cert(WolfCertCa* ca)
     return WOLFCERT_OK;
 }
 
-/* ---- CA lifecycle ------------------------------------------------------- */
-
 int wolfcert_ca_generate(WolfCertCa* ca, WolfCertKeyType type, int param, void* heap)
 {
     if (ca == NULL)
@@ -157,7 +143,6 @@ int wolfcert_ca_generate(WolfCertCa* ca, WolfCertKeyType type, int param, void* 
     ca->type = type ? type : WOLFCERT_DEFAULT_KEY_TYPE;
     ca->heap = heap;
 
-    /* Default params when caller doesn't specify one. */
     int p = param;
     if (p == 0) {
         if (ca->type == WOLFCERT_KEY_RSA)
@@ -198,8 +183,7 @@ int wolfcert_ca_generate(WolfCertCa* ca, WolfCertKeyType type, int param, void* 
         return rc;
     }
 
-    /* Serialize the private key once - used by the SCEP server when it
-     * needs to hand a DER-encoded key to wolfSSL's PKCS7 decryption. */
+    /* Kept as DER for wolfcert_ca_save and the SCEP server's PKCS#7 calls. */
     size_t kcap = alg->der_cap_hint + 2048;
     ca->key_der = (uint8_t*)WOLFCERT_XMALLOC(kcap, heap);
     if (ca->key_der == NULL) {
@@ -226,9 +210,7 @@ int wolfcert_ca_generate(WolfCertCa* ca, WolfCertKeyType type, int param, void* 
     return WOLFCERT_OK;
 }
 
-/* Confirm the stored certificate is a CA and carries the public half of the
- * stored private key. A mismatched pair would otherwise start a server whose
- * signatures and PKCS#7 decryption do not match the CA it advertises. */
+/* Check the stored cert is a CA holding the public half of the stored key. */
 static int ca_check_stored_pair(const WolfCertKeyAlg* alg, WolfCertKey* key,
                                 const uint8_t* cert_der, size_t cert_len,
                                 void* heap)
@@ -246,8 +228,6 @@ static int ca_check_stored_pair(const WolfCertKeyAlg* alg, WolfCertKey* key,
     }
     else if (!dc->isCA ||
              (dc->extKeyUsageSet && (dc->extKeyUsage & KEYUSE_KEY_CERT_SIGN) == 0)) {
-        /* Signing with a leaf produces a chain no relying party accepts, and
-         * /cacerts would advertise it as the trust anchor. */
         rc = WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "ca",
                           "stored CA certificate is not a CA "
                           "(basicConstraints/keyUsage)");
@@ -296,15 +276,14 @@ int wolfcert_ca_load(WolfCertCa* ca, WolfCertStoreOps* store, void* heap)
         if (key_rc != WOLFCERT_OK && key_rc != WOLFCERT_ERR_NOT_FOUND)
             return WOLFCERT_ERR(key_rc, "ca", "CA store read failed");
 
-        /* Half a pair is a damaged store, not an empty one. Reporting
-         * NOT_FOUND here would let the caller mint a CA over the survivor. */
+        /* Reporting NOT_FOUND for half a pair would let the caller mint a
+         * new CA over the survivor. */
         return WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "ca",
             "CA store is incomplete: %s is missing",
             cert_rc == WOLFCERT_ERR_NOT_FOUND ? "ca.cert.der" : "ca.key.der");
     }
 
-    /* Iterate every registered algorithm and see which private-key decoder
-     * accepts the stored bytes. */
+    /* Find the algorithm whose private-key decoder accepts the stored key. */
     const WolfCertKeyAlg* const* list = wolfcert_key_algs_all();
 
     for (; *list != NULL; ++list) {
@@ -360,8 +339,7 @@ int wolfcert_ca_save(const WolfCertCa* ca, WolfCertStoreOps* store)
     if (rc == WOLFCERT_OK)
         return rc;
 
-    /* A certificate without its key is a damaged store that every later load
-     * rejects, and the vtable has no primitive but remove to undo it. */
+    /* A certificate without its key is a store every later load rejects. */
     if (store->remove == NULL ||
             store->remove(store->ctx, "ca.cert.der") != WOLFCERT_OK)
         return WOLFCERT_ERR(rc, "ca",
@@ -394,10 +372,7 @@ void wolfcert_ca_free(WolfCertCa* ca)
     memset(ca, 0, sizeof(*ca));
 }
 
-/* ---- issue a cert for a CSR -------------------------------------------- */
-
-/* Map dc.keyOID from the parsed CSR to a WolfCertKeyType. Returns 0 when
- * the OID isn't a supported key type. */
+/* WolfCertKeyType for a CSR keyOID, or 0 when unsupported. */
 static WolfCertKeyType subject_type_from_oid(word32 keyOID)
 {
     switch (keyOID) {
@@ -426,8 +401,7 @@ static WolfCertKeyType subject_type_from_oid(word32 keyOID)
     }
 }
 
-/* Wraps wolfSSL's per-algorithm public-key-decode into one function that
- * hands back a typed backing-struct pointer suitable for wc_MakeCert_ex. */
+/* Decode the CSR public key into the wolfSSL key wc_MakeCert_ex takes. */
 static int decode_subject_pubkey(word32 keyOID,
                                  const uint8_t* spki_der, word32 spki_len,
                                  void* heap, void** out_impl,
@@ -498,8 +472,7 @@ static int decode_subject_pubkey(word32 keyOID,
             return WOLFCERT_ERR_CRYPTO;
         }
 
-        /* dc.publicKey for Ed25519 is the raw 32-byte public key; wolfSSL's
-         * decoder expects an SPKI wrapper, so import directly. */
+        /* dc.publicKey for Ed25519 is the raw 32-byte key. */
         int rc = wc_ed25519_import_public(spki_der, spki_len, ek);
         if (rc != 0) {
             wc_ed25519_free(ek);
@@ -630,9 +603,7 @@ static void free_subject_pubkey(word32 keyOID, void* impl, void* heap)
     else
 #endif
     {
-        /* Unreachable: decode_subject_pubkey only succeeds for a keyOID whose
-         * algorithm is compiled in, and the guards here mirror it exactly. A
-         * hit means that invariant was broken (and `impl` is leaked). */
+        /* Unreachable while these guards mirror decode_subject_pubkey. */
         WOLFCERT_LOG_DBG("ca", "free_subject_pubkey: unhandled keyOID %u",
                          (unsigned)keyOID);
     }
@@ -787,10 +758,7 @@ int wolfcert_ca_issue(WolfCertCa* ca,
     if (ca_alg == NULL)
         return WOLFCERT_ERR_UNSUPPORTED;
 
-    /* Verify the PKCS#10 self-signature: it is the proof-of-possession that
-     * the requester holds the private key for the public key being certified.
-     * Parsing with VERIFY makes wolfSSL confirm the CertificationRequest
-     * signature against the embedded SubjectPublicKeyInfo. */
+    /* VERIFY checks the PKCS#10 self-signature, the proof-of-possession. */
     wc_InitDecodedCert(&dc, (byte*)csr_der, (word32)csr_len, heap);
     rc = wc_ParseCert(&dc, CERTREQ_TYPE, VERIFY, NULL);
     if (rc != 0)
@@ -820,14 +788,11 @@ int wolfcert_ca_issue(WolfCertCa* ca,
     }
 
     if (rc == 0) {
-        /* Decode the subject's public key into a wolfSSL struct. */
         rc = decode_subject_pubkey(dc.keyOID, dc.publicKey, dc.pubKeySize,
                                    heap, &sub_impl, &sub_alg);
     }
 
     if (rc == 0) {
-        /* The CSR bounds the subject, key and SAN, the CA cert the issuer, and
-         * the CA key's DER size hint its signature. */
         der_cap = csr_len + ca->cert_der_len + ca_alg->der_cap_hint + 1024;
         der = (uint8_t*)WOLFCERT_XMALLOC(der_cap, heap);
         if (der == NULL)

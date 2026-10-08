@@ -45,9 +45,7 @@
     #define CA_KEY_PARAM  0
 #endif
 
-/* The CA store is protocol-agnostic; the listener just needs a protocol that
- * was compiled in, and SCEP is absent from any NO_RSA build. EST has no
- * plaintext mode, so that variant carries a throwaway server identity. */
+/* SCEP is absent from NO_RSA builds, and EST needs a server identity. */
 #if defined(WOLFCERT_HAVE_EST)
     #define CA_STORE_PROTO WOLFCERT_PROTO_EST
     #define CA_STORE_NEEDS_TLS 1
@@ -80,8 +78,7 @@ static void ca_store_cfg(WolfCertServerCfgSrv* cfg, WolfCertStoreOps* store)
     cfg->ca_key_param = CA_KEY_PARAM;
 }
 
-/* Stub backend: every read reports the configured error, every write the
- * configured error, so a start can be driven down one failure path at a time. */
+/* Stub backend whose reads and writes all return the configured error. */
 typedef struct {
     int read_rc;
     int write_rc;
@@ -168,8 +165,7 @@ static int test_save_failure_rejected(void)
     return 0;
 }
 
-/* Stub backend whose two CA reads fail differently, so the precedence between
- * an absent half and a genuinely failing read can be driven either way. */
+/* Stub backend whose certificate and key reads fail differently. */
 typedef struct {
     int cert_rc;
     int key_rc;
@@ -183,9 +179,8 @@ static int split_read(void* ctx_, const char* key, WolfCertBuffer* out)
     return strcmp(key, "ca.cert.der") == 0 ? ctx->cert_rc : ctx->key_rc;
 }
 
-/* A read that failed for a reason other than absence must be reported as
- * itself: calling the store "incomplete" hides an actionable I/O or memory
- * failure behind a parse error. */
+/* wolfcert_server_start with cert and key reads returning cert_rc and key_rc
+ * gets want and no server. */
 static int mixed_read_failure(int cert_rc, int key_rc, int want)
 {
     SplitCtx ctx = { cert_rc, key_rc };
@@ -217,14 +212,12 @@ static int test_mixed_read_failure(void)
                            WOLFCERT_ERR_MEMORY))
         return 1;
 
-    /* Both absent is still an empty store, which bootstraps rather than
-     * failing; one absent beside one good read is still incomplete. */
+    /* Cert NOT_FOUND beside a good key read: start gets PARSE. */
     return mixed_read_failure(WOLFCERT_ERR_NOT_FOUND, WOLFCERT_OK,
                               WOLFCERT_ERR_PARSE);
 }
 
-/* Backend that forwards to a real store but fails the nth write, so a
- * bootstrap can be interrupted between the certificate and the key. */
+/* Backend that forwards to a real store but fails the nth write. */
 typedef struct {
     WolfCertStoreOps* inner;
     int               writes;
@@ -263,8 +256,7 @@ static int failing_remove(void* ctx_, const char* key)
     return WOLFCERT_ERR_IO;
 }
 
-/* A key write that fails once the certificate has landed must take the
- * certificate with it: a cert-only store is rejected by every later load. */
+/* A failed key write removes the certificate already written. */
 static int test_save_rollback(void)
 {
     WolfCertStoreOps* mem = wolfcert_store_memory_open(NULL);
@@ -302,9 +294,8 @@ static int test_save_rollback(void)
     return 0;
 }
 
-/* A rollback the store cannot perform must not be reported as a plain write
- * failure: the certificate stays behind and poisons every later start, so the
- * diagnostic has to say so. */
+/* Key write fails with remove absent or failing: IO, a "rolled back"
+ * message, and the next start gets PARSE. */
 static int rollback_unavailable(int have_remove)
 {
     WolfCertStoreOps* mem = wolfcert_store_memory_open(NULL);
@@ -351,8 +342,7 @@ static int test_rollback_unavailable(void)
     return rollback_unavailable(1);
 }
 
-/* A store holding one half of the pair is damaged, not empty: starting
- * against it must fail rather than mint a CA over the surviving half. */
+/* A store holding one half of the pair fails to start. */
 static int partial_store_rejected(const char* present)
 {
     WolfCertStoreOps* store = wolfcert_store_memory_open(NULL);
@@ -488,10 +478,6 @@ static int test_start_oom_keeps_credentials(void)
 }
 #endif
 
-/* Fill `store` with a freshly generated CA of `type` by letting a server start
- * against it, then hand back copies of the stored pair. */
-/* Every compiled key type, so each algorithm's certificate-to-key check is
- * exercised on both a legitimate reload and a mismatched pair. */
 static const WolfCertKeyType CA_KEY_TYPES[] = {
 #ifdef WOLFCERT_HAVE_RSA
     WOLFCERT_KEY_RSA,
@@ -527,10 +513,8 @@ static int ca_key_param(WolfCertKeyType t)
     return 0;
 }
 
-/* Reload the stored CA and have it issue one certificate, then verify that
- * certificate against the CA. A pub_check that leaves the key's public half
- * unset passes the pair check and still signs garbage, so asserting the
- * reload alone would miss it. */
+/* The CA reloaded from store issues a leaf that verifies against it; the
+ * cert/key match on load alone passes a key with no public half. */
 static int reloaded_ca_signs(WolfCertStoreOps* store)
 {
     /* Any compiled algorithm serves as the leaf; the first entry always is. */
@@ -587,7 +571,7 @@ static int test_every_alg_reloads(void)
         wolfcert_server_free(srv);
         srv = NULL;
 
-        /* Second start reloads the saved pair through the pair check. */
+        /* Second start reloads the saved pair and checks the cert/key match. */
         REQUIRE(wolfcert_server_start(&cfg, &srv) == WOLFCERT_OK);
         wolfcert_server_free(srv);
 
@@ -599,6 +583,7 @@ static int test_every_alg_reloads(void)
     return 0;
 }
 
+/* A server start generates a CA into `store`; the pair is copied out. */
 static int generate_ca_into(WolfCertStoreOps* store, WolfCertKeyType type,
                             WolfCertBuffer* cert, WolfCertBuffer* key)
 {
@@ -646,8 +631,7 @@ static int issue_with_san(WolfCertStoreOps* store, const uint8_t* san,
     return 0;
 }
 
-/* The CA issues a CSR's SAN unchanged, entries in their order across types,
- * and refuses the GeneralName forms it does not issue. */
+/* Issued SANs match the CSR in order; unsupported GeneralName forms fail. */
 static int test_issued_san_verbatim(void)
 {
     static const uint8_t san[] = {
@@ -683,8 +667,7 @@ static int test_issued_san_verbatim(void)
                            &issued_len) == 0);
     REQUIRE(rc == WOLFCERT_ERR_UNSUPPORTED);
 
-    /* More SAN than the issued cert's old fixed 8 KB buffer held, in few
-     * entries so a static-memory pool can parse it. */
+    /* Over 8 KB of SAN in few entries, so a static-memory pool can parse it. */
     while (big_len + 3 + 240 <= sizeof(big_san)) {
         big_san[big_len] = 0x82;
         big_san[big_len + 1] = 0x81;
@@ -776,8 +759,7 @@ static int test_mismatched_ca_rejected(void)
     return 0;
 }
 
-/* The generated CA asserts the key usages a relying party checks, and a
- * critical basicConstraints. */
+/* The generated CA's key usages and critical basicConstraints. */
 static int ca_key_usage_set(WolfCertKeyType type)
 {
     WolfCertStoreOps* store = wolfcert_store_memory_open(NULL);
@@ -803,8 +785,7 @@ static int ca_key_usage_set(WolfCertKeyType type)
             (dc.extKeyUsage & KEYUSE_DIGITAL_SIG) == 0) {
         rc = 1;
     }
-    /* keyEncipherment belongs to the RSA CA alone: it decrypts the SCEP
-     * pkcsPKIEnvelope, which no other key type is used for. */
+    /* Only the RSA CA has keyEncipherment, for the SCEP pkcsPKIEnvelope. */
     else if (((dc.extKeyUsage & KEYUSE_KEY_ENCIPHER) != 0) !=
             (type == WOLFCERT_KEY_RSA)) {
         rc = 1;
@@ -863,8 +844,7 @@ static int test_corrupt_ca_cert_rejected(void)
 }
 
 #ifdef WOLFCERT_HAVE_ECC
-/* A self-signed certificate with no CA:TRUE, plus the key that signed it: a
- * self-consistent pair that is still unusable as a CA. */
+/* A self-signed non-CA certificate and its key. */
 static int make_leaf_pair(WolfCertBuffer* cert_out, WolfCertBuffer* key_out)
 {
     WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,

@@ -140,8 +140,7 @@ static int raw_http_req(uint16_t port, const char* method, const char* target,
         return -1;
     }
 
-    /* Read to EOF. A grow failure or a read error, including the SO_RCVTIMEO
-     * expiry, must not pass for a complete response. */
+    /* Read to EOF; a grow failure, read error or SO_RCVTIMEO expiry fails. */
     for (;;) {
         if (resp_len + 4096 + 1 > resp_cap) {
             size_t want = resp_cap == 0 ? 8192 : resp_cap * 2;
@@ -188,7 +187,6 @@ static int raw_http_req(uint16_t port, const char* method, const char* target,
     return status;
 }
 
-/* GET wrapper preserving the original call sites. */
 static int raw_http_status(uint16_t port, const char* target, const char* body)
 {
     return raw_http_req(port, "GET", target, NULL,
@@ -196,15 +194,8 @@ static int raw_http_status(uint16_t port, const char* target, const char* body)
                         body != NULL ? strlen(body) : 0, 0, NULL, NULL);
 }
 
-/* Exercise the HTTP GET PKIOperation fallback (RFC 8894 section 4.1): with a
- * caps set that does not advertise POSTPKIOperation the client carries the
- * pkiMessage base64-encoded in a GET query and the server decodes and issues
- * exactly as for POST. The issued cert is verified to chain to the CA that
- * answered the GET - the same trust check the POST path runs in main, not just
- * a PEM-marker match. The device key, CSR, issued buffer, cert manager and
- * decoded DER are owned here and freed on every return path, so a failing check
- * cannot leak them. Returns WOLFCERT_OK on success, a negative wolfCert error,
- * or -1 on a content/verification mismatch. */
+/* Enrollment over the GET PKIOperation fallback (RFC 8894 section 4.1), with
+ * the issued cert verified against the CA. */
 static int check_get_fallback(const WolfCertServerCfg* cli,
                               const WolfCertScepCaps* caps,
                               const WolfCertKeyCfg* kcfg,
@@ -228,8 +219,6 @@ static int check_get_fallback(const WolfCertServerCfg* cli,
         rc = wolfcert_scep_pkcs_req(cli, &caps_get, ca_der_buf, ca_der_len,
                                     dkg, csr_get.data, csr_get.len, &issued_get);
 
-    /* The issued cert must chain to the CA that answered the GET, not merely
-     * look like a PEM certificate. */
     if (rc == WOLFCERT_OK) {
         cm = wolfSSL_CertManagerNew();
         if (cm == NULL)
@@ -258,9 +247,6 @@ static int check_get_fallback(const WolfCertServerCfg* cli,
     return rc;
 }
 
-/* RSA-4096 enrollment. rsa_make accepts 2048|3072|4096, so the signer key DER
- * buffer must be sized from the key rather than from a fixed capacity. Owns and
- * frees everything it makes. */
 static int check_rsa4096(const WolfCertServerCfg* cli,
                          const WolfCertScepCaps* caps,
                          const uint8_t* ca_der_buf, size_t ca_der_len)
@@ -282,8 +268,6 @@ static int check_rsa4096(const WolfCertServerCfg* cli,
         rc = wolfcert_scep_pkcs_req(cli, caps, ca_der_buf, ca_der_len,
                                     key, csr.data, csr.len, &issued);
 
-    /* The issued cert must chain to the CA that issued it, not merely look
-     * like a PEM certificate. */
     if (rc == WOLFCERT_OK) {
         cm = wolfSSL_CertManagerNew();
         if (cm == NULL)
@@ -312,10 +296,8 @@ static int check_rsa4096(const WolfCertServerCfg* cli,
     return rc;
 }
 
-/* proto_opts.scep.txid_mode = PUBKEY_HASH: the transactionID must be the
- * 64-char upper-case hex SHA-256 of the enrollee public keyInfo, must
- * match a value recomputed from the CSR, and must be deterministic (a second
- * enrollment of the same key reuses it). Owns and frees everything it makes. */
+/* Two PKCSReqs of one key under txid_mode PUBKEY_HASH carry the same
+ * transactionID, the upper-case hex SHA-256 of the CSR's SPKI. */
 static int check_pubkey_txid(const WolfCertServerCfg* cli,
                              const WolfCertScepCaps* caps,
                              const WolfCertKeyCfg* kcfg,
@@ -420,9 +402,7 @@ static int check_bad_csr_sig(const WolfCertServerCfg* cli,
     return rc;
 }
 
-/* proto_opts.scep.content_cipher override: enrolling with an explicit
- * cipher must still issue a cert - the server de-envelops whatever OID the
- * request carries - proving AES-256 (and explicit AES-128) interoperate. */
+/* Enrollment with an explicit proto_opts.scep.content_cipher. */
 static int check_content_cipher(const WolfCertServerCfg* cli,
                                 const WolfCertScepCaps* caps,
                                 const WolfCertKeyCfg* kcfg,
@@ -461,9 +441,7 @@ struct canned_ctx {
     size_t         body_len;
 };
 
-/* Bind a loopback listener and report the ephemeral port it landed on.
- * Callers run this before spawning the responder thread, so the port never
- * has to travel back across the thread boundary. */
+/* Bind a loopback listener and report its ephemeral port. */
 static int listen_loopback(int* port)
 {
     int ls = socket(AF_INET, SOCK_STREAM, 0);
@@ -490,8 +468,7 @@ static int listen_loopback(int* port)
     return ls;
 }
 
-/* Single-shot HTTP responder: answers one request with canned_ctx's
- * Content-Type and body, a response the in-tree SCEP server never sends. */
+/* Answers one request with canned_ctx's Content-Type and body. */
 static void* canned_srv_thread(void* arg)
 {
     struct canned_ctx* cc = (struct canned_ctx*)arg;
@@ -527,9 +504,7 @@ static void* canned_srv_thread(void* arg)
     return NULL;
 }
 
-/* RFC 8894 section 3.5.2: GetCACaps is a newline-delimited list of exact
- * tokens. A future token that merely contains a known one as a substring
- * (Renewal-Extra, AESGCM) must not be read as advertising that capability. */
+/* A GetCACaps body of Renewal-Extra and AESGCM sets neither renewal nor aes. */
 static int test_caps_token_matching(void)
 {
     const char* caps_body =
@@ -559,7 +534,6 @@ static int test_caps_token_matching(void)
     return 0;
 }
 
-/* A GetCACaps body carrying only SCEPStandard. */
 static int test_caps_scep_standard(void)
 {
     const char* caps_body = "SCEPStandard\r\n";
@@ -611,9 +585,8 @@ static int fetch_ca(const char* content_type, const uint8_t* body,
     return rc;
 }
 
-/* RFC 8894 section 4.2.1.2 sends a CA certificate chain as
- * application/x-x509-ca-ra-cert; RFC 9110 section 8.3.1 makes the type and
- * subtype case-insensitive and allows parameters after them. */
+/* The CA/RA media type (RFC 8894 section 4.2.1.2) matches case-insensitively
+ * and with parameters (RFC 9110 section 8.3.1). */
 static int check_getca_media_type(const uint8_t* ca_der_buf, size_t ca_der_len)
 {
     const uint8_t* certs[1] = { ca_der_buf };
@@ -681,13 +654,8 @@ static int test_get_ca_cert_empty_body(void)
     return 0;
 }
 
-/* Captures one POSTed pkiMessage and reports the messageType it carried. The
- * in-tree server routes 19 and 17 through the same handler, so only a look at
- * the wire can tell the two renewal shapes apart.
- *
- * Every declaration below initializes .listen_fd, which zero-fills the rest of
- * the struct (C99 6.7.9p19), so the char buffers are empty strings even when
- * the thread bails out before parsing and the assertions compare cleanly. */
+/* Captures one request and the pkiMessage fields it carried. Every instance
+ * has an initializer, so the strings stay "" if the thread bails early. */
 struct msgtype_ctx {
     int    listen_fd;
     char   seen[8];      /* the messageType attribute, or "" if not reached */
@@ -750,9 +718,7 @@ static void* msgtype_srv_thread(void* arg)
     struct timeval tv = { .tv_sec = 10, .tv_usec = 0 };
     setsockopt(cs, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
 
-    /* Read headers, find Content-Length, then the body that follows. One byte
-     * is held back so the header scan below can NUL-terminate what arrived:
-     * recv() does not, and strstr must not run off the end. */
+    /* One byte is held back so the header block can be NUL-terminated. */
     uint8_t buf[16384];
     size_t n = 0;
     size_t hdr_end = 0, want = 0;
@@ -808,8 +774,7 @@ static void* msgtype_srv_thread(void* arg)
                 snprintf(mc->seen, sizeof(mc->seen), "%s", mt);
             mc->tid_len = tid_len;
 
-            /* The content-encryption AlgorithmIdentifier inside the
-             * EnvelopedData: the option is only honoured if this changes. */
+            /* The content-encryption OID inside the EnvelopedData. */
             static const uint8_t OID_AES128[] =
                 { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x01,0x02 };
             static const uint8_t OID_AES256[] =
@@ -835,15 +800,11 @@ static void* msgtype_srv_thread(void* arg)
         wolfcert_buffer_free(&env);
     }
 
-    /* Without a reply the client's round trip fails here, which is fine when
-     * the request is all the caller wanted. */
     close(cs);
     return NULL;
 }
 
-/* The end-to-end cipher check above only proves the server de-enveloped
- * whatever arrived, which it does for any OID, so it would pass even if the
- * override were ignored. Read the algorithm off the wire instead. */
+/* The content_cipher override as seen in the request's EnvelopedData. */
 static int check_content_cipher_wire(const WolfCertScepCaps* caps,
                                      const WolfCertKeyCfg* kcfg,
                                      const uint8_t* ca_der_buf, size_t ca_der_len,
@@ -871,7 +832,7 @@ static int check_content_cipher_wire(const WolfCertScepCaps* caps,
     REQUIRE(wolfcert_key_generate(kcfg, &key) == WOLFCERT_OK);
     REQUIRE(wolfcert_csr_build(key, &meta, &csr) == WOLFCERT_OK);
 
-    /* The listener never answers, so the call fails; the request is the point. */
+    /* The listener never answers, so the call fails. */
     (void)wolfcert_scep_pkcs_req(&cli, caps, ca_der_buf, ca_der_len, key,
                                  csr.data, csr.len, &issued);
     wolfcert_buffer_free(&issued);
@@ -883,9 +844,7 @@ static int check_content_cipher_wire(const WolfCertScepCaps* caps,
     return 0;
 }
 
-/* proto_opts.scep.renewal_msg_type picks the messageType a renewal carries,
- * while the signer stays the certificate being replaced either way. Default is
- * RFC 8894's RenewalReq (17); PKCS_REQ sends 19 for a CA that predates it. */
+/* A renewal under renewal_msg_type mode carries messageType expect. */
 static int check_renewal_msg_type(const WolfCertScepCaps* caps,
                                   const uint8_t* ca_der_buf, size_t ca_der_len,
                                   const uint8_t* cur_cert, size_t cur_cert_len,
@@ -910,8 +869,7 @@ static int check_renewal_msg_type(const WolfCertScepCaps* caps,
     };
 
     WolfCertScepResult r = { 0 };
-    /* The capture server never answers, so the call fails; the assertion is
-     * about what it put on the wire before that. */
+    /* The capture server never answers, so the call fails. */
     (void)wolfcert_scep_renewal_req_ex(&cli, caps, ca_der_buf, ca_der_len,
                                        ca_der_buf, ca_der_len,
                                        cur_cert, cur_cert_len, cur_key,
@@ -923,9 +881,8 @@ static int check_renewal_msg_type(const WolfCertScepCaps* caps,
     return 0;
 }
 
-/* Answer a PKCSReq with a CertRep that passes the signer, transactionID and
- * recipientNonce checks but carries the given pkiStatus and failInfo (NULL
- * omits either). */
+/* Answer a PKCSReq with an otherwise valid CertRep carrying the given
+ * pkiStatus and failInfo (NULL omits either). */
 static int check_pki_status(const WolfCertScepCaps* caps,
                             const uint8_t* signer_cert, size_t signer_cert_len,
                             const WolfCertKey* key,
@@ -978,10 +935,8 @@ static int check_pki_status(const WolfCertScepCaps* caps,
     return 0;
 }
 
-/* The session captures the SCEP options at open rather than reading the config
- * per request, so the capture has its own coverage: drive a session renewal
- * against the recording listener and check both the messageType it chose and
- * the transactionID form it derived. */
+/* A renewal on a session opened with RENEWAL_MSG_PKCS_REQ and PUBKEY_HASH
+ * sends messageType 19 and a 64-character transactionID. */
 static int check_session_opts_capture(const WolfCertScepCaps* caps,
                                       const uint8_t* ca_der_buf, size_t ca_der_len,
                                       const uint8_t* cur_cert, size_t cur_cert_len,
@@ -1010,7 +965,7 @@ static int check_session_opts_capture(const WolfCertScepCaps* caps,
     REQUIRE(wolfcert_scep_session_open(&cli, &sess) == WOLFCERT_OK);
 
     WolfCertScepResult r = { 0 };
-    /* The listener never answers, so this fails; the request is the assertion. */
+    /* The listener never answers, so this fails. */
     (void)wolfcert_scep_session_renewal_req_ex(sess, caps, ca_der_buf, ca_der_len,
                                                ca_der_buf, ca_der_len,
                                                cur_cert, cur_cert_len, cur_key,
@@ -1024,9 +979,7 @@ static int check_session_opts_capture(const WolfCertScepCaps* caps,
     return 0;
 }
 
-/* RFC 8894 section 4.1 puts a message field on every GET, so GetNextCACert
- * carries the CA identifier too and a multi-CA responder can be told which
- * rollover certificate is wanted. */
+/* GetNextCACert carries the CA identifier as its message (RFC 8894 4.1). */
 static int check_getnextca_ca_id(const uint8_t* ca_der_buf, size_t ca_der_len)
 {
     struct msgtype_ctx mc = { .listen_fd = -1 };
@@ -1087,7 +1040,7 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
     memset(snonce_long, 0x33, sizeof(snonce_long));
 
     /* Each round omits or mis-sizes one required attribute; the last is the
-     * control that proves this raw-POST harness reaches the issuance path. */
+     * control that reaches issuance. */
     for (i = 0; rc == WOLFCERT_OK && i < 9; ++i) {
         WolfCertScepAttrs a = { .message_type = i == 4 ? NULL :
                                                 i == 5 ? ""   : "19" };
@@ -1177,8 +1130,8 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
         }
     }
 
-    /* No messageType and no senderNonce: the attribute check must reject
-     * first, closing the connection; a held-open socket returns -1, not 400. */
+    /* No messageType and no senderNonce on a keep-alive POST gets 400 and a
+     * close; a socket left open reads as -1. */
     if (rc == WOLFCERT_OK) {
         WolfCertScepAttrs a = { .transaction_id = tid,
                                 .transaction_id_len = sizeof(tid) };
@@ -1210,9 +1163,8 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
     return rc;
 }
 
-/* Sign a PKCSReq whose transactionID value is `tid` and POST it. The
- * transactionID is tagged PrintableString whatever its bytes, which
- * wolfcert_scep_build_pki_message refuses to encode. */
+/* POST a signed PKCSReq whose transactionID `tid` is tagged PrintableString
+ * whatever its bytes, which wolfcert_scep_build_pki_message will not encode. */
 static int post_raw_tid(uint16_t port, const uint8_t* signer, size_t signer_len,
                         const WolfCertBuffer* kder, const char* tid)
 {
@@ -1288,8 +1240,7 @@ static int post_raw_tid(uint16_t port, const uint8_t* signer, size_t signer_len,
     return st;
 }
 
-/* The server must reject a signed request whose transactionID is not a
- * PrintableString; the same message with a valid one is the control. */
+/* A transactionID that is not a PrintableString gets 400. */
 static int check_unprintable_tid(uint16_t port, const WolfCertKeyCfg* kcfg)
 {
     WolfCertCertMeta meta = { .subject_dn = "CN=scep-tid" };
@@ -1338,9 +1289,8 @@ static int check_unprintable_tid(uint16_t port, const WolfCertKeyCfg* kcfg)
     return rc;
 }
 
-/* handle_pki_op's dispatch failures answer with a signed CertRep FAILURE, not
- * a bare HTTP error. The client cannot produce these messages, so POST
- * hand-built ones. Owns and frees everything it makes. */
+/* Junk content, messageType 99 and an unknown content cipher each get a
+ * signed CertRep FAILURE (badRequest, badRequest, badAlg). */
 static int check_malformed_dispatch(uint16_t port, const WolfCertKeyCfg* kcfg,
                                     const uint8_t* ca_der_buf, size_t ca_der_len)
 {
@@ -1469,9 +1419,8 @@ static int check_malformed_dispatch(uint16_t port, const WolfCertKeyCfg* kcfg,
         wolfcert_buffer_free(&msg);
     }
 
-    /* Ask to keep the connection alive: the CertRep must come back and the
-     * server must then hang up. Holding the socket open instead times the
-     * read out, which raw_http_req reports as -1 rather than 200. */
+    /* With keep-alive requested the CertRep comes back and the server hangs
+     * up; a held-open socket would read as -1. */
     if (rc == WOLFCERT_OK) {
         WolfCertScepAttrs a = {
             .transaction_id = tid,    .transaction_id_len = sizeof(tid),
@@ -1572,27 +1521,22 @@ int main(void)
                                             WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS);
     wolfSSL_CertManagerFree(cm);
 
-    /* ---- HTTP GET PKIOperation fallback (RFC 8894 section 4.1) ------------
-     * Driven from a helper that owns and frees the device key, CSR and issued
-     * buffer so a failing assertion cannot leak them. */
     REQUIRE(check_get_fallback(&cli, &caps, &kcfg,
                                ca_der->buffer, ca_der->length) == WOLFCERT_OK);
 
-    /* ---- Public-key-hash transactionID (RFC 8894 section 3.2.1) ----------- */
     REQUIRE(check_pubkey_txid(&cli, &caps, &kcfg,
                               ca_der->buffer, ca_der->length) == WOLFCERT_OK);
 
     REQUIRE(check_bad_csr_sig(&cli, &caps, dk, csr.data, csr.len,
                               ca_der->buffer, ca_der->length) == WOLFCERT_OK);
 
-    /* ---- RSA-4096 enrollment ---------------------------------------------- */
     rc = check_rsa4096(&cli, &caps, ca_der->buffer, ca_der->length);
     if (rc != WOLFCERT_OK)
         fprintf(stderr, "SCEP rsa:4096 rc=%d (%s)\n", rc, wolfcert_strerror(rc));
     REQUIRE(rc == WOLFCERT_OK);
 
-    /* ---- Caps-driven signing hash. A CA that advertises SHA-512 or SHA-384
-     * must not push the client past the digests wolfSSL was built with. */
+    /* A CA advertising SHA-512 or SHA-384 still enrolls within the digests
+     * wolfSSL was built with. */
     WolfCertScepCaps caps_hash = caps;
     WolfCertBuffer   issued_hash = { 0 };
 
@@ -1609,9 +1553,7 @@ int main(void)
                                    &issued_hash) == WOLFCERT_OK);
     wolfcert_buffer_free(&issued_hash);
 
-    /* ---- Content-cipher override: explicit AES-256 and AES-128 both enroll.
-     * AES-256 needs wolfSSL built with it; scep_prepare returns
-     * WOLFCERT_ERR_UNSUPPORTED otherwise. */
+    /* Explicit AES-256 and AES-128 content ciphers both enroll. */
 #if defined(WOLFSSL_AES_256)
     REQUIRE(check_content_cipher(&cli, &caps, &kcfg, ca_der->buffer,
                                  ca_der->length, WOLFCERT_SCEP_CIPHER_AES256)
@@ -1621,9 +1563,6 @@ int main(void)
                                  ca_der->length, WOLFCERT_SCEP_CIPHER_AES128)
             == WOLFCERT_OK);
 
-    /* ---- Renewal messageType. The signer is the certificate being replaced
-     * in both cases; only the attribute changes, and the in-tree server routes
-     * 19 and 17 through one handler, so this reads the value off the wire. */
     REQUIRE(check_renewal_msg_type(&caps, ca_der->buffer, ca_der->length,
                                    issued_der->buffer, issued_der->length, dk,
                                    csr.data, csr.len,
@@ -1635,8 +1574,8 @@ int main(void)
                                    WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ,
                                    "19") == 0);
 
-    /* ---- pkiStatus outside RFC 8894's 0/2/3, or absent, is a protocol
-     * error. "2" is the control: the same reply passes every other check. */
+    /* A pkiStatus outside RFC 8894's 0/2/3, or absent, is a protocol error;
+     * the two "2" replies are the controls. */
     REQUIRE(check_pki_status(&caps, issued_der->buffer, issued_der->length,
                              dk, csr.data, csr.len, "2", "0", WOLFCERT_OK,
                              WOLFCERT_SCEP_STATUS_FAILURE, 0) == 0);
@@ -1683,8 +1622,7 @@ int main(void)
                              dk, csr.data, csr.len, "3", "2", WOLFCERT_OK,
                              WOLFCERT_SCEP_STATUS_PENDING, -1) == 0);
 
-    /* ...and the same options read off the wire, since the server de-envelops
-     * any OID and so cannot tell an honoured override from an ignored one. */
+    /* An explicit content_cipher shows up as that OID in the request. */
 #if defined(WOLFSSL_AES_256)
     REQUIRE(check_content_cipher_wire(&caps, &kcfg, ca_der->buffer,
                                       ca_der->length,
@@ -1696,8 +1634,6 @@ int main(void)
                                       WOLFCERT_SCEP_CIPHER_AES128,
                                       "aes128") == 0);
 
-    /* The session captures the SCEP options at open, so that path needs its own
-     * check rather than inheriting the one-shot coverage above. */
     REQUIRE(check_session_opts_capture(&caps, ca_der->buffer, ca_der->length,
                                        issued_der->buffer, issued_der->length,
                                        dk, csr.data, csr.len) == 0);
@@ -1705,9 +1641,7 @@ int main(void)
     /* The CA identifier belongs on GetNextCACert as well (RFC 8894 4.1). */
     REQUIRE(check_getnextca_ca_id(ca_der->buffer, ca_der->length) == 0);
 
-    /* One-shot SCEP over https:// must refuse to run unverified, the same rule
-     * the session open applies: verify_server is the only peer-verification
-     * switch, so leaving it off would complete a silent anonymous handshake. */
+    /* GetCACaps and GetCACert to https:// with verify_server 0 get ERR_TLS. */
     {
         WolfCertServerCfg tls_cli = { .protocol = WOLFCERT_PROTO_SCEP,
                                       .server_url = "https://127.0.0.1:1/scep" };
@@ -1717,15 +1651,13 @@ int main(void)
         REQUIRE(wolfcert_scep_get_ca_cert(&tls_cli, &tls_ca) == WOLFCERT_ERR_TLS);
         wolfcert_buffer_free(&tls_ca);
 
-        /* With verification on it must get past the gate and fail on the
-         * network instead, so the check cannot be firing indiscriminately. */
+        /* With verify_server 1, GetCACaps to the closed port 1 fails with an
+         * error other than ERR_TLS. */
         tls_cli.verify_server = 1;
         REQUIRE(wolfcert_scep_get_ca_caps(&tls_cli, &tls_caps) != WOLFCERT_ERR_TLS);
     }
 
-    /* Negative GET PKIOperation branches (RFC 8894 section 4.1): the server must
-     * reject each malformed request with 400. These cannot be produced by the
-     * client API, so drive the running server over a raw socket. */
+    /* Malformed GET PKIOperation requests get 400 (RFC 8894 section 4.1). */
     REQUIRE(raw_http_status(wolfcert_server_port(s),
                 "/scep?operation=PKIOperation", NULL) == 400);              /* no message= */
     REQUIRE(raw_http_status(wolfcert_server_port(s),
@@ -1733,13 +1665,10 @@ int main(void)
     REQUIRE(raw_http_status(wolfcert_server_port(s),
                 "/scep?operation=PKIOperation&message=@@@@", NULL) == 400); /* bad base64  */
 
-    /* A GET carrying a spurious Content-Length body: read_request allocates
-     * req->body for it, and handle_pki_op_get must free that before installing
-     * the decoded message or it leaks (caught under ASan). "QUJD" is valid
-     * base64 so the decode succeeds and the free path runs; the payload is not a
-     * real pkiMessage, so the request is rejected with 400. */
+    /* A GET with valid base64 message=QUJD and a body "XYZ" gets 400; ASan
+     * reports the body if the server leaks it. */
     REQUIRE(raw_http_status(wolfcert_server_port(s),
-                "/scep?operation=PKIOperation&message=QUJD", "XYZ") == 400); /* body freed */
+                "/scep?operation=PKIOperation&message=QUJD", "XYZ") == 400);
 
     REQUIRE(check_required_attrs(s, &kcfg, ca_der->buffer,
                                  ca_der->length) == WOLFCERT_OK);
@@ -1772,9 +1701,7 @@ int main(void)
     pthread_join(tid, NULL);
     wolfcert_server_free(s);
 
-    /* ---- Challenge password (RFC 8894 section 2.9) -------------------------
-     * Fresh server configured to require a challenge. Enrolling without
-     * it or with the wrong value must fail; the correct value must issue. */
+    /* Challenge password (RFC 8894 section 2.9). */
     WolfCertServerCfgSrv cfg2 = { .protocol = WOLFCERT_PROTO_SCEP,
                                   .bind_host = "127.0.0.1", .bind_port = 0,
                                   .challenge_password = "correct-horse" };
@@ -1798,9 +1725,8 @@ int main(void)
     WolfCertKey* dk2 = NULL;
     REQUIRE(wolfcert_key_generate(&kcfg, &dk2) == WOLFCERT_OK);
 
-    /* 1) no challenge in CSR -> server answers with a signed CertRep FAILURE
-     * (RFC 8894 pkiStatus=2), which the client surfaces as ERR_PROTOCOL.
-     * A plain HTTP 4xx here would instead read back as ERR_HTTP. */
+    /* 1) no challenge -> signed CertRep FAILURE, surfaced as ERR_PROTOCOL;
+     * a bare HTTP 4xx would read back as ERR_HTTP. */
     WolfCertCertMeta meta_none = { .subject_dn = "CN=chal-none" };
     WolfCertBuffer csr_none = { 0 };
     REQUIRE(wolfcert_csr_build(dk2, &meta_none, &csr_none) == WOLFCERT_OK);
@@ -1841,12 +1767,7 @@ int main(void)
     wolfcert_buffer_free(&ca2_pem);
     wolfcert_key_free(dk2);
 
-    /* ---- recipientNonce round-trips (RFC 8894 section 3.2.1.2) ------------
-     * The SCEP server now always emits recipientNonce in its CertRep (on any
-     * malloc-enabled wolfSSL), and the client rejects a CertRep whose
-     * recipientNonce fails to echo the senderNonce it sent (exercised by the
-     * successful enrollments above). This whitebox check asserts the encoder
-     * actually puts the nonce on the wire and the parser recovers it intact. */
+    /* recipientNonce survives the encoder and parser (RFC 8894 3.2.1.2). */
     {
         WC_RNG rng;
         REQUIRE(wc_InitRng(&rng) == 0);
@@ -1903,12 +1824,7 @@ int main(void)
         wc_FreeRng(&rng);
     }
 
-    /* ---- Absent recipientNonce in a CertRep must be rejected -------------
-     * RFC 8894 section 3.2.1.2 requires the sender to verify the CertRep's
-     * recipientNonce echoes the senderNonce it sent. A CertRep that carries
-     * no recipientNonce cannot be verified, so the client must reject it.
-     * Drive a server that deliberately omits the nonce and confirm the
-     * enrollment fails instead of accepting the reply. */
+    /* A CertRep with no recipientNonce is rejected (RFC 8894 3.2.1.2). */
     WolfCertServerCfgSrv cfg3 = { .protocol = WOLFCERT_PROTO_SCEP,
                                   .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s3 = NULL;
@@ -1948,12 +1864,7 @@ int main(void)
     wolfcert_buffer_free(&out3);
     wolfcert_key_free(dk3);
 
-    /* ---- CertRep signed by a non-CA key must be rejected ----------------
-     * RFC 8894 authenticates the CertRep through its CMS signature. A reply
-     * signed by a key other than the trusted CA (a rogue server or a man in
-     * the middle) must be rejected. Drive a server that signs with a throwaway
-     * key and confirm the enrollment fails with an auth error rather than
-     * accepting the attacker-controlled certificate. */
+    /* A CertRep signed by a key other than the CA's is rejected. */
     WolfCertServerCfgSrv cfg4 = { .protocol = WOLFCERT_PROTO_SCEP,
                                   .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s4 = NULL;
@@ -1993,13 +1904,7 @@ int main(void)
     wolfcert_buffer_free(&out4);
     wolfcert_key_free(dk4);
 
-    /* ---- senderNonce RNG failure must abort, not leak stack -------------
-     * If the RNG draw for the CertRep senderNonce fails, the server must not
-     * build a CertRep over an uninitialized buffer. It frees its scratch,
-     * answers HTTP 500, and returns an error, which the client sees as a
-     * transport failure. Drive a server whose nonce draw is forced to fail
-     * and confirm the enrollment does not succeed. This also exercises the
-     * error-path cleanup under the sanitizer builds. */
+    /* A failed senderNonce RNG draw on the server answers HTTP 500. */
     WolfCertServerCfgSrv cfg5 = { .protocol = WOLFCERT_PROTO_SCEP,
                                   .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s5 = NULL;

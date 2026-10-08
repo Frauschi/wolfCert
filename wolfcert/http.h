@@ -26,9 +26,8 @@
 extern "C" {
 #endif
 
-/* Minimal HTTP/1.1 client used by the EST and SCEP modules. TLS, when
- * requested by the URL scheme, is layered on top of wolfSSL with the
- * caller-supplied trust anchors. */
+/* Minimal HTTP/1.1 client used by EST and SCEP; https URLs run over wolfSSL
+ * with the request's trust anchors. */
 
 /* Blocking getaddrinfo + socket + connect over POSIX/BSD sockets, returning
  * a connected fd or -1. Exported so a custom transport's connect can open its
@@ -49,20 +48,18 @@ typedef struct {
     const uint8_t* body;
     size_t         body_len;
 
-    /* Optional TLS client auth (used by EST simplereenroll).
-     * client_cert / client_key / trust_anchors may be PEM or DER. */
+    /* Optional TLS client cert and key, PEM or DER. */
     const uint8_t* client_cert;
     size_t         client_cert_len;
     const uint8_t* client_key;
     size_t         client_key_len;
 
-    const uint8_t* trust_anchors;
+    const uint8_t* trust_anchors;   /* PEM or DER */
     size_t         trust_anchors_len;
     int            verify_server;
     int            timeout_ms;
 
-    /* Hard cap on the response body. 0 -> 64 KiB default. A caller
-     * embedding wolfCert in an MCU almost always sets this explicitly. */
+    /* Hard cap on the response body; 0 -> 64 KiB. */
     size_t         max_response_bytes;
 
     void*          heap;           /* NULL -> default */
@@ -86,17 +83,7 @@ WOLFCERT_API int wolfcert_http_request(const WolfCertHttpRequest* req,
                                        WolfCertHttpResponse* resp);
 WOLFCERT_API void wolfcert_http_response_free(WolfCertHttpResponse* resp);
 
-/* ---- keep-alive HTTP sessions ------------------------------------------
- *
- * One TCP+TLS connection, many requests. Used by the EST session layer so
- * that an anonymous `/cacerts` and an mTLS-authenticated `/simpleenroll`
- * can ride the same TLS connection. When `allow_post_handshake_auth` is
- * non-zero the underlying TLS 1.3 context opts into RFC 8446 section 4.6.2
- * post-handshake authentication - the initial handshake stays anonymous
- * and the server asks for a certificate mid-session when a protected
- * resource is first hit. The client cert + key are loaded on the WOLFSSL
- * object up front so wolfSSL can answer that prompt without any further
- * caller involvement. */
+/* Keep-alive HTTP session: one TCP+TLS connection carrying many requests. */
 typedef struct WolfCertHttpSession WolfCertHttpSession;
 
 typedef struct {
@@ -107,22 +94,18 @@ typedef struct {
     int            timeout_ms;
     size_t         max_response_bytes;
 
-    /* TLS client identity. When set it's loaded on the WOLFSSL before
-     * the initial handshake, so it's usable both for up-front mTLS and
-     * for answering a later TLS 1.3 post-handshake CertificateRequest. */
+    /* TLS client identity, loaded before the handshake; it serves both mTLS
+     * and a later post-handshake CertificateRequest. */
     const uint8_t* client_cert;
     size_t         client_cert_len;
     const uint8_t* client_key;
     size_t         client_key_len;
 
-    /* TLS 1.3 post-handshake authentication opt-in. */
+    /* TLS 1.3 post-handshake auth opt-in (RFC 8446 section 4.6.2). */
     int            allow_post_handshake_auth;
 
-    /* Non-blocking session I/O: wolfcert_http_session_request_nb returns
-     * WOLFCERT_ERR_WANT_READ / WOLFCERT_ERR_WANT_WRITE instead of blocking,
-     * and the TLS handshake is driven incrementally. Poll
-     * wolfcert_http_session_fd(), or your transport's own readiness signal.
-     * DNS and the initial connect stay synchronous. */
+    /* wolfcert_http_session_request_nb returns WANT_READ / WANT_WRITE instead
+     * of blocking. DNS and the initial connect stay synchronous. */
     int            nonblocking;
 
     void*          heap;
@@ -133,34 +116,23 @@ typedef struct {
 WOLFCERT_API int  wolfcert_http_session_open (const WolfCertHttpSessionCfg* cfg,
                                               WolfCertHttpSession** out);
 
-/* Issue one HTTP request on the already-open connection. `req->url` must
- * match the session's scheme + host + port; the path component is what
- * actually drives the request. TLS / trust-anchor fields on `req` are
- * ignored - they're fixed at session open. */
+/* Send one request on the open connection. req->url must match the session's
+ * scheme, host and port; the TLS fields of req are ignored. */
 WOLFCERT_API int  wolfcert_http_session_request(WolfCertHttpSession* s,
                                                 const WolfCertHttpRequest* req,
                                                 WolfCertHttpResponse* resp);
 
 WOLFCERT_API void wolfcert_http_session_close(WolfCertHttpSession* s);
 
-/* Socket descriptor of the open session: poll POLLIN / POLLOUT per the last
- * WOLFCERT_ERR_WANT_*. The built-in transport keeps it O_NONBLOCK, so do not
- * transfer on it. -1 under any other transport; undefined after close. */
+/* Socket descriptor to poll for the last WOLFCERT_ERR_WANT_*; the built-in
+ * transport owns all I/O on it. -1 under any other transport; undefined after
+ * close. */
 WOLFCERT_API int wolfcert_http_session_fd(const WolfCertHttpSession* s);
 
-/* Non-blocking variant of wolfcert_http_session_request. Must be used
- * against a session opened with WolfCertHttpSessionCfg.nonblocking = 1.
- *
- * Returns:
- *   WOLFCERT_OK             - `resp` populated; re-usable for next call.
- *   WOLFCERT_ERR_WANT_READ  - block on fd readable, then call again
- *                             with the same arguments.
- *   WOLFCERT_ERR_WANT_WRITE - block on fd writable, then call again.
- *   other negative values   - permanent failure; close the session.
- *
- * Sessions remember their in-flight state across calls. The caller
- * must NOT mutate `req` or `resp` between WANT_* returns and the final
- * OK/error return. */
+/* Non-blocking wolfcert_http_session_request, for a session opened with
+ * nonblocking = 1. Returns WOLFCERT_OK with resp populated, or WANT_READ /
+ * WANT_WRITE to be repeated with the same, unmodified req and resp once the fd
+ * is ready. Any other error is permanent and the caller closes the session. */
 WOLFCERT_API int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
                                                   const WolfCertHttpRequest* req,
                                                   WolfCertHttpResponse* resp);

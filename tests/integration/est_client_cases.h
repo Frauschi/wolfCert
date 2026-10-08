@@ -17,11 +17,8 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * EST client cases, parameterised by the server config so they run against an
- * in-process server or one across a network. Each returns 0 on success and
- * prints the failing check.
- */
+/* EST client cases, parameterised by the server config. Each returns 0 on
+ * success. */
 
 #ifndef WOLFCERT_EST_CLIENT_CASES_H
 #define WOLFCERT_EST_CLIENT_CASES_H
@@ -38,8 +35,8 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Record the first failure and skip the rest of the case.
- * A leak here would outlive the case when several share one image. */
+/* Record the first failure and skip later checks without returning, so the
+ * case's cleanup still runs; the Zephyr image shares one heap across cases. */
 #define EST_CHECK(cond) \
     do {                                                                    \
         if (ret == 0 && !(cond)) {                                          \
@@ -48,7 +45,7 @@
         }                                                                   \
     } while (0)
 
-/* Enroll one key of the given type and verify the issued cert against ca_pem. */
+/* Enroll one key and verify the issued cert against ca_pem. */
 static inline int enroll_one(const WolfCertServerCfg* client_cfg,
                              WolfCertKeyType kt, int param,
                              const WolfCertBuffer* ca_pem)
@@ -112,9 +109,8 @@ static inline int has_alt(const DNS_entry* list, int type, const char* val,
     return 0;
 }
 
-/* A CSR's DNS, IP and email SANs must all reach the issued certificate.
- * wolfSSL parses the email SAN into altEmailNames, not altNames, so the CA
- * has to merge both lists. */
+/* CSR with a DNS, an IP and an email SAN; all three must appear in the issued
+ * cert, the email one in altEmailNames. */
 static inline int enroll_check_san(const WolfCertServerCfg* client_cfg)
 {
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
@@ -157,12 +153,10 @@ static inline int enroll_check_san(const WolfCertServerCfg* client_cfg)
     }
     EST_CHECK(wc_ParseCert(&dc, CERT_TYPE, NO_VERIFY, NULL) == 0);
 
-    /* DNS + IP travel in altNames. */
     EST_CHECK(has_alt(dc.altNames, ASN_DNS_TYPE, "device-san.local",
                       (int)strlen("device-san.local")));
     EST_CHECK(has_alt(dc.altNames, ASN_IP_TYPE, (const char*)ip,
                       (int)sizeof(ip)));
-    /* The regression guard: email lands in altEmailNames, must still survive. */
     EST_CHECK(has_alt(dc.altEmailNames, ASN_RFC822_TYPE, "dev-san@example.com",
                       (int)strlen("dev-san@example.com")));
 
@@ -175,9 +169,8 @@ static inline int enroll_check_san(const WolfCertServerCfg* client_cfg)
     return ret;
 }
 
-/* HTTP Basic (RFC 7030 section 3.2.3) must cover every request on a keep-alive
- * session: enroll with the credentials in `client_cfg`, then require a
- * rejection with a wrong password from both the plain and `_ex` enroll. */
+/* HTTP Basic (RFC 7030 section 3.2.3) on a keep-alive session; a wrong
+ * password fails both the plain and _ex enroll. */
 static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
 {
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
@@ -217,15 +210,13 @@ static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
     EST_CHECK(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE,
                           &issued_der, NULL, NULL, NULL) == 0);
 
-    /* Close the first session before opening the second: the target heap is
-     * small. */
+    /* The target heap is too small for two open sessions. */
     wc_FreeDer(&issued_der);
     wolfcert_buffer_free(&ca_pem);
     wolfcert_buffer_free(&issued);
     wolfcert_est_session_close(s);
     s = NULL;
 
-    /* Same session shape, wrong password: the server must reject the enroll. */
     EST_CHECK(wolfcert_est_session_open(&bad_cfg, &bs) == WOLFCERT_OK);
     if (ret == 0) {
         brc = wolfcert_est_session_simple_enroll(bs, csr.data, csr.len,

@@ -89,10 +89,8 @@ norm_err() {
 
 indent() { sed 's/^/        /'; }
 
-# name : decoy : user_settings.h source : WOLFSSL_USER_SETTINGS : header forced
-# ahead of wolfCert's ("-" for none) : macro appended to the staged
-# user_settings.h, so it arrives from inside the file rather than the command
-# line ("-" for none) : expectation
+# name : decoy : user_settings.h source : WOLFSSL_USER_SETTINGS : forced
+# pre-include or "-" : macro appended to user_settings.h or "-" : expectation
 CASES="
 usersettings-wins:poison:scripts/ci/freestanding-user_settings.h:on:-:-:agree-ok
 optionsh-decoy:rich:scripts/ci/wolfcert-only-user_settings.h:on:-:-:agree-fail

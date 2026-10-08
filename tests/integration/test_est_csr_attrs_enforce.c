@@ -17,20 +17,8 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * End-to-end coverage for server-side enforcement of the CsrAttrs
- * policy (RFC 7030 section 4.5.2). The test server advertises a bare-OID
- * challengePassword requirement + `est_require_csr_attributes = 1`:
- *
- *   - Client A sets meta.challenge_password so the CSR carries the
- *     attribute -> enrollment must succeed.
- *   - Client B omits it -> server rejects with HTTP 400 and the
- *     client surfaces WOLFCERT_ERR_HTTP.
- *
- * Enforcement happens presence-only in this phase (bare-OID items
- * only); Attribute-with-values items are advisory. See docs/TODO.md
- * for the value-comparison follow-up.
- */
+/* A CSR without the bare-OID challengePassword gets 400, and one that ignores a
+ * P-384 Attribute-only policy enrolls; plus error-reply checks. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -66,7 +54,7 @@
         }                                                                   \
     } while (0)
 
-/* Server TLS trust anchor, pinned by the client (EST is TLS-only, RFC 7030). */
+/* Server TLS trust anchor, pinned by the client. */
 static const uint8_t* g_ca = NULL;
 static size_t         g_ca_len = 0;
 
@@ -95,11 +83,7 @@ static int build_policy(WolfCertBuffer* out)
     return wolfcert_csr_attrs_build(items, 1, out);
 }
 
-/* Build a policy that contains ONLY an Attribute-with-values item
- * (id-ecPublicKey pinning secp384r1) and no bare OIDs. Phase-3
- * enforcement is presence-only on bare OIDs, so a CSR that doesn't
- * carry the attribute must still be accepted - this is the policy
- * used to prove that skip is intentional. */
+/* Policy with only an Attribute-with-values item (id-ecPublicKey, P-384). */
 static int build_values_only_policy(WolfCertBuffer* out)
 {
     uint8_t curve_tlv[16];
@@ -117,7 +101,6 @@ static int build_values_only_policy(WolfCertBuffer* out)
     return wolfcert_csr_attrs_build(items, 1, out);
 }
 
-/* Client A - CSR carries challengePassword -> enrollment succeeds. */
 static int enroll_with_challenge(WolfCertServer* s)
 {
     char url[128];
@@ -152,7 +135,6 @@ static int enroll_with_challenge(WolfCertServer* s)
     return 0;
 }
 
-/* Client B - CSR omits challengePassword -> server returns 400. */
 static int enroll_without_challenge(WolfCertServer* s)
 {
     char url[128];
@@ -171,7 +153,6 @@ static int enroll_without_challenge(WolfCertServer* s)
                                 .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertCertMeta meta = {
         .subject_dn = "CN=enforce-reject",
-        /* no challenge_password -> CSR lacks the required attribute */
     };
 
     WolfCertKey* key = NULL;
@@ -188,9 +169,7 @@ static int enroll_without_challenge(WolfCertServer* s)
     return 0;
 }
 
-/* Dial 127.0.0.1:port over TLS, send the request, and read the whole
- * response (headers + body) into `resp`. A receive timeout keeps a
- * misbehaving server from hanging the test. Returns bytes read, or -1. */
+/* Send req over TLS and read the whole response. Returns bytes read, or -1. */
 static int send_and_read_all(uint16_t port, const void* req, size_t req_len,
                              char* resp, size_t cap)
 {
@@ -219,15 +198,10 @@ static int send_and_read_all(uint16_t port, const void* req, size_t req_len,
     return (int)n;
 }
 
-/* Raw-HTTP probe of the enforcement 400 body: build a real CSR that omits
- * challengePassword, POST it to /simpleenroll, and assert the response both
- * fails with 400 and names the exact missing OID in dotted form. This is the
- * end-to-end check that the value-result OID copy in csr_attrs_enforce
- * renders the correct bytes; the client path above only observes rejection,
- * not the body. */
+/* The enforcement 400 body names the missing OID in dotted form. */
 static int reject_body_names_missing_oid(uint16_t port)
 {
-    /* challengePassword dotted OID (see OID_CHALLENGE_PASSWORD above). */
+    /* OID_CHALLENGE_PASSWORD in dotted form. */
     static const char EXPECT_OID[] = "1.2.840.113549.1.9.7";
     WolfCertKeyCfg key_cfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                                .dev_id = WOLFCERT_DEVID_SOFTWARE };
@@ -243,8 +217,7 @@ static int reject_body_names_missing_oid(uint16_t port)
     REQUIRE(wolfcert_key_generate(&key_cfg, &key) == WOLFCERT_OK);
     REQUIRE(wolfcert_csr_build(key, &meta, &csr_der) == WOLFCERT_OK);
 
-    /* EST simpleenroll carries base64 PKCS#10; the server base64-decodes the
-     * request body (embedded newlines are tolerated by the decoder). */
+    /* Base64_Encode inserts newlines, which the server's decoder tolerates. */
     REQUIRE(Base64_Encode(csr_der.data, (word32)csr_der.len, b64, &b64_len) == 0);
 
     rl = snprintf(req, sizeof(req),
@@ -270,8 +243,7 @@ static int reject_body_names_missing_oid(uint16_t port)
     return 0;
 }
 
-/* RFC 7030 section 4.2.3: an error response without a media type must carry a
- * plaintext explanation, so neither a 404 nor an empty-body 400 may be empty. */
+/* Error responses carry a text/plain body (RFC 7030 section 4.2.3). */
 static int reject_bodies_are_plaintext(uint16_t port)
 {
     static const char* const reqs[] = {
@@ -347,11 +319,6 @@ static int bare_status_headers(uint16_t port)
     return 0;
 }
 
-/* Client C - server advertises ONLY an Attribute-with-values item
- * (no bare OIDs). The CSR doesn't carry anything matching it.
- * Enforcement is presence-only on bare OIDs, so this must still
- * succeed. Pins the "Attribute items are advisory" behaviour so a
- * future refactor flipping it to enforce-by-default breaks here. */
 static int values_only_policy_does_not_block(WolfCertServer* s)
 {
     char url[128];
@@ -390,7 +357,6 @@ int main(void)
     WolfCertBuffer policy = { 0 };
     REQUIRE(build_policy(&policy) == WOLFCERT_OK);
 
-    /* EST runs over TLS (RFC 7030): pin a freshly minted server identity. */
     uint8_t *tls_cert = NULL, *tls_key = NULL;
     size_t tls_cert_len = 0, tls_key_len = 0;
     REQUIRE(gen_server_identity(&tls_cert, &tls_cert_len,
@@ -424,7 +390,6 @@ int main(void)
     if (rc != 0)
         return rc;
 
-    /* Second server with a values-only policy; any CSR must pass. */
     WolfCertBuffer policy2 = { 0 };
     REQUIRE(build_values_only_policy(&policy2) == WOLFCERT_OK);
     WolfCertServerCfgSrv cfg2 = {
@@ -451,11 +416,7 @@ int main(void)
     if (rc != 0)
         return rc;
 
-    /* Third server with the same bare-OID policy, driven by a raw HTTP
-     * request so the 400 body is readable: asserts it names the missing OID
-     * in dotted form. The client path above proves rejection; this proves the
-     * reported OID content (i.e. the value-result OID copy renders the right
-     * bytes). */
+    /* Raw HTTP against the bare-OID policy, so the 400 body is readable. */
     WolfCertBuffer policy_raw = { 0 };
     REQUIRE(build_policy(&policy_raw) == WOLFCERT_OK);
     WolfCertServerCfgSrv cfg_raw = {

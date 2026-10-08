@@ -9,25 +9,14 @@
 #   go install github.com/globalsign/est/cmd/estserver@latest
 #   go install github.com/globalsign/est/cmd/estclient@latest
 #
-# globalsign ships both binaries under the same names libest uses
-# (`estserver` and `estclient`). This script looks up them via
-# `estserver -sampleconfig`, which is a flag globalsign's binary
-# recognises and libest's doesn't, so the two installations don't
-# collide. Set GLOBALSIGN_EST_BIN_DIR to point at the install dir if
-# it's not the first match on PATH.
-#
-# The script exercises:
-#   [1] wolfcert-client enrolls against a globalsign estserver.
-#   [2] globalsign estclient enrolls against wolfcert-server.
-#
-# Both run over HTTPS; wolfcert-server gets a freshly-minted loopback
-# cert so `estclient -explicit` can pin it as a trust anchor.
+# libest installs binaries of the same names; set GLOBALSIGN_EST_BIN_DIR when
+# globalsign's are not first on PATH.
 
 set -euo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 . "$HERE/lib/common.sh"
 
-# ---- locate globalsign's binaries (not libest's) --------------------------
+# Locate globalsign's binaries (not libest's)
 pick_globalsign() {
     local bin="$1" probe="$2"
     local cand
@@ -40,10 +29,7 @@ pick_globalsign() {
         echo "SKIP: $bin not found (install: go install github.com/globalsign/est/cmd/$bin@latest)" >&2
         exit 77
     fi
-    # libest ships its own `estserver`/`estclient`; probe with a flag or
-    # subcommand that only globalsign's implementation recognises.
-    # `estserver` takes a `-sampleconfig` flag; `estclient` has a
-    # `sampleconfig` subcommand.
+    # Only globalsign's binaries accept sampleconfig.
     if ! eval "\"\$cand\" $probe" >/dev/null 2>&1; then
         echo "SKIP: '$cand' is not the globalsign $bin (libest also installs a" \
              "binary with this name). Set GLOBALSIGN_EST_BIN_DIR or reorder \$PATH." >&2
@@ -61,22 +47,21 @@ WC_SERVER="$(wolfcert_bin wolfcert-server)"
 cd "$WOLFCERT_INTEROP_WORK"
 trap 'echo "--- work dir: $WOLFCERT_INTEROP_WORK"' EXIT
 
-# ---- bootstrap a mock CA + server TLS identity ----------------------------
+# Bootstrap a mock CA + server TLS identity
 echo "[setup] bootstrap mock CA + server TLS identity"
 mkdir -p ca srv
 # Mock CA (used by estserver's mock_ca to sign enrolled certs).
 openssl req -x509 -new -newkey rsa:2048 -nodes \
     -keyout ca/ca.key -out ca/ca.crt -days 30 \
     -subj "/CN=globalsign-est-interop-CA" -batch >/dev/null 2>&1
-# TLS server identity for estserver's listener (CN=localhost +
-# subjectAltName=DNS:localhost so hostname checks pass for either name).
+# estserver's TLS identity, valid for localhost and 127.0.0.1.
 openssl req -x509 -newkey rsa:2048 -nodes -days 1 \
     -keyout srv/srv.key -out srv/srv.crt \
     -subj "/CN=localhost" \
     -addext "subjectAltName=DNS:localhost,IP:127.0.0.1" \
     -batch >/dev/null 2>&1
 
-# ---- D1: wolfcert-client -> globalsign estserver ---------------------------
+# D1: wolfcert-client -> globalsign estserver
 echo "[1] wolfcert-client -> globalsign estserver"
 EST_PORT=$(free_port)
 
@@ -117,7 +102,7 @@ openssl verify -CAfile ca/ca.crt wc.crt >/dev/null
 echo "    PASS  (cert chains to globalsign estserver mock CA)"
 kill_if "$ES_PID"; ES_PID=""
 
-# ---- D2: globalsign estclient -> wolfcert-server ---------------------------
+# D2: globalsign estclient -> wolfcert-server
 echo "[2] globalsign estclient -> wolfcert-server (HTTPS via built-in TLS)"
 WC_PORT=$(free_port)
 
@@ -135,11 +120,7 @@ WC_PID=$!
 trap 'kill_if "$WC_PID"' EXIT
 wait_port 127.0.0.1 "$WC_PORT"
 
-# estclient's `-key`/`-signingkey` expect a pre-existing private key
-# (they read, not write). Mint an RSA key with openssl, produce a CSR
-# with estclient's csr subcommand, then enroll. Pinning wc's own cert
-# as the explicit trust anchor per RFC 7030 section 3.1 rather than
-# `-insecure`.
+# estclient reads -key/-signingkey rather than generating a key.
 openssl genrsa -out estcli.key 2048 2>/dev/null
 "$GS_ESTCLIENT" csr -cn "globalsign-cli-1" -key estcli.key \
     -out estcli.csr >csr.log 2>&1

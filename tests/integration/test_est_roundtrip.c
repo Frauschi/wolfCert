@@ -51,9 +51,7 @@ static void* server_thread(void* arg)
     return NULL;
 }
 
-/* Pluggable-transport coverage: a WolfCertTransport whose connect counts
- * invocations and opens through wolfcert_posix_connect, with the byte path
- * over plain blocking sockets. */
+/* Plain-socket WolfCertTransport that counts its connects. */
 static int g_connect_calls = 0;
 
 static int counting_connect(void* ctx, const char* host, int port,
@@ -147,8 +145,6 @@ static int enroll_raw_csr(const WolfCertServerCfg* client_cfg,
     return 0;
 }
 
-/* The DirectoryString choice the requester used has to survive: a
- * PrintableString RDN coming back as UTF8String changes the subject. */
 static int enroll_preserves_string_encoding(const WolfCertServerCfg* client_cfg)
 {
     DecodedCert dc;
@@ -171,9 +167,8 @@ static int rdn_is(const char* p, int len, const char* want)
            memcmp(p, want, (size_t)len) == 0;
 }
 
-/* Regression: every subject RDN the CSR builder accepts must survive into the
- * issued certificate. The CA rebuilds the subject field by field, so a name
- * component it has no copy for is dropped without any error. */
+/* CSR with every subject RDN type the CA copies; each must reach the issued
+ * cert unchanged. */
 static int enroll_check_subject_rdns(const WolfCertServerCfg* client_cfg)
 {
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
@@ -211,7 +206,6 @@ static int enroll_check_subject_rdns(const WolfCertServerCfg* client_cfg)
     REQUIRE(rdn_is(dc.subjectC,  dc.subjectCLen,  "US"));
     REQUIRE(rdn_is(dc.subjectST, dc.subjectSTLen, "Washington"));
     REQUIRE(rdn_is(dc.subjectL,  dc.subjectLLen,  "Seattle"));
-    /* The guard: everything below was dropped by the issuer. */
     REQUIRE(rdn_is(dc.subjectSN,  dc.subjectSNLen,  "Doe"));
     REQUIRE(rdn_is(dc.subjectGN,  dc.subjectGNLen,  "Jane"));
     REQUIRE(rdn_is(dc.subjectEmail, dc.subjectEmailLen, "jane@example.com"));
@@ -235,8 +229,6 @@ int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
 
-    /* EST runs over TLS (RFC 7030): stand the server up behind a freshly
-     * minted self-signed identity and pin it as the client trust anchor. */
     uint8_t *tls_cert = NULL, *tls_key = NULL;
     size_t tls_cert_len = 0, tls_key_len = 0;
     REQUIRE(gen_server_identity(&tls_cert, &tls_cert_len,
@@ -278,9 +270,7 @@ int main(void)
     WolfCertBuffer ca_pem = { 0 };
     REQUIRE(wolfcert_est_get_cacerts(&client_cfg, &ca_pem) == WOLFCERT_OK);
 
-    /* get_ca DER path: get_ca unpacks the PKCS#7 internally, so for the
-     * single-cert test CA the DER result is that cert's raw DER and loads
-     * directly as ASN.1. */
+    /* For the single-cert test CA the DER result is that cert's raw DER. */
     WolfCertClient* client = NULL;
     REQUIRE(wolfcert_client_new(&client) == WOLFCERT_OK);
     WolfCertBuffer ca_der = { 0 };
@@ -295,8 +285,6 @@ int main(void)
     wolfcert_buffer_free(&ca_der);
     wolfcert_client_free(client);
 
-    /* One round-trip per key type: a supported default always, Ed25519/Ed448
-     * when enabled. */
     if (enroll_one(&client_cfg, TEST_ENROLL_KEY_TYPE, TEST_ENROLL_KEY_PARAM,
                    &ca_pem))
         return 1;
@@ -309,25 +297,19 @@ int main(void)
         return 1;
 #endif
 
-    /* SAN round-trip incl. rfc822 (email) regression guard. */
     if (enroll_check_san(&client_cfg))
         return 1;
 
-    /* Full subject-RDN round-trip guard. */
     if (enroll_preserves_string_encoding(&client_cfg))
         return 1;
     if (enroll_check_subject_rdns(&client_cfg))
         return 1;
 
-    /* Keep-alive session against the same Basic-auth-protected server. */
     if (session_basic_auth(&client_cfg))
         return 1;
 
-    /* Proof-of-possession: a CSR whose self-signature does not validate must
-     * be rejected. Build a valid CSR, corrupt a byte of its trailing
-     * signature value (DER structure stays intact so it still parses), and
-     * confirm the server refuses to issue. Credentials are still valid here,
-     * so a rejection can only come from the PoP check. */
+    /* A flipped signature bit keeps the CSR parseable and the credentials are
+     * valid, so only the proof-of-possession check can reject it. */
     WolfCertKeyCfg pop_kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                                 .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* pop_dk = NULL;
@@ -346,7 +328,6 @@ int main(void)
     wolfcert_buffer_free(&pop_csr);
     wolfcert_key_free(pop_dk);
 
-    /* Auth failure path - needs a CSR to send. */
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* dk = NULL;
@@ -364,11 +345,8 @@ int main(void)
     wolfcert_buffer_free(&csr);
     wolfcert_key_free(dk);
 
-    /* Basic-auth must be a full-length exact match. A credential whose base64
-     * carries the correct token as a prefix plus trailing bytes must be
-     * rejected, not accepted by a prefix-only comparison. This server's
-     * "alice:hunter" is 12 bytes, so its base64 has no padding and the base64
-     * of the longer "alice:hunterABC" extends it cleanly. */
+    /* "alice:hunter" is 12 bytes, so its base64 has no padding and is a prefix
+     * of the base64 of "alice:hunterABC". */
     WolfCertServerCfgSrv acfg = {
         .protocol        = WOLFCERT_PROTO_EST,
         .bind_host       = "127.0.0.1", .bind_port = 0,
@@ -399,13 +377,11 @@ int main(void)
     WolfCertBuffer acsr = { 0 };
     REQUIRE(wolfcert_csr_build(adk, &ameta, &acsr) == WOLFCERT_OK);
 
-    /* Exact credentials still enroll. */
     WolfCertBuffer aok = { 0 };
     REQUIRE(wolfcert_est_simple_enroll(&acli, acsr.data, acsr.len, &aok)
             == WOLFCERT_OK);
     wolfcert_buffer_free(&aok);
 
-    /* Correct token prefix plus trailing bytes must be rejected. */
     acli.proto_opts.est.password = "hunterABC";
     WolfCertBuffer abad = { 0 };
     REQUIRE(wolfcert_est_simple_enroll(&acli, acsr.data, acsr.len, &abad)
@@ -417,7 +393,6 @@ int main(void)
     pthread_join(atid, NULL);
     wolfcert_server_free(as);
 
-    /* The pluggable transport must have been used for every request above. */
     REQUIRE(g_connect_calls > 0);
 
     wolfcert_server_stop(s);

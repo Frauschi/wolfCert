@@ -84,9 +84,7 @@ static int build_and_reparse(WolfCertKeyType kt, int param)
     return 0;
 }
 
-/* Verifies that the new metadata fields flow end-to-end: a UID in the
- * DN string lands in the parsed DecodedCert, and an rfc822Name SAN
- * shows up as the tag-0x81 GeneralName inside the SAN extension. */
+/* UID, rfc822Name and iPAddress meta fields reach the built CSR. */
 static int build_with_extras(void)
 {
     WolfCertKeyCfg cfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
@@ -110,16 +108,12 @@ static int build_with_extras(void)
     DecodedCert dc;
     wc_InitDecodedCert(&dc, der.data, (word32)der.len, NULL);
     REQUIRE(wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL) == 0);
-    /* CN still parses. */
     REQUIRE(dc.subjectCN != NULL);
     REQUIRE(strncmp(dc.subjectCN, "device-42", 9) == 0);
     /* One-character RDN keys reach their CertName field. */
     REQUIRE(dc.subjectL != NULL && dc.subjectLLen == 8);
     REQUIRE(strncmp(dc.subjectL, "Portland", 8) == 0);
-    /* UID is carried in dc.uidRaw / dc.uidRawLen on this wolfSSL build;
-     * fall back to a raw scan of the subjectRaw bytes otherwise. The
-     * UID OID (0.9.2342.19200300.100.1.1) encodes to bytes
-     * 09 92 26 89 93 F2 2C 64 01 01 - assert its presence. */
+    /* The UID attribute OID, 0.9.2342.19200300.100.1.1. */
     static const uint8_t UID_OID[] = {
         0x09, 0x92, 0x26, 0x89, 0x93, 0xF2, 0x2C, 0x64, 0x01, 0x01
     };
@@ -128,8 +122,7 @@ static int build_with_extras(void)
                    UID_OID, sizeof(UID_OID)) != NULL);
     wc_FreeDecodedCert(&dc);
 
-    /* rfc822Name SAN - check the raw CSR contains the email bytes
-     * preceded by tag 0x81 (GeneralName [1] IMPLICIT IA5String). */
+    /* rfc822Name SAN: GeneralName [1] IMPLICIT IA5String, tag 0x81. */
     static const uint8_t rfc822_prefix[] = {
         0x81, 0x0F, 'o','p','s','@','e','x','a','m','p','l','e','.','c','o','m'
     };
@@ -148,10 +141,8 @@ static int build_with_extras(void)
 }
 
 #ifdef WOLFCERT_HAVE_SERVER
-/* A CSR RDN longer than wolfSSL's fixed CertName field must be refused, not
- * issued truncated: a certificate naming a subject the CSR did not ask for is
- * worse than a failed enrolment. Driven directly because no wolfSSL-built CSR
- * can carry an over-long RDN in the first place. */
+/* A hand-filled DecodedCert with a CTC_NAME_SIZE-byte CN, which no
+ * wolfSSL-built CSR can carry, gets BAD_ARG from wolfcert_copy_csr_subject. */
 static int subject_copy_rejects_oversized_rdn(void)
 {
     char longcn[CTC_NAME_SIZE + 8];
@@ -178,8 +169,6 @@ static int subject_copy_rejects_oversized_rdn(void)
 #endif
 
 #ifdef WOLFCERT_HAVE_ECC
-/* The client refuses an over-long RDN for the same reason the issuance path
- * does: a truncated value enrols under a subject the caller did not request. */
 static int csr_build_rejects_oversized_rdn(void)
 {
     WolfCertKeyCfg cfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
@@ -198,8 +187,7 @@ static int csr_build_rejects_oversized_rdn(void)
     REQUIRE(wolfcert_csr_build(key, &meta, &der) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(der.data == NULL && der.len == 0);
 
-    /* Exactly CTC_NAME_SIZE is refused too: the field must hold a NUL as well,
-     * and a `>` here would write that NUL over the adjacent encoding byte. */
+    /* Exactly CTC_NAME_SIZE is refused too, since the NUL needs a byte. */
     dn[3 + CTC_NAME_SIZE] = '\0';
     REQUIRE(wolfcert_csr_build(key, &meta, &der) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(der.data == NULL && der.len == 0);

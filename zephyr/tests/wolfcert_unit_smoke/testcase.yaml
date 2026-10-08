@@ -13,8 +13,7 @@ tests:
     integration_platforms:
       - qemu_x86
 
-  # Build-only rows for the options the other suites leave at their defaults,
-  # so a combination nobody runs still has to compile.
+  # Build-only rows for options the other suites leave at their defaults.
   wolfcert.build.no_builtin_transport:
     build_only: true
     platform_allow: qemu_x86

@@ -44,7 +44,6 @@
     } while (0)
 
 #ifndef WOLFCERT_HAVE_BUILTIN_TRANSPORT
-/* Nothing below can open a socket in a build with no built-in transport. */
 int main(void)
 {
     return 77;
@@ -77,9 +76,7 @@ static int test_url_parser(void)
 
     REQUIRE(wolfcert_http_url_parse("ftp://nope/", &u, NULL) == WOLFCERT_ERR_UNSUPPORTED);
 
-    /* A pathless URL carrying a query: SCEP builds exactly this shape. The
-     * query must not be absorbed into the host, and the request target has to
-     * keep a leading slash. */
+    /* A pathless URL with a query, the shape SCEP builds. */
     REQUIRE(wolfcert_http_url_parse("http://ca.example?operation=GetCACaps", &u, NULL) == WOLFCERT_OK);
     REQUIRE(strcmp(u.host, "ca.example") == 0);
     REQUIRE(u.port == 80);
@@ -123,8 +120,6 @@ static int test_url_parser(void)
     return 0;
 }
 
-/* wolfcert_http_url_origin: default-port omission, non-default port, and the
- * BAD_ARG guard - the helper is shared by the EST and SCEP session opens. */
 static int test_url_origin(void)
 {
     WolfCertUrl u;
@@ -150,8 +145,7 @@ static int test_url_origin(void)
     WOLFCERT_XFREE(origin, NULL); origin = NULL;
     wolfcert_http_url_free(&u);
 
-    /* An IPv6 literal is re-bracketed, so parse -> origin -> parse round-trips
-     * instead of collapsing into an unparsable "https://::1:8443". */
+    /* An IPv6 literal is re-bracketed so the origin parses again. */
     REQUIRE(wolfcert_http_url_parse("https://[::1]:8443/p", &u, NULL) == WOLFCERT_OK);
     REQUIRE(wolfcert_http_url_origin(&u, NULL, &origin) == WOLFCERT_OK);
     REQUIRE(strcmp(origin, "https://[::1]:8443") == 0);
@@ -184,9 +178,7 @@ static int test_url_origin(void)
 
 struct srv_ctx { int listen_fd; };
 
-/* Bind a loopback listener and report the ephemeral port it landed on.
- * Callers run this before spawning the responder thread, so the port never
- * has to travel back across the thread boundary. */
+/* Returns a bound loopback listener and its ephemeral port. */
 static int listen_loopback(int* port)
 {
     int ls = socket(AF_INET, SOCK_STREAM, 0);
@@ -213,8 +205,7 @@ static int listen_loopback(int* port)
     return ls;
 }
 
-/* Same on ::1. Returns -1 when the host has no IPv6 loopback, which the
- * callers treat as "skip" rather than "fail". */
+/* listen_loopback() on ::1; returns -1 when the host has no IPv6 loopback. */
 static int listen_loopback6(int* port)
 {
     struct sockaddr_in6 sa;
@@ -348,11 +339,7 @@ static void* srv_retry_thread(void* arg)
     return NULL;
 }
 
-/* Emit a chunked response whose second chunk-size line is a 16-digit
- * value (0xFFFFFFFFFFFFFFFF). A decoder that parses the size without
- * bounding it wraps its arithmetic and memcpy's a wild length, so this
- * server response is what an on-path attacker would inject to crash a
- * blocking EST/SCEP client. */
+/* Sends a chunked response whose second chunk-size is 0xFFFFFFFFFFFFFFFF. */
 static void* srv_thread_overflow(void* arg)
 {
     struct srv_ctx* sc = (struct srv_ctx*)arg;
@@ -411,8 +398,8 @@ static int drive_nb(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
     }
 }
 
-/* A non-blocking session reused across requests must not carry a stale
- * Retry-After from an earlier response into a later one. */
+/* One non-blocking session, two replies: Retry-After: 30 gives 30, and the
+ * next reply without the header gives 0. */
 static int test_session_retry_after_reset(void)
 {
     struct srv_ctx sc = { 0 };
@@ -471,8 +458,6 @@ static int test_chunked_size_overflow(void)
         .body = (const uint8_t*)body, .body_len = strlen(body),
     };
     WolfCertHttpResponse resp = { 0 };
-    /* The oversized chunk-size line must be rejected as a protocol error,
-     * not memcpy'd with a wrapped length. */
     REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_ERR_PROTOCOL);
     REQUIRE(resp.body == NULL);
     REQUIRE(resp.body_len == 0);
@@ -481,13 +466,10 @@ static int test_chunked_size_overflow(void)
     return 0;
 }
 
-/* Size the reply to land exactly on the reader's accumulator allowance: a legal
- * response the blocking reader accepts, with less than one read quantum of
- * headroom left at the end. */
+/* NEAR_CAP_TOTAL: the most a session with
+ * max_response_bytes = NEAR_CAP_MAX_BODY reads, header budget included. */
 #define NEAR_CAP_MAX_BODY 1024
 #define NEAR_CAP_TOTAL    (NEAR_CAP_MAX_BODY + WOLFCERT_HTTP_HEADER_BUDGET)
-/* The reply is built as head + pad + tail; too small a budget underflows the
- * unsigned pad and memsets past the buffer. */
 #if NEAR_CAP_TOTAL < 256
 #error "test_session_near_cap_response needs WOLFCERT_HTTP_HEADER_BUDGET >= 256"
 #endif
@@ -538,9 +520,6 @@ static void* srv_thread_near_cap(void* arg)
     return NULL;
 }
 
-/* A response whose total size stays within the configured allowance must be
- * accepted even when the reader is left with less than one read quantum of
- * headroom. */
 static int test_session_near_cap_response(void)
 {
     struct srv_ctx sc = { 0 };
@@ -622,8 +601,7 @@ static void* srv_thread_eof_cap(void* arg)
     return NULL;
 }
 
-/* An EOF-delimited response that fills the allowance exactly is complete: the
- * reader must look for the close rather than reject the full accumulator. */
+/* A close-delimited reply of exactly NEAR_CAP_TOTAL bytes is accepted. */
 static int test_session_eof_cap_response(void)
 {
     struct srv_ctx sc = { 0 };
@@ -659,8 +637,7 @@ static int test_session_eof_cap_response(void)
     return 0;
 }
 
-/* Capture the request headers a client sends so the test can inspect
- * which headers were emitted on the wire. */
+/* Captures the request headers the client sends. */
 struct capture_ctx {
     int  listen_fd;
     char request[4096];
@@ -696,9 +673,8 @@ static void* srv_thread_capture(void* arg)
     return NULL;
 }
 
-/* RFC 7030 section 4.2.1: a base64-encoded enrollment body must be sent
- * with Content-Transfer-Encoding: base64 so the server decodes it. A
- * request that sets content_transfer_encoding must emit that header. */
+/* content_transfer_encoding = "base64" puts that header on the wire
+ * (RFC 7030 section 4.2.1). */
 static int test_request_transfer_encoding(void)
 {
     struct capture_ctx cc = { 0 };
@@ -728,8 +704,7 @@ static int test_request_transfer_encoding(void)
     return 0;
 }
 
-/* Both request builders carry their own copy of the bracketing, so drive
- * each one: an unbracketed IPv6 Host header fails a virtual-host match. */
+/* GET http://[::1]:port sends Host: [::1]:port, one-shot or via session. */
 static int ipv6_host_header(int use_session)
 {
     struct capture_ctx cc = { 0 };
@@ -800,8 +775,7 @@ static int srv_recv_request(int cs)
     return -1;
 }
 
-/* Bound a server-side recv so a client that never sends the next request
- * fails the test with a REQUIRE instead of deadlocking it. */
+/* Bounds a server recv so a missing request fails instead of deadlocking. */
 static void srv_recv_timeout(int cs, int secs)
 {
     struct timeval tv = { .tv_sec = secs, .tv_usec = 0 };
@@ -841,9 +815,8 @@ static void* srv_chunk_body_thread(void* arg)
     return NULL;
 }
 
-/* Drive one chunked body through the blocking client and check what it
- * decodes to. A non-NULL tail follows body as a second segment; a NULL
- * want_body expects no body at all. */
+/* A non-NULL tail is sent as a second segment; a NULL want_body expects
+ * no body at all. */
 static int chunk_body_case(const char* body, const char* tail, int want_rc,
                            const char* want_body, size_t want_len)
 {
@@ -874,8 +847,7 @@ static int chunk_body_case(const char* body, const char* tail, int want_rc,
     return 0;
 }
 
-/* A chunk payload that is literally the bytes "0\r\n\r\n", delivered
- * before the chunks that follow it. */
+/* A chunk payload that is literally the bytes "0\r\n\r\n". */
 static int test_chunked_terminator_in_payload(void)
 {
     return chunk_body_case("5\r\n0\r\n\r\n", "\r\n4\r\nrest\r\n0\r\n\r\n",
@@ -890,51 +862,43 @@ static int test_chunked_size_line_ends_in_zero(void)
                            WOLFCERT_OK, "\r\nAAAAAAAAAAAAAA", 16);
 }
 
-/* A trailer field after the last chunk, so "0\r\n" is never followed by
- * a second CRLF. */
+/* "0\r\n" is followed by a trailer field instead of a second CRLF. */
 static int test_chunked_trailer_fields(void)
 {
     return chunk_body_case("5\r\nhello\r\n0\r\nX-Checksum: abc\r\n\r\n", NULL,
                            WOLFCERT_OK, "hello", 5);
 }
 
-/* The peer closing part-way through a chunk is a truncated response, not
- * a complete one. */
 static int test_chunked_truncated_close(void)
 {
     return chunk_body_case("5\r\nhel", NULL, WOLFCERT_ERR_IO, NULL, 0);
 }
 
-/* A body of nothing but the last chunk decodes to no body at all. */
 static int test_chunked_empty_body(void)
 {
     return chunk_body_case("0\r\n\r\n", NULL, WOLFCERT_OK, NULL, 0);
 }
 
-/* A trailer line with no field name is malformed framing, even though
- * the trailer itself is discarded. */
+/* A trailer line with no colon gets WOLFCERT_ERR_PROTOCOL. */
 static int test_chunked_trailer_no_colon(void)
 {
     return chunk_body_case("5\r\nhello\r\n0\r\ngarbage\r\n\r\n", NULL,
                            WOLFCERT_ERR_PROTOCOL, NULL, 0);
 }
 
-/* An empty field name is malformed too. */
 static int test_chunked_trailer_empty_name(void)
 {
     return chunk_body_case("5\r\nhello\r\n0\r\n: v\r\n\r\n", NULL,
                            WOLFCERT_ERR_PROTOCOL, NULL, 0);
 }
 
-/* Several well-formed trailer fields are accepted. */
 static int test_chunked_trailer_multiple(void)
 {
     return chunk_body_case("5\r\nhello\r\n0\r\nX-A: 1\r\nX-B: 2\r\n\r\n", NULL,
                            WOLFCERT_OK, "hello", 5);
 }
 
-/* A leading colon leaves no field name, even when a later colon on the
- * same line would look like one. */
+/* A leading colon leaves no field name despite the later colon. */
 static int test_chunked_trailer_leading_colon(void)
 {
     return chunk_body_case("5\r\nhello\r\n0\r\n:a:b\r\n\r\n", NULL,
@@ -948,16 +912,14 @@ static int test_chunked_uppercase_hex_size(void)
                            WOLFCERT_OK, "0123456789", 10);
 }
 
-/* RFC 9112 section 7.1.1: a chunk-size line may carry extensions after a
- * ';', and a recipient must ignore ones it does not recognize. */
+/* Unknown chunk extensions are ignored (RFC 9112 section 7.1.1). */
 static int test_chunked_extension(void)
 {
     return chunk_body_case("4;name=value\r\nbody\r\n0\r\n\r\n", NULL,
                            WOLFCERT_OK, "body", 4);
 }
 
-/* RFC 9112 section 7.1.1 puts BWS between the chunk size and the ';'
- * that opens an extension, so a space there decodes. */
+/* BWS before the ';' of a chunk-ext decodes (RFC 9112 section 7.1.1). */
 static int test_chunked_extension_bws(void)
 {
     return chunk_body_case("4 ;name=value\r\nbody\r\n0\r\n\r\n", NULL,
@@ -971,16 +933,14 @@ static int test_chunked_extension_bws_tab(void)
                            WOLFCERT_OK, "body", 4);
 }
 
-/* BWS is only allowed ahead of a chunk-ext, so a byte that is not a
- * ';' after it is malformed. */
+/* BWS followed by a byte other than ';' is malformed. */
 static int test_chunked_bws_not_extension(void)
 {
     return chunk_body_case("4 5\r\nbody\r\n0\r\n\r\n", NULL,
                            WOLFCERT_ERR_PROTOCOL, NULL, 0);
 }
 
-/* Whitespace after the size with no extension behind it is not in the
- * grammar. */
+/* Whitespace after the size with no extension is malformed. */
 static int test_chunked_size_trailing_space(void)
 {
     return chunk_body_case("4 \r\nbody\r\n0\r\n\r\n", NULL,
@@ -994,8 +954,7 @@ static int test_chunked_size_leading_space(void)
                            WOLFCERT_ERR_PROTOCOL, NULL, 0);
 }
 
-/* RFC 9112 section 5.2: a trailer line opening with SP or HTAB
- * continues the one before it, and the body framing stays valid. */
+/* A folded trailer line continues the previous one (RFC 9112 section 5.2). */
 static int test_chunked_trailer_obs_fold(void)
 {
     return chunk_body_case("5\r\nhello\r\n0\r\nX-Sum: abc\r\n\tdef\r\n\r\n",
@@ -1009,8 +968,7 @@ static int test_chunked_trailer_fold_first(void)
                            WOLFCERT_ERR_PROTOCOL, NULL, 0);
 }
 
-/* A non-hex chunk-size line is a framing error, not a zero-length chunk
- * ending the body early. */
+/* A non-hex chunk-size line is a framing error. */
 static int test_chunked_bad_hex_size(void)
 {
     return chunk_body_case("4\r\nbody\r\nzz\r\nxx\r\n0\r\n\r\n", NULL,
@@ -1024,8 +982,7 @@ static int test_chunked_empty_size(void)
                            WOLFCERT_ERR_PROTOCOL, NULL, 0);
 }
 
-/* RFC 9112 section 7.1 puts no bound on the digit count of a chunk-size
- * line, so a zero-padded one decodes like any other. */
+/* A zero-padded chunk-size line decodes (RFC 9112 section 7.1). */
 static int test_chunked_padded_size(void)
 {
     return chunk_body_case("000000004\r\nbody\r\n0\r\n\r\n", NULL,
@@ -1066,9 +1023,8 @@ static void* srv_trailer_split_thread(void* arg)
     return NULL;
 }
 
-/* A reader that calls the body complete before the whole trailer has
- * arrived leaves the rest on the socket, and the second request reads
- * it as a status line. */
+/* Two GETs on one keep-alive session with the first reply written as seg1
+ * then seg2; they get "hello" and "second". */
 static int trailer_split_case(const char* seg1, const char* seg2)
 {
     struct trailer_split_srv ctx = { 0 };
@@ -1117,8 +1073,7 @@ static int trailer_split_case(const char* seg1, const char* seg2)
     "\r\n" \
     "5\r\nhello\r\n0\r\n"
 
-/* A whole trailer-terminated response on a keep-alive connection: a
- * reader waiting for a bare "0\r\n\r\n" never finishes it. */
+/* The whole trailer arrives with the body; the second write is empty. */
 static int test_chunked_trailer_keepalive(void)
 {
     return trailer_split_case(WC_CHUNK_HEAD "X-T: 1\r\n\r\n", "");
@@ -1136,8 +1091,7 @@ static int test_chunked_trailer_split_terminator(void)
     return trailer_split_case(WC_CHUNK_HEAD "X-Checksum: abc\r\n", "\r\n");
 }
 
-/* A segment boundary can fall inside the chunk-size line itself, before
- * its CRLF has arrived. */
+/* A segment boundary inside the chunk-size line, before its CRLF. */
 static int test_chunked_size_line_split(void)
 {
     return chunk_body_case("1", "0\r\nAAAAAAAAAAAAAAAA\r\n0\r\n\r\n",
@@ -1158,16 +1112,14 @@ static int test_chunked_bad_chunk_delimiter(void)
                            WOLFCERT_ERR_PROTOCOL, NULL, 0);
 }
 
-/* A segment can end right after a chunk-size line, leaving no payload
- * and no room for the CRLF that follows it. */
+/* A segment ends right after a chunk-size line. */
 static int test_chunked_size_line_at_end(void)
 {
     return chunk_body_case("5\r\n", "hello\r\n0\r\n\r\n",
                            WOLFCERT_OK, "hello", 5);
 }
 
-/* A well-framed chunked body over max_response_bytes must be refused
- * rather than buffered. */
+/* A well-framed chunked body over max_response_bytes is refused. */
 static int oversize_chunk_case(const char* body)
 {
     struct chunk_srv ctx = { 0 };
@@ -1230,8 +1182,7 @@ static int test_chunked_over_max_accumulated(void)
 
 int main(void)
 {
-    /* A framing bug in this file's paths shows up as a hang, and
-     * `make check` applies no per-test timeout. */
+    /* make check has no per-test timeout, and a framing bug shows as a hang. */
     alarm(25);
 
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);

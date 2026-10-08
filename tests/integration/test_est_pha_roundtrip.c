@@ -17,25 +17,8 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * TLS 1.3 post-handshake authentication end-to-end over the keep-alive
- * EST session API.
- *
- * The server is configured with tls_post_handshake_auth=1 so the initial
- * handshake is anonymous. On one TLS connection we:
- *   1. Call /cacerts - the server must answer without asking for a
- *      client cert.
- *   2. Call /simpleenroll - the server must trigger a CertificateRequest
- *      via wolfSSL_request_certificate(); the client answers from the
- *      pre-loaded identity and the CSR is issued.
- * A raw TLS client then renews its cert with /simplereenroll over PHA, which
- * the client API cannot do: only sessions offer PHA, and they have no reenroll.
- *
- * Negative controls: a session without a client identity, and one with an
- * identity but no PHA opt-in, must both fail /simpleenroll while /cacerts
- * still succeeds, as it must for an anonymous TLS 1.2 client. A client that
- * never answers the CertificateRequest gets a 403 once the wait runs out.
- */
+/* TLS 1.3 post-handshake auth over the keep-alive EST session. Reenroll over
+ * PHA uses a raw TLS client, since sessions have no reenroll call. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -100,7 +83,8 @@ static int pha_reenroll(uint16_t port, const uint8_t* tls_cert, size_t tls_cert_
                  (unsigned)b64_len, (int)b64_len, (const char*)b64);
     REQUIRE(n > 0 && (size_t)n < sizeof(req));
 
-    /* On the CTX: wolfSSL unloads an SSL-level identity after the handshake. */
+    /* wolfSSL unloads an SSL-level identity after the handshake, so it goes
+     * on the CTX. */
     REQUIRE(test_tls_setup(&c, port, tls_cert, tls_cert_len) == 0);
     REQUIRE(wolfSSL_CTX_use_certificate_buffer(c.ctx, cli_cert, (long)cli_cert_len,
                                                WOLFSSL_FILETYPE_PEM) == WOLFSSL_SUCCESS);
@@ -171,9 +155,7 @@ int main(void)
     REQUIRE(mint_self_id("127.0.0.1", 0,
                         &tls_cert, &tls_cert_len, &tls_key, &tls_key_len) == 0);
 
-    /* Self-signed client CA that also serves as the client's presented
-     * identity for the PHA response - trivially validates against
-     * itself, same trick the mTLS roundtrip uses. */
+    /* Self-signed, so it is both the server's client CA and the client cert. */
     uint8_t* cli_cert = NULL;
     size_t cli_cert_len = 0;
     uint8_t* cli_key  = NULL;
@@ -226,7 +208,7 @@ int main(void)
     snprintf(url, sizeof(url), "https://127.0.0.1:%u/.well-known/est",
              wolfcert_server_port(srv));
 
-    /* --- Positive: session with client identity + PHA opt-in. */
+    /* Client identity and PHA opt-in. */
     {
         WolfCertServerCfg cli = {
             .protocol          = WOLFCERT_PROTO_EST,
@@ -248,8 +230,7 @@ int main(void)
         REQUIRE(wolfcert_est_session_get_cacerts(s, &ca_pem) == WOLFCERT_OK);
         REQUIRE(ca_pem.len > 0);
 
-        /* /simpleenroll on the same connection - this is the call that
-         * triggers the server's wolfSSL_request_certificate(). */
+        /* /simpleenroll triggers the server's CertificateRequest. */
         WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                                 .dev_id = WOLFCERT_DEVID_SOFTWARE };
         WolfCertKey* dk = NULL;
@@ -279,7 +260,7 @@ int main(void)
         wolfcert_est_session_close(s);
     }
 
-    /* --- Negative: no client identity, so the PHA prompt finds nothing. */
+    /* No client identity to answer the CertificateRequest. */
     {
         WolfCertServerCfg cli = {
             .protocol          = WOLFCERT_PROTO_EST,
@@ -292,8 +273,7 @@ int main(void)
         REQUIRE(expect_enroll_refused(&cli, "CN=pha-negative") == 0);
     }
 
-    /* --- Negative: identity but no PHA opt-in; the server never asks for
-     * the cert during the handshake, so it cannot authenticate. */
+    /* Client identity without the PHA opt-in. */
     {
         WolfCertServerCfg cli = {
             .protocol          = WOLFCERT_PROTO_EST,
@@ -310,12 +290,11 @@ int main(void)
     }
 
 #ifdef WOLFSSL_POST_HANDSHAKE_AUTH
-    /* --- /simplereenroll checks the CSR against the cert sent over PHA. */
+    /* Reenroll over PHA with a CSR for cli_cert's own subject gets 200. */
     REQUIRE(pha_reenroll(wolfcert_server_port(srv), tls_cert, tls_cert_len,
                          cli_cert, cli_cert_len, cli_key, cli_key_len) == 0);
 
-    /* --- A PHA client that never answers the CertificateRequest gets a 403
-     * once the server stops waiting, well before the request deadline. */
+    /* A client that never answers the CertificateRequest gets a 403. */
     {
         static const char req[] =
             "POST /.well-known/est/simpleenroll HTTP/1.1\r\n"
@@ -330,7 +309,7 @@ int main(void)
 
         REQUIRE(test_tls_setup(&c, wolfcert_server_port(srv),
                                tls_cert, tls_cert_len) == 0);
-        /* Fail fast rather than hang if the server's deadline breaks. */
+        /* Bounds the read in case the server never stops waiting. */
         REQUIRE(setsockopt(c.fd, SOL_SOCKET, SO_RCVTIMEO, &tv,
                            sizeof(tv)) == 0);
         REQUIRE(wolfSSL_allow_post_handshake_auth(c.ssl) == 0);
@@ -344,9 +323,9 @@ int main(void)
     }
 #endif
 
-/* TLS 1.2 needs ECDHE here: the test server loads no DH parameters. */
+/* The test server loads no DH parameters, so TLS 1.2 needs ECDHE. */
 #if !defined(WOLFSSL_NO_TLS12) && defined(HAVE_ECC)
-    /* --- A TLS 1.2 client cannot do PHA but must still reach /cacerts. */
+    /* A TLS 1.2 client, without PHA, still reaches /cacerts. */
     {
         static const char req[] =
             "GET /.well-known/est/cacerts HTTP/1.1\r\n"

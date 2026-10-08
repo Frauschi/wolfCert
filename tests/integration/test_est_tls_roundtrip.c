@@ -17,16 +17,8 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * End-to-end HTTPS EST roundtrip: stands up wolfcert-server behind its
- * built-in TLS terminator (new v0.2 feature), then runs wolfcert-client
- * against it over HTTPS, pinning the freshly-minted server cert as the
- * bootstrap trust anchor. Verifies that:
- *   - wolfcert_server_start() accepts --tls-cert/--tls-key-equivalent config,
- *   - the accept loop terminates TLS and dispatches to the EST handler,
- *   - the protocol handler's read/send helpers work through the TLS layer,
- *   - wolfcert_est_simple_enroll() drives the full TLS + EST round trip.
- */
+/* EST over the server's built-in TLS terminator, and the start-time checks
+ * on an EST listener. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -129,8 +121,6 @@ static int same_public_key(const uint8_t* a, size_t a_len, const uint8_t* b,
 }
 #endif
 
-/* Reenroll with a mismatched meta, with a renaming customize callback, then
- * with a fresh key, against a server that trusts the cert being renewed. */
 static int test_client_reenroll_keeps_identity(const uint8_t* tls_cert,
                                                size_t tls_cert_len,
                                                const uint8_t* tls_key,
@@ -283,7 +273,7 @@ int main(void)
     size_t tls_key_len  = 0;
     REQUIRE(gen_server_identity(&tls_cert, &tls_cert_len, &tls_key, &tls_key_len) == 0);
 
-    /* An EST listener with no TLS identity must be refused at start. */
+    /* An EST listener without a TLS identity is refused at start. */
     WolfCertStoreOps* plain_store = wolfcert_store_memory_open(NULL);
     REQUIRE(plain_store != NULL);
     WolfCertServerCfgSrv plain = {
@@ -296,8 +286,7 @@ int main(void)
     REQUIRE(wolfcert_server_start(&plain, &plain_srv) == WOLFCERT_ERR_TLS);
     REQUIRE(plain_srv == NULL);
 
-    /* The rejection must land before the CA is minted, so the caller is not
-     * left with a CA it never asked for -- one the next start would adopt. */
+    /* The refusal comes before a CA is minted into the store. */
     WolfCertBuffer leftover = { 0 };
     REQUIRE(plain_store->read(plain_store->ctx, "ca.cert.der", &leftover)
             == WOLFCERT_ERR_NOT_FOUND);
@@ -305,7 +294,7 @@ int main(void)
             == WOLFCERT_ERR_NOT_FOUND);
     wolfcert_store_memory_close(plain_store);
 
-    /* Nor may it start with no way to authenticate an enrolling client. */
+    /* An EST listener with no way to authenticate a client is refused too. */
     WolfCertServerCfgSrv open_cfg = {
         .protocol         = WOLFCERT_PROTO_EST,
         .bind_host        = "127.0.0.1",
@@ -328,8 +317,8 @@ int main(void)
     REQUIRE(wolfcert_server_start(&open_cfg, &open_srv) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(open_srv == NULL);
 
-    /* serve_fd() has no TLS: a client CA alone admits nobody, Basic or the
-     * anonymous opt-in let the request through to the CA. */
+    /* Over serve_fd(): Basic or anonymous enroll reaches the CA (400); a client
+     * CA alone gets 403. */
     open_cfg.http_basic_pass = "secret";
     REQUIRE(serve_fd_enroll(&open_cfg,
                             "Authorization: Basic YWxpY2U6c2VjcmV0\r\n",
@@ -368,12 +357,10 @@ int main(void)
         .verify_server     = 1,
     };
 
-    /* Fetch the CA chain from the server - this hits the TLS path end-to-end. */
     WolfCertBuffer ca_pem = { 0 };
     REQUIRE(wolfcert_est_get_cacerts(&cli, &ca_pem) == WOLFCERT_OK);
     REQUIRE(ca_pem.len > 0);
 
-    /* Generate a device key, build CSR, enroll over HTTPS. */
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* dk = NULL;
@@ -391,8 +378,7 @@ int main(void)
     REQUIRE(memmem(issued.data, issued.len, "tls-est-client", 14) != NULL ||
             issued.len > 0);   /* PEM carries subject in DER, not ASCII */
 
-    /* DER trust-anchor coverage: the same anchor as DER must drive the TLS
-     * load path (buffer_is_der -> WOLFSSL_FILETYPE_ASN1) just as well as PEM. */
+    /* The same trust anchor in DER form. */
     DerBuffer* ta_der = NULL;
     REQUIRE(wc_PemToDer(tls_cert, (long)tls_cert_len, CERT_TYPE,
                         &ta_der, NULL, NULL, NULL) == 0);

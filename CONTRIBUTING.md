@@ -65,6 +65,8 @@ CI is broad and occasionally flaky. If a failure looks unrelated to your change,
 - **C11.** wolfCert builds as C11 (`CMAKE_C_STANDARD 11`). Follow the declaration style of the file you are editing.
 - **`/* ... */` comments only.** No `//` comments in C sources.
 - **Comments name what the code cannot show.** Most code needs none. When one is needed, keep it to one or two lines: a spec or hardware constraint, a workaround for another project's bug, or a trap a later edit would reintroduce. Do not restate the code, narrate the steps, or explain what a called function does. Comments on public types and functions in `wolfcert/*.h` are the API reference and may run longer to document the contract.
+- **A header contract states what a caller handles:** ownership, what NULL or 0 means, units, and the return codes and PENDING outcomes. Rules shared by a family of calls go once, on the typedef.
+- **A test comment names the case it exercises:** the input and the expected outcome. The contract of the function under test stays in its header.
 - **Long explanations go in the commit message.** Design reasoning, alternatives not taken, performance figures and history go stale in the source. No banner blocks or theory-of-operation headers.
 - **Avoid `goto`.** We discourage it in new code. Some existing cleanup paths use it, but prefer a single exit point with a return-code variable over adding more.
 - **Check every return code.** Do not ignore an error return, and do not add always-succeeds stubs - return a "not implemented" error instead.

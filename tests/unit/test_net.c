@@ -17,13 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Covers the built-in POSIX transport (wolfcert_posix_connect), in particular
- * the timeout path: a positive timeout_ms must drive the non-blocking
- * connect + poll machinery (success case against a local listener) and must
- * bound a connect to an unreachable host instead of hanging on the OS default
- * (~75s).
- */
+/* Built-in POSIX transport: connect timeout and SIGPIPE suppression. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -58,7 +52,6 @@ static long mono_ms(void)
     return (long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 }
 
-/* Set by note_sigpipe(); a library write must leave it clear. */
 static volatile sig_atomic_t g_sigpipe_raised;
 
 static void note_sigpipe(int sig)
@@ -67,24 +60,20 @@ static void note_sigpipe(int sig)
     g_sigpipe_raised = 1;
 }
 
-/* Write to a socketpair whose peer is closed, handler armed. `nosigpipe`
- * applies the socket option wolfcert_posix_connect() sets; `raw` sends with
- * flags 0, so only that option can suppress the signal. */
+/* `nosigpipe` sets the socket option; `raw` sends with flags 0. */
 static int write_to_dead_peer(int nosigpipe, int raw, int* out_rc)
 {
     static const uint8_t body[256] = { 0 };
     struct sigaction     sa, old;
     int                  sv[2];
 
-    /* Before closing the peer: setsockopt(SO_NOSIGPIPE) fails with EINVAL
-     * once the peer is gone. */
+    /* SO_NOSIGPIPE fails with EINVAL once the peer is closed. */
     REQUIRE(socketpair(AF_UNIX, SOCK_STREAM, 0, sv) == 0);
     if (nosigpipe)
         wolfcert_sock_nosigpipe(sv[0]);
     close(sv[1]);
 
-    /* Catch, not ignore, so "not raised" differs from "raised and
-     * swallowed"; CI runs every test with SIGPIPE ignored. */
+    /* Catch the signal since CI runs every test with SIGPIPE ignored. */
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = note_sigpipe;
     sigemptyset(&sa.sa_mask);
@@ -103,7 +92,6 @@ static int write_to_dead_peer(int nosigpipe, int raw, int* out_rc)
     return 0;
 }
 
-/* Both arms in force. WOLFCERT_ERR_IO pins that the write reached send(). */
 static int test_no_sigpipe_on_dead_peer(void)
 {
     int rc = 0;
@@ -116,7 +104,6 @@ static int test_no_sigpipe_on_dead_peer(void)
 }
 
 #ifdef MSG_NOSIGNAL
-/* No socket option: the send flag alone must suppress the signal. */
 static int test_send_flag_alone_suppresses(void)
 {
     int rc = 0;
@@ -130,8 +117,6 @@ static int test_send_flag_alone_suppresses(void)
 #endif
 
 #ifdef SO_NOSIGPIPE
-/* Flags 0, so wolfcert_sock_nosigpipe() alone must suppress the signal. Pins
- * its level, name and call order, which the discarded return cannot report. */
 static int test_sock_nosigpipe_suppresses(void)
 {
     int rc = 0;
@@ -146,9 +131,7 @@ static int test_sock_nosigpipe_suppresses(void)
 
 int main(void)
 {
-    /* Success path with a positive timeout: stand up a loopback listener and
-     * connect to it. timeout_ms > 0 exercises the non-blocking connect + poll
-     * + SO_ERROR branch deterministically. */
+    /* Connect with a 1000 ms timeout to a loopback listener succeeds. */
     int ls = socket(AF_INET, SOCK_STREAM, 0);
     REQUIRE(ls >= 0);
     struct sockaddr_in sa;
@@ -167,10 +150,7 @@ int main(void)
     close(fd);
     close(ls);
 
-    /* Timeout path: an unroutable address must fail (fd < 0) and return fast.
-     * Without the timeout this would block on the OS default (~75s); we only
-     * assert it stays well under that, so the test is robust whether the host
-     * times out at ~250ms or fast-fails with no route. */
+    /* An unroutable address must fail well under the OS default (~75s). */
     long t0 = mono_ms();
     int fd2 = wolfcert_posix_connect("10.255.255.1", 9, 250, NULL);
     long elapsed = mono_ms() - t0;

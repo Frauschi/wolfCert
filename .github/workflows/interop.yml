@@ -1,10 +1,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 name: Interop
 
-# Third-party EST/SCEP interop. Best-effort: a dependency that fails to install
-# makes its script exit 77 (the automake "skip" convention wired into
-# tests/interop/lib/common.sh via need()), which we treat as a neutral pass.
-# A real interop regression (any other non-zero) fails the job.
+# Third-party EST/SCEP interop. A script exits 77 when its peer failed to
+# install, which counts as a neutral pass.
 on:
   schedule:
     - cron: "0 4 * * *"
@@ -21,13 +19,9 @@ env:
   WOLFSSL_REF: master
 
 jobs:
-  # OpenSSL is always present -> a cheap lower-bound cross-check.
   openssl:
     name: openssl pkcs7/x509 cross-check
-    # Pinned to 26.04 (OpenSSL >= 3.5) so the cross-check covers ML-DSA keys;
-    # ubuntu-latest still ships OpenSSL 3.0, which cannot parse ML-DSA. The
-    # script probes for support, so an older image degrades to classical/EdDSA
-    # rather than failing.
+    # 26.04 has OpenSSL >= 3.5 for ML-DSA; ubuntu-latest still ships 3.0.
     runs-on: ubuntu-26.04
     timeout-minutes: 25
     steps:
@@ -80,8 +74,6 @@ jobs:
           go install github.com/globalsign/est/cmd/estclient@latest
       - name: Run est_globalsign.sh
         run: |
-          # setup-go puts binaries in $(go env GOPATH)/bin. The script uses
-          # GLOBALSIGN_EST_BIN_DIR to disambiguate from libest's same-named bins.
           GLOBALSIGN_EST_BIN_DIR="$(go env GOPATH)/bin"
           export GLOBALSIGN_EST_BIN_DIR
           export PATH="$GLOBALSIGN_EST_BIN_DIR:$PATH"
@@ -106,12 +98,9 @@ jobs:
           sudo apt-get install -y libssl-dev
           git clone --depth 1 https://github.com/cisco/libest "$RUNNER_TEMP/libest"
           cd "$RUNNER_TEMP/libest"
-          # libest is archived and built for OpenSSL 1.x. OpenSSL 3.0 removed
-          # FIPS_mode()/FIPS_mode_set(), which libest still calls, so the link
-          # fails. Force-include a compat header that turns both into no-ops;
-          # doing it in a header (not -D) keeps the macro parens off gcc's
-          # command line. --disable-safec: libest now requires an explicit
-          # safec choice and we don't need the bounds-checked string library.
+          # OpenSSL 3.0 removed FIPS_mode()/FIPS_mode_set(), which libest calls;
+          # stub them in a -include header, since parens in -D break CFLAGS.
+          # libest's configure fails without an explicit safec choice.
           printf '%s\n' '#define FIPS_mode() 0' '#define FIPS_mode_set(x) 0' \
             > "$RUNNER_TEMP/fips_compat.h"
           ./configure --prefix="$RUNNER_TEMP/libest-install" --with-ssl-dir=/usr \
@@ -142,8 +131,7 @@ jobs:
       - name: Install step-ca and step CLI
         continue-on-error: true
         run: |
-          # step-ca's cgo build links libpcsclite (PC/SC, for PIV/YubiKey
-          # provisioners); without its pkg-config file the build aborts.
+          # step-ca's cgo build links libpcsclite.
           sudo apt-get install -y libpcsclite-dev
           go install github.com/smallstep/certificates/cmd/step-ca@latest
           go install github.com/smallstep/cli/cmd/step@latest

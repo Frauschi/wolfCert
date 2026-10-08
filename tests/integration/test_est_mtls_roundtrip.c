@@ -17,33 +17,8 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * End-to-end mutual-TLS EST roundtrip. Stands up wolfcert-server with
- *   --tls-cert + --tls-key         (server identity)
- *   --tls-client-ca                (mandate client-cert auth)
- * then runs wolfcert-client through wolfcert_est_simple_enroll with
- *   client_cert / client_key set on WolfCertServerCfg.
- *
- * Seven assertions:
- *   1. mTLS works: a client that does NOT present a certificate is
- *      rejected by the TLS handshake.
- *   2. mTLS works: a client that DOES present a cert signed by the
- *      configured trust anchor enrolls successfully.
- *   3. /simplereenroll presents the cert being renewed even when
- *      client_cert names a different, untrusted identity.
- *   4. /simplereenroll refuses a CSR whose Subject or SAN differs from
- *      the cert being renewed.
- *   5. /simplereenroll accepts a renewal of a multi-SAN cert the server's
- *      own CA issued, but not one that changes a SAN entry or marks it critical.
- *   6. /simplereenroll answers a body that is not a PKCS#10 request with 400.
- *   7. With manual approval on, a mismatched reenroll is refused at once
- *      instead of being parked.
- *
- * Exercises the TLS 1.3 negotiation path (wolfTLS_client_method /
- * wolfTLS_server_method) and the new client_cert plumbing on
- * WolfCertServerCfg, covering the "bootstrap with a factory identity"
- * deployment shape documented in NEWS.
- */
+/* EST over mutual TLS: enrollment with and without a client cert, and the
+ * /simplereenroll identity checks. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -73,8 +48,6 @@
             return 1;                                                       \
         }                                                                   \
     } while (0)
-
-/* Build a self-signed RSA identity suitable for TLS usage. */
 
 static void* server_thread(void* arg) { wolfcert_server_run((WolfCertServer*)arg); return NULL; }
 
@@ -139,8 +112,6 @@ static int test_reenroll_ignores_cfg_identity(const char* url,
     return 0;
 }
 
-/* Re-enroll cli_cert with a CSR whose Subject or SAN differs from it; the
- * server must refuse to issue. */
 static int test_reenroll_rejects_identity_change(const char* url,
                                                  const uint8_t* tls_cert, size_t tls_cert_len,
                                                  const uint8_t* cli_cert, size_t cli_cert_len,
@@ -186,7 +157,7 @@ static int test_reenroll_rejects_identity_change(const char* url,
     return 0;
 }
 
-/* A reenroll body that is DER but not PKCS#10 is the client's fault: 400. */
+/* A DER reenroll body that is not PKCS#10 gets a 400. */
 static int test_reenroll_rejects_non_csr(const char* url,
                                          const uint8_t* tls_cert, size_t tls_cert_len,
                                          const uint8_t* cli_cert, size_t cli_cert_len,
@@ -286,8 +257,8 @@ static int csr_with_critical_san(const WolfCertBuffer* cert_pem,
 }
 #endif
 
-/* Enroll a multi-RDN, multi-SAN identity through the server's own CA, then
- * renew it: the CA's re-encoding must pass the reenroll identity check. */
+/* Reenroll of a multi-RDN, multi-SAN cert the server CA issued succeeds; a
+ * changed dNSName or a critical SAN (ECC builds) gets 400. */
 static int test_reenroll_server_issued(const uint8_t* tls_cert, size_t tls_cert_len,
                                        const uint8_t* tls_key, size_t tls_key_len,
                                        const uint8_t* cli_cert, size_t cli_cert_len,
@@ -538,10 +509,7 @@ int main(void)
     REQUIRE(mint_self_id("127.0.0.1", 0,
                         &tls_cert, &tls_cert_len, &tls_key, &tls_key_len) == 0);
 
-    /* Self-signed "bootstrap CA" that we both pin as the server's
-     * tls_client_ca_pem AND use as the client's presented cert - a
-     * single self-signed cert trivially validates against itself. This
-     * keeps the test self-contained without a separate issuing step. */
+    /* Self-signed, so it is both the server's client CA and the client cert. */
     uint8_t* cli_cert = NULL;
     size_t cli_cert_len = 0;
     uint8_t* cli_key  = NULL;
@@ -566,7 +534,7 @@ int main(void)
     snprintf(url, sizeof(url), "https://127.0.0.1:%u/.well-known/est",
              wolfcert_server_port(srv));
 
-    /* --- Case 1: NO client identity -> TLS handshake must be refused. */
+    /* Without a client identity the handshake fails. */
     {
         WolfCertServerCfg cli = {
             .protocol          = WOLFCERT_PROTO_EST,
@@ -576,12 +544,11 @@ int main(void)
         };
         WolfCertBuffer ca_pem = { 0 };
         int rc = wolfcert_est_get_cacerts(&cli, &ca_pem);
-        REQUIRE(rc != WOLFCERT_OK);              /* handshake rejected */
+        REQUIRE(rc != WOLFCERT_OK);
         if (rc == WOLFCERT_OK)
             wolfcert_buffer_free(&ca_pem);
     }
 
-    /* --- Case 2: with client identity -> enrollment succeeds. */
     {
         WolfCertServerCfg cli = {
             .protocol          = WOLFCERT_PROTO_EST,
@@ -621,22 +588,16 @@ int main(void)
     }
 
 #ifdef KEEP_PEER_CERT
-    /* --- Case 3: reenroll presents the cert being renewed, not cfg's. */
     REQUIRE(test_reenroll_ignores_cfg_identity(url, tls_cert, tls_cert_len,
                                                cli_cert, cli_cert_len,
                                                cli_key, cli_key_len) == 0);
-
-    /* --- Case 4: reenroll may not change the Subject or SAN. */
     REQUIRE(test_reenroll_rejects_identity_change(url, tls_cert, tls_cert_len,
                                                   cli_cert, cli_cert_len,
                                                   cli_key, cli_key_len) == 0);
-
-    /* --- Case 6: a body that is not a CSR is a 400, not a server error. */
     REQUIRE(test_reenroll_rejects_non_csr(url, tls_cert, tls_cert_len,
                                           cli_cert, cli_cert_len,
                                           cli_key, cli_key_len) == 0);
 #else
-    /* --- Without KEEP_PEER_CERT an mTLS reenroll is a 500, not an issue. */
     REQUIRE(test_reenroll_needs_peer_cert(url, tls_cert, tls_cert_len,
                                           cli_cert, cli_cert_len,
                                           cli_key, cli_key_len) == 0);
@@ -648,13 +609,10 @@ int main(void)
     wolfcert_server_free(srv);
 
 #ifdef KEEP_PEER_CERT
-    /* --- Case 5: renew a server-issued cert carrying several SANs. */
     REQUIRE(test_reenroll_server_issued(tls_cert, tls_cert_len,
                                         tls_key, tls_key_len,
                                         cli_cert, cli_cert_len,
                                         cli_key, cli_key_len) == 0);
-
-    /* --- Case 7: under manual approval a mismatch is refused, not parked. */
     REQUIRE(test_reenroll_mismatch_not_parked(tls_cert, tls_cert_len,
                                               tls_key, tls_key_len,
                                               cli_cert, cli_cert_len,

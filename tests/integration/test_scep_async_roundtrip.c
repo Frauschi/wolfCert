@@ -18,14 +18,8 @@
  */
 
 /*
- * End-to-end non-blocking SCEP session driven through a real poll(2) loop.
- * Exercises:
- *   - wolfcert_scep_session_open_async over plaintext HTTP,
- *   - wolfcert_scep_session_pkcs_req_nb (direct enrollment -> SUCCESS),
- *   - a PENDING enrollment followed by wolfcert_scep_session_get_cert_initial_nb
- *     on the same keep-alive connection (-> SUCCESS),
- * all pumped through poll() between WOLFCERT_ERR_WANT_READ / _WANT_WRITE
- * returns. The async counterpart to test_scep_roundtrip / test_scep_poll_roundtrip.
+ * SCEP sessions against the in-tree server: non-blocking calls pumped through
+ * poll(2), the blocking session wrappers, and the session guards.
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -60,8 +54,7 @@
         }                                                                   \
     } while (0)
 
-/* Like REQUIRE but jumps to a function-local `cleanup:` label (setting ret=1)
- * so a scenario holding open sessions/allocations releases them on failure. */
+/* REQUIRE that sets ret = 1 and jumps to the local `cleanup:` label. */
 #define REQUIRE_CLEAN(cond) \
     do {                                                                    \
         if (!(cond)) {                                                      \
@@ -76,8 +69,7 @@ static void* server_thread(void* arg)
     return NULL;
 }
 
-/* wolfcert/scep.h: an entry point defines *out before any other argument check,
- * so a rejected call still hands back something safe to free. */
+/* 1 if *r is UNSET with no buffers, fail_info -1 and no heap. */
 static int result_is_defined(const WolfCertScepResult* r)
 {
     return r->status == WOLFCERT_SCEP_STATUS_UNSET &&
@@ -86,8 +78,8 @@ static int result_is_defined(const WolfCertScepResult* r)
            r->fail_info == -1 && r->heap == NULL;
 }
 
-/* Assert a poisoned result was both rejected and cleared. An undefined *r still
- * holds the poison, so zero it before failing: cleanup must not free that. */
+/* Nonzero if a poisoned result was rejected and cleared. An undefined *r is
+ * zeroed so cleanup does not free the poison. */
 static int poisoned_call_rejected(int rc, WolfCertScepResult* r)
 {
     if (!result_is_defined(r)) {
@@ -97,20 +89,11 @@ static int poisoned_call_rejected(int rc, WolfCertScepResult* r)
     return rc == WOLFCERT_ERR_BAD_ARG;
 }
 
-/* Generous poll ceiling so a legitimately slow WANT_READ/WANT_WRITE wait on a
- * loaded CI host is not mistaken for a hang. */
+/* Generous enough for a loaded CI host. */
 #define SCEP_ASYNC_POLL_TIMEOUT_MS 30000
 
-/* poll() until the session's fd is ready for the direction it asked for.
- * Returns 0 on ready, -1 on timeout or poll error - both are fatal for the pump
- * but are logged distinctly so a timeout is not confused with a syscall error.
- *
- * A positive poll() return does not mean the fd is healthy: POLLERR and
- * POLLNVAL are reported in revents regardless of what was requested, and
- * looping on them would spin instead of failing, so treat them as fatal.
- * POLLHUP is deliberately not fatal - a peer that closed after sending a
- * complete response still has readable data, and letting the pump read it
- * surfaces either the response or a clean EOF error from the session. */
+/* Returns 0 once fd is ready for the direction rc asks for, else -1. POLLHUP
+ * is not fatal since a peer that closed may still have a full reply queued. */
 static int wait_ready(int fd, int rc)
 {
     struct pollfd p = {
@@ -231,10 +214,7 @@ static int bootstrap(const WolfCertServerCfg* cli, const char* cn,
     return 0;
 }
 
-/* Scenario A: an auto-approving server issues immediately over an async
- * PKCSReq, then a blocking session runs enroll + RenewalReq to completion.
- * Every allocation is released through the single cleanup: label so a REQUIRE
- * failure cannot leak the open sessions or buffers. */
+/* Scenario A: async PKCSReq, then blocking enroll and RenewalReq. */
 static int async_enroll_path(WolfCertServer* s)
 {
     char url[128];
@@ -271,8 +251,7 @@ static int async_enroll_path(WolfCertServer* s)
     REQUIRE_CLEAN(r.status == WOLFCERT_SCEP_STATUS_SUCCESS);
     REQUIRE_CLEAN(memmem(r.cert_pem.data, r.cert_pem.len, "BEGIN CERTIFICATE", 17) != NULL);
 
-    /* Close the async session before opening the blocking one: the single-
-     * threaded test server serves one connection at a time. */
+    /* The single-threaded test server serves one connection at a time. */
     wolfcert_scep_session_close(sess);
     sess = NULL;
 
@@ -284,8 +263,7 @@ static int async_enroll_path(WolfCertServer* s)
                 dk2, csr2.data, csr2.len, &rb) == WOLFCERT_OK);
     REQUIRE_CLEAN(rb.status == WOLFCERT_SCEP_STATUS_SUCCESS);
 
-    /* Blocking-session RenewalReq on the same keep-alive connection, covering
-     * wolfcert_scep_session_renewal_req_ex. */
+    /* RenewalReq on the same keep-alive connection. */
     REQUIRE_CLEAN(wc_PemToDer(rb.cert_pem.data, (long)rb.cert_pem.len, CERT_TYPE,
                         &rb_der, NULL, NULL, NULL) == 0);
     REQUIRE_CLEAN(wolfcert_scep_session_renewal_req_ex(bsess, &caps,
@@ -317,8 +295,7 @@ cleanup:
     return ret;
 }
 
-/* Scenario B: an approval-required server returns PENDING, then issues on the
- * follow-up GetCertInitial - both round trips async on one keep-alive session. */
+/* Scenario B: async PENDING, then async GetCertInitial on one session. */
 static int async_poll_path(WolfCertServer* s)
 {
     char url[128];
@@ -369,10 +346,7 @@ cleanup:
     return ret;
 }
 
-/* Scenario C: async enroll, then an async RenewalReq re-using the same
- * keep-alive session. current_cert/current_key sign the renewal pkiMessage;
- * the auto-approving server issues immediately. Covers
- * wolfcert_scep_session_renewal_req_nb. */
+/* Scenario C: async enroll, then async RenewalReq on the same session. */
 static int async_renewal_path(WolfCertServer* s)
 {
     char url[128];
@@ -396,7 +370,7 @@ static int async_renewal_path(WolfCertServer* s)
 
     REQUIRE_CLEAN(wolfcert_scep_session_open_async(&cli, &sess) == WOLFCERT_OK);
 
-    /* First round trip: an initial enrollment to obtain the cert we then renew. */
+    /* First round trip: enroll to obtain the cert to renew. */
     REQUIRE_CLEAN(pump_pkcs_req(sess, &caps, ca_der->buffer, ca_der->length,
                           dk, csr.data, csr.len, &r1) == 0);
     REQUIRE_CLEAN(r1.status == WOLFCERT_SCEP_STATUS_SUCCESS);
@@ -404,8 +378,7 @@ static int async_renewal_path(WolfCertServer* s)
     REQUIRE_CLEAN(wc_PemToDer(r1.cert_pem.data, (long)r1.cert_pem.len, CERT_TYPE,
                         &cur_der, NULL, NULL, NULL) == 0);
 
-    /* Second round trip on the same connection: RenewalReq signed by the cert
-     * just issued (the CSR carries the - here unchanged - public key). */
+    /* Second round trip: RenewalReq signed by the cert just issued. */
     REQUIRE_CLEAN(pump_renewal_req(sess, &caps, ca_der->buffer, ca_der->length,
                              cur_der->buffer, cur_der->length,
                              dk, csr.data, csr.len, &r2) == 0);
@@ -429,13 +402,8 @@ cleanup:
     return ret;
 }
 
-/* Scenario D: session misuse guards. Covers (1) the mode guards that reject an
- * _ex call on an async session and an _nb call on a blocking session, and (2)
- * the in_op guard that rejects starting a different operation while one is
- * already in flight. The in-flight state is held deterministically by pointing
- * the guard sessions at a black-hole listener (accepts the connect, never
- * answers) instead of the real server, so the first non-blocking pump always
- * returns WANT_* regardless of host speed. */
+/* Scenario D: _nb on a blocking session, _ex on an async one, and a second
+ * call mid-request with another result pointer or operation all get BAD_ARG. */
 static int async_guard_path(WolfCertServer* s)
 {
     char real_url[128];
@@ -457,8 +425,6 @@ static int async_guard_path(WolfCertServer* s)
     int rc = 0;
     int ret = 1;
 
-    /* Real server: fetch caps + CA and generate a valid key/CSR so the
-     * pkiMessage the in-flight guard builds is well-formed. */
     snprintf(real_url, sizeof(real_url), "http://127.0.0.1:%u/scep",
              wolfcert_server_port(s));
     cli_real = (WolfCertServerCfg){ .protocol = WOLFCERT_PROTO_SCEP,
@@ -466,8 +432,7 @@ static int async_guard_path(WolfCertServer* s)
     REQUIRE_CLEAN(bootstrap(&cli_real, "CN=async-scep-guard", &caps, &ca_pem,
                             &ca_der, &dk, &csr) == 0);
 
-    /* Point the guard sessions at a black hole so a non-blocking request stays
-     * in flight deterministically (see black_hole_listener). */
+    /* A request to the black hole stays in flight regardless of host speed. */
     bh_fd = black_hole_listener(&bh_port);
     REQUIRE_CLEAN(bh_fd >= 0);
     snprintf(bh_url, sizeof(bh_url), "http://127.0.0.1:%u/scep", (unsigned)bh_port);
@@ -487,22 +452,14 @@ static int async_guard_path(WolfCertServer* s)
                 ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
                 dk, csr.data, csr.len, &rbad) == WOLFCERT_ERR_BAD_ARG);
 
-    /* in_op guard: begin a PKCSReq against the black hole and leave it in
-     * flight, then attempt a different operation on the same session. The peer
-     * completes the TCP connect but never answers, so the first pump always
-     * returns WANT_* with the request in flight - the in-flight state is
-     * independent of host speed, closing the timing hole a real server would
-     * open by occasionally replying before the client's first read. */
+    /* Leave a PKCSReq to the black hole in flight for the guard checks. */
     rc = wolfcert_scep_session_pkcs_req_nb(asess, &caps,
                 ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
                 dk, csr.data, csr.len, &r1);
     REQUIRE_CLEAN(rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);
 
-    /* out-pointer guard: resuming the in-flight PKCSReq (same operation) with a
-     * different WolfCertScepResult* than the one captured at begin is rejected,
-     * rather than writing the eventual result to the wrong object. The rejected
-     * object must still come back defined - wolfcert/scep.h promises a caller
-     * can free the result on any outcome - so poison it first. */
+    /* out-pointer guard: resuming with a different result pointer is rejected,
+     * and the poisoned result still comes back defined. */
     memset(&r2, 0xA5, sizeof(r2));
     REQUIRE_CLEAN(poisoned_call_rejected(
                 wolfcert_scep_session_pkcs_req_nb(asess, &caps,
@@ -524,8 +481,8 @@ static int async_guard_path(WolfCertServer* s)
                 NULL, 0, dk, csr.data, csr.len, csr.data, csr.len, &r2),
             &r2));
 
-    /* The complement: a resume on the session's own result must not clear it.
-     * Nothing reaches *out before the reply, so sentinel what a clear resets. */
+    /* A resume on the session's own result leaves it intact; fail_info 42 is
+     * a sentinel that a clear would reset. */
     r1.fail_info = 42;
     rc = wolfcert_scep_session_pkcs_req_nb(asess, &caps,
                 ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
@@ -533,8 +490,7 @@ static int async_guard_path(WolfCertServer* s)
     REQUIRE_CLEAN(rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);
     REQUIRE_CLEAN(r1.fail_info == 42);
 
-    /* Same rule on the blocking wrappers: an _ex call rejected on an async
-     * session must leave the in-flight result alone, not clear it. */
+    /* An _ex call rejected on an async session leaves the result intact. */
     REQUIRE_CLEAN(wolfcert_scep_session_pkcs_req_ex(asess, &caps,
                 ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
                 dk, csr.data, csr.len, &r1) == WOLFCERT_ERR_BAD_ARG);
@@ -545,7 +501,7 @@ cleanup:
     if (bsess != NULL)
         wolfcert_scep_session_close(bsess);
     if (asess != NULL)
-        wolfcert_scep_session_close(asess);   /* resets any in-flight PKCSReq cleanly */
+        wolfcert_scep_session_close(asess);
     if (bh_fd >= 0)
         close(bh_fd);
     wolfcert_scep_result_free(&r1);
@@ -560,11 +516,8 @@ cleanup:
     return ret;
 }
 
-/* Scenario E: the blocking mirror of scenario B. A blocking session drives
- * PKCSReq -> PENDING then GetCertInitial -> SUCCESS on one keep-alive
- * connection, covering wolfcert_scep_session_get_cert_initial_ex. Also checks
- * that a transactionID far longer than the generated 32-hex one is carried
- * rather than rejected, since the client imposes no length bound of its own. */
+/* Scenario E: blocking PENDING then GetCertInitial; a 200-byte transactionID
+ * gets badCertId and one containing '_' gets WOLFCERT_ERR_BAD_ARG. */
 static int blocking_poll_path(WolfCertServer* s)
 {
     char url[128];
@@ -603,9 +556,6 @@ static int blocking_poll_path(WolfCertServer* s)
     REQUIRE_CLEAN(r2.status == WOLFCERT_SCEP_STATUS_SUCCESS);
     REQUIRE_CLEAN(memmem(r2.cert_pem.data, r2.cert_pem.len, "BEGIN CERTIFICATE", 17) != NULL);
 
-    /* A 200-byte transactionID reaches the server intact: the round trip
-     * completes and the server answers FAILURE/badCertId for the unknown
-     * transaction, rather than the client refusing the argument. */
     memset(long_tid, 'A', sizeof(long_tid));
     REQUIRE_CLEAN(wolfcert_scep_session_get_cert_initial_ex(sess, &caps,
                 ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
@@ -637,10 +587,7 @@ cleanup:
     return ret;
 }
 
-/* Scenario F: force the base64 HTTP GET PKIOperation transport (RFC 8894 4.1)
- * over a session by clearing post_pki_operation in the caps, covering the
- * session's use_post==0 wiring in scep_session_begin (the in-tree server
- * otherwise always advertises POSTPKIOperation). Blocking for brevity. */
+/* Scenario F: a session over the base64 GET transport (RFC 8894 4.1). */
 static int session_get_transport_path(WolfCertServer* s)
 {
     char url[128];
@@ -684,10 +631,7 @@ cleanup:
     return ret;
 }
 
-/* Scenario G: the TLS transport guard. An https:// SCEP session with
- * verify_server unset is refused before any connect; plaintext http:// (used by
- * every other scenario) is accepted. Needs no server - the guard fires during
- * URL parsing in session open. */
+/* Scenario G: https:// without verify_server is refused at session open. */
 static int tls_guard_path(void)
 {
     WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP,
@@ -713,8 +657,7 @@ static int tls_guard_path(void)
 }
 
 #ifdef WOLFCERT_HAVE_ED25519
-/* Scenario H: SCEP is RSA-only (RFC 8894); each session begin helper rejects a
- * non-RSA signer with WOLFCERT_ERR_UNSUPPORTED before any network I/O. */
+/* Scenario H: each session request rejects a non-RSA signer (RFC 8894). */
 static int non_rsa_reject_path(WolfCertServer* s)
 {
     char url[128];
@@ -766,10 +709,7 @@ cleanup:
 }
 #endif /* WOLFCERT_HAVE_ED25519 */
 
-/* Scenario I: the non-NULL signer_cert branch of session GetCertInitial. On an
- * approval-required server: enroll -> PENDING -> poll (signer_cert NULL, the
- * derive branch) yields a cert; renew that cert -> PENDING -> poll passing the
- * issued cert as signer_cert (the non-derive branch) -> SUCCESS. */
+/* Scenario I: session GetCertInitial with a caller-supplied signer_cert. */
 static int blocking_renewal_poll_path(WolfCertServer* s)
 {
     char url[128];
@@ -806,8 +746,7 @@ static int blocking_renewal_poll_path(WolfCertServer* s)
     REQUIRE_CLEAN(wc_PemToDer(r2.cert_pem.data, (long)r2.cert_pem.len, CERT_TYPE,
                         &issued_der, NULL, NULL, NULL) == 0);
 
-    /* Renew -> PENDING, then poll passing the issued cert as signer_cert
-     * (the non-NULL / non-derive branch) -> SUCCESS. */
+    /* Renew -> PENDING, then poll with the issued cert as signer_cert. */
     REQUIRE_CLEAN(wolfcert_scep_session_renewal_req_ex(sess, &caps,
                 ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
                 issued_der->buffer, issued_der->length, dk, csr.data, csr.len, &r3)
@@ -839,16 +778,13 @@ cleanup:
     return ret;
 }
 
-/* A listener thread that accepts one connection and answers HTTP 500, so a
- * session request against it returns WOLFCERT_ERR_HTTP. Polls first so it can
- * never block join() indefinitely if no client shows up. */
+/* Answers one connection with HTTP 500. Polls first so join() cannot hang
+ * when no client connects. */
 static void* stub_500_thread(void* arg)
 {
     int lfd = *(int*)arg;
     struct pollfd p = { .fd = lfd, .events = POLLIN };
     int cfd;
-    /* As in wait_ready: poll() can report readiness and an error event in the
-     * same call, so a positive return alone does not mean accept() will work. */
     if (poll(&p, 1, SCEP_ASYNC_POLL_TIMEOUT_MS) <= 0 ||
             (p.revents & (POLLERR | POLLNVAL)) != 0)
         return NULL;
@@ -858,8 +794,8 @@ static void* stub_500_thread(void* arg)
             "HTTP/1.1 500 Internal Server Error\r\n"
             "Content-Length: 0\r\nConnection: close\r\n\r\n";
         char buf[2048];
-        (void)recv(cfd, buf, sizeof(buf), 0);         /* read the request head  */
-        (void)send(cfd, resp, sizeof(resp) - 1, 0);   /* answer 500             */
+        (void)recv(cfd, buf, sizeof(buf), 0);
+        (void)send(cfd, resp, sizeof(resp) - 1, 0);
         while (recv(cfd, buf, sizeof(buf), MSG_DONTWAIT) > 0)
             ;                                          /* drain for a clean close */
         close(cfd);
@@ -867,9 +803,7 @@ static void* stub_500_thread(void* arg)
     return NULL;
 }
 
-/* Scenario J: a session whose HTTP peer answers a non-200 status surfaces
- * WOLFCERT_ERR_HTTP. bootstrap runs against the real server; the enrolling
- * request goes to the 500 stub. */
+/* Scenario J: a non-200 reply surfaces WOLFCERT_ERR_HTTP. */
 static int non_200_path(WolfCertServer* s)
 {
     char real_url[128];
@@ -896,7 +830,7 @@ static int non_200_path(WolfCertServer* s)
     REQUIRE_CLEAN(bootstrap(&cli_real, "CN=sync-500", &caps, &ca_pem, &ca_der,
                             &dk, &csr) == 0);
 
-    lfd = black_hole_listener(&port);   /* just need a listening socket to accept on */
+    lfd = black_hole_listener(&port);   /* the stub accepts on it */
     REQUIRE_CLEAN(lfd >= 0);
     REQUIRE_CLEAN(pthread_create(&stub, NULL, stub_500_thread, &lfd) == 0);
     stub_started = 1;
@@ -926,12 +860,7 @@ cleanup:
     return ret;
 }
 
-/* Scenario K: argument-validation guards of the session request APIs. NULL
- * pointers, zero lengths and a NULL caps all return WOLFCERT_ERR_BAD_ARG before
- * any network I/O; also covers the renewal / get_cert_initial mode guards
- * (Scenario D covers pkcs_req). NULL srv and the accessor NULL-safety are
- * covered in tls_guard_path; Scenario E covers an over-long transactionID,
- * which is carried rather than rejected. */
+/* Scenario K: argument checks of the session request calls. */
 static int negative_args_path(WolfCertServer* s)
 {
     char url[128];
@@ -975,7 +904,7 @@ static int negative_args_path(WolfCertServer* s)
                 ca, ca_len, NULL, 0, dk, csr.data, csr.len, NULL, 0, &r)
             == WOLFCERT_ERR_BAD_ARG);
 
-    /* Mode-guard sibling coverage: _nb on a blocking session is rejected. */
+    /* Mode guard: _nb on a blocking session is rejected. */
     REQUIRE_CLEAN(wolfcert_scep_session_renewal_req_nb(sess, &caps, ca, ca_len,
                 ca, ca_len, ca, ca_len, dk, csr.data, csr.len, &r) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE_CLEAN(wolfcert_scep_session_get_cert_initial_nb(sess, &caps, ca, ca_len,
@@ -1057,7 +986,7 @@ int main(void)
     if (rc != 0)
         return rc;
 
-    /* Scenario E: approval-required server, blocking PENDING -> GetCertInitial. */
+    /* Scenario E: approval-required server, blocking PENDING -> poll. */
     WolfCertServerCfgSrv cfg_bpoll = { .protocol = WOLFCERT_PROTO_SCEP,
                                        .bind_host = "127.0.0.1", .bind_port = 0,
                                        .scep_require_approval = 1 };
@@ -1072,7 +1001,7 @@ int main(void)
     if (rc != 0)
         return rc;
 
-    /* Scenario F: auto-approve server, session over the base64 GET transport. */
+    /* Scenario F: auto-approve server, session over base64 GET. */
     WolfCertServerCfgSrv cfg_get = { .protocol = WOLFCERT_PROTO_SCEP,
                                      .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s6 = NULL;
@@ -1106,8 +1035,7 @@ int main(void)
         return rc;
 #endif
 
-    /* Scenario I: approval-required server, renewal PENDING -> poll with a
-     * caller-supplied signer_cert. */
+    /* Scenario I: approval-required server, renewal poll with signer_cert. */
     WolfCertServerCfgSrv cfg_rpoll = { .protocol = WOLFCERT_PROTO_SCEP,
                                        .bind_host = "127.0.0.1", .bind_port = 0,
                                        .scep_require_approval = 1 };
@@ -1122,8 +1050,7 @@ int main(void)
     if (rc != 0)
         return rc;
 
-    /* Scenario J: auto-approve server for bootstrap; enrolling request hits a
-     * 500 stub -> WOLFCERT_ERR_HTTP. */
+    /* Scenario J: auto-approve server for bootstrap, then the 500 stub. */
     WolfCertServerCfgSrv cfg_500 = { .protocol = WOLFCERT_PROTO_SCEP,
                                      .bind_host = "127.0.0.1", .bind_port = 0 };
     WolfCertServer* s9 = NULL;

@@ -35,16 +35,9 @@ typedef struct WolfCertClient WolfCertClient;
 WOLFCERT_API int  wolfcert_client_new(WolfCertClient** out);
 WOLFCERT_API void wolfcert_client_free(WolfCertClient* client);
 
-/* Retrieve the CA chain as the member certificates themselves (the PKCS#7
- * transport envelope used by EST/SCEP on the wire is unwrapped internally),
- * encoded per `encoding`:
- *   - PEM: the certificates concatenated as -----BEGIN/END CERTIFICATE-----
- *     blocks - a bundle that loads in full via the usual PEM trust-store calls.
- *   - DER: the certificates' raw DER concatenated back-to-back. For the common
- *     single-CA-cert case this is exactly that cert's DER, ready to load as
- *     WOLFSSL_FILETYPE_ASN1. With more than one cert it is a concatenation, so
- *     a single ASN.1 load consumes only the first; walk it (each cert is a
- *     complete DER SEQUENCE) or use PEM for multi-cert chains. */
+/* Fetch the CA chain unwrapped from its PKCS#7 envelope. PEM gives the
+ * certificates as concatenated CERTIFICATE blocks; DER gives their DER
+ * back-to-back, so a single ASN.1 load reads only the first one. */
 WOLFCERT_API int  wolfcert_client_get_ca(WolfCertClient* client,
                                          const WolfCertServerCfg* srv,
                                          WolfCertEncoding encoding,

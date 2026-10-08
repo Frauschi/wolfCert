@@ -201,15 +201,13 @@ typedef struct {
     int          poll_interval_ms;
     int          pha;
     int          csrattrs_auto;
-    const char*  ca_id;          /* SCEP-only, see check_proto_only_opts */
+    const char*  ca_id;
     const char*  txid_mode;
     const char*  content_cipher;
     const char*  ca_fingerprint;
-    const char*  serial;         /* SCEP-only, see check_proto_only_opts */
+    const char*  serial;
 } Opts;
 
-/* Append a value to a growable string-pointer array (used for repeatable
- * --san-* options). cap tracks the current allocation. Returns -1 on OOM. */
 static int opt_append(const char*** arr, size_t* len, size_t* cap,
                       const char* val)
 {
@@ -285,9 +283,7 @@ static int parse_common(int argc, char** argv, Opts* opts)
     };
     memset(opts, 0, sizeof(*opts));
 
-    /* Default key-type is deferred until enrolment so --csrattrs-auto
-     * can let the server pin it via /csrattrs. When neither the flag
-     * nor the server offer a hint, cmd_enroll falls back to ecc:256. */
+    /* Left NULL so --csrattrs-auto can take the key type from the server. */
     opts->key_type = NULL;
     opts->poll_interval_ms = 2000;
     size_t dns_cap = 0, ip_cap = 0, uri_cap = 0, email_cap = 0;
@@ -432,9 +428,7 @@ static int write_file(const char* path, const uint8_t* data, size_t len,
         return 0;
     }
 
-    /* Private keys must never be left group/world readable on a shared host.
-     * Create them owner-only and force the mode even when overwriting an
-     * existing wider-permission file, matching the library filesystem store. */
+    /* Owner-only, forced even when overwriting a file with a wider mode. */
     if (sensitive) {
         int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
         if (fd < 0)
@@ -527,19 +521,10 @@ static void fill_trust(const Opts* opts, WolfCertServerCfg* cfg,
     *trust_hold = trust_buf;
 }
 
-/* Reject the options that belong to the other protocol, rather than quietly
- * ignoring something the caller asked for. They map one-to-one onto the two
- * arms of WolfCertServerCfg.proto_opts, so an option that survives this check
- * is always written to the active union member. Single home for the policy, so
- * every command scopes the same flags the same way.
- *
- * --challenge is deliberately absent: a PKCS#9 challengePassword is SCEP's
- * authenticator but is legitimate in an EST CSR too, since /csrattrs can ask
- * for one. */
+/* Reject options that belong to the other protocol. --challenge is valid
+ * under EST too, since /csrattrs can ask for a challengePassword. */
 static int check_proto_only_opts(const Opts* opts, WolfCertProtocol p)
 {
-    /* proto_of() yields EST or SCEP and nothing else, so the two arms below
-     * cover every protocol a command can reach this point with. */
     if (p == WOLFCERT_PROTO_EST) {
         if (opts->ca_id != NULL) {
             fprintf(stderr, "--ca-id is SCEP-only; EST has no CA-identifier "
@@ -594,11 +579,7 @@ static int check_proto_only_opts(const Opts* opts, WolfCertProtocol p)
     return 0;
 }
 
-/* Copy the HTTP Basic credentials into the EST arm of proto_opts. A no-op on
- * any other protocol, so a caller can invoke it unconditionally. The protocol
- * test is what keeps this from writing an inactive union member - a SCEP config
- * would alias them onto proto_opts.scep - and check_proto_only_opts has already
- * rejected credentials supplied under SCEP. cfg->protocol must be set. */
+/* No-op unless cfg->protocol is EST, since proto_opts is a union. */
 static void fill_basic_auth(const Opts* opts, WolfCertServerCfg* cfg)
 {
     if (cfg->protocol != WOLFCERT_PROTO_EST)
@@ -608,11 +589,8 @@ static void fill_basic_auth(const Opts* opts, WolfCertServerCfg* cfg)
     cfg->proto_opts.est.password = opts->pass;
 }
 
-/* Fill the SCEP arm of proto_opts from --ca-id / --txid-mode / --content-cipher,
- * rejecting an unknown keyword. Like fill_basic_auth this is a no-op on any
- * other protocol and safe to call unconditionally, guarded for the same reason:
- * on an EST config this arm is not the active union member. cfg->protocol must
- * be set. */
+/* Fill proto_opts.scep from --ca-id / --txid-mode / --content-cipher; a
+ * no-op unless cfg->protocol is SCEP. */
 static int fill_scep_opts(const Opts* opts, WolfCertServerCfg* cfg)
 {
     if (cfg->protocol != WOLFCERT_PROTO_SCEP)
@@ -681,9 +659,8 @@ static int hex_val(char c)
     return -1;
 }
 
-/* Parse [sha256:|sha1:|sha512:]HEX into pin. ':' and ' ' between hex digits are
- * ignored, so a fingerprint pastes in with whatever separators it was written
- * with. The digest is always explicit: AUTO would map 20 bytes onto SHA-1. */
+/* Parse [sha256:|sha1:|sha512:]HEX into pin, skipping ':' and ' '. The alg
+ * is always explicit because AUTO would read 20 bytes as SHA-1. */
 static int parse_ca_fingerprint(const char* arg, CaPin* pin)
 {
     const char* name = "sha256";
@@ -765,9 +742,6 @@ static int parse_ca_fingerprint(const char* arg, CaPin* pin)
 
     pin->len = n;
 
-    /* SHA-256 is always present; the other two follow the wolfSSL build. Name
-     * an absent digest here, rather than at the point of use where an
-     * unsupported result would read as a fingerprint mismatch. */
 #ifdef NO_SHA
     if (pin->alg == WOLFCERT_SCEP_FP_SHA1)
         have_alg = 0;
@@ -799,8 +773,6 @@ static int scep_pin_setup(const Opts* opts, WolfCertProtocol p, CaPin* pin,
     if (opts->ca_fingerprint != NULL)
         return parse_ca_fingerprint(opts->ca_fingerprint, pin);
 
-    /* Without a pin nothing proves the served certificate is the real CA, so
-     * warn whatever the transport. */
     if (warn_unpinned) {
         fprintf(stderr, "warning: no --ca-fingerprint, so whichever CA the "
                         "server offers is trusted unverified\n");
@@ -890,8 +862,7 @@ static int find_pinned_cert(const uint8_t* pem, size_t pem_len,
         i++;
     }
 
-    /* A certificate that failed the comparison recorded a mismatch. Drop it
-     * once the pin is found, so a later failure is not reported with it. */
+    /* Clear the mismatch recorded by any certificate before the pinned one. */
     if (found == 0)
         wolfcert_clear_error();
 
@@ -994,11 +965,9 @@ static int fill_client_ident(const Opts* opts, WolfCertServerCfg* cfg,
 }
 
 #ifdef WOLFCERT_HAVE_SCEP
-/* Resolve GetCACert into the envelope target (the RA/CA cert the request is
- * encrypted to) and the trust set the CertRep signer is checked against. A pin
- * narrows both to the one matching certificate, so nothing else served can
- * stand in for the CA. `who` prefixes any diagnostic. The caller frees ca_pem,
- * ca_bundle and ra_der; bundle is a non-owning alias into one of the latter. */
+/* Resolve GetCACert into ra_der and the CertRep trust bundle, which aliases
+ * ra_der or ca_bundle; the caller frees ca_pem, ca_bundle and ra_der. A pin
+ * narrows both. */
 static int scep_resolve_ca(const WolfCertServerCfg* srv, const CaPin* pin,
                            const char* who,
                            WolfCertBuffer* ca_pem, WolfCertBuffer* ca_bundle,
@@ -1030,9 +999,7 @@ static int scep_resolve_ca(const WolfCertServerCfg* srv, const CaPin* pin,
         *bundle     = (*ra_der)->buffer;
         *bundle_len = (*ra_der)->length;
 
-        /* Unpinned, trust the whole GetCACert bundle for the CertRep signer so
-         * a split CA/RA response is accepted. A pin deliberately does not widen
-         * this: only what the operator vouched for is trusted. */
+        /* Unpinned, any served cert may sign, for split CA/RA servers. */
         if (pin->len == 0 &&
                 wolfcert_scep_get_ca_cert_enc(srv, WOLFCERT_ENCODING_DER,
                                               ca_bundle) == WOLFCERT_OK) {
@@ -1069,8 +1036,7 @@ static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
                                        key, csr->data, csr->len, &scep_result);
     }
 
-    /* RFC 8894 section 3.3.3 polling: while the server answers PENDING, retry
-     * GetCertInitial up to poll_attempts times before giving up. */
+    /* GetCertInitial polling while PENDING (RFC 8894 section 3.3.3). */
     while (rc == WOLFCERT_OK &&
             scep_result.status == WOLFCERT_SCEP_STATUS_PENDING &&
             attempts < opts->poll_attempts) {
@@ -1146,8 +1112,7 @@ static int cmd_getcacerts(int argc, char** argv)
         ret = 1;
 
 #ifdef WOLFCERT_HAVE_SCEP
-    /* getcacerts is the bootstrap fetch itself and reports the fingerprint to
-     * pin, so it does not warn about running unpinned. */
+    /* No unpinned warning, since getcacerts prints the fingerprint to pin. */
     if (ret == 0 && scep_pin_setup(&opts, p, &pin, 0) != 0)
         ret = 1;
 #endif
@@ -1185,8 +1150,7 @@ static int cmd_getcacerts(int argc, char** argv)
     if (ret == 0 && p == WOLFCERT_PROTO_SCEP) {
         print_ca_fingerprints(pem.data, pem.len);
 
-        /* Write only what the operator vouched for: anything else served
-         * alongside it is unverified and must not reach a trust store. */
+        /* Only the pinned certificate is verified, so only it is written. */
         if (pin.len > 0) {
             if (find_pinned_cert(pem.data, pem.len, &pin, &pinned,
                                  NULL) != 0) {
@@ -1270,9 +1234,7 @@ static int cmd_enroll(int argc, char** argv)
         ret = 1;
 #endif
 
-    /* Build the server cfg first - needed by --csrattrs-auto before we
-     * pick a key type. The key cfg + meta are populated below, then
-     * optionally overlaid with /csrattrs hints, then used to generate. */
+    /* --csrattrs-auto needs the server cfg before the key type is chosen. */
     WolfCertServerCfg srv = { .protocol = p, .server_url = opts.url };
     WolfCertCertMeta meta = { .subject_dn = opts.subject,
                               .san_dns = opts.san_dns, .san_dns_len = opts.san_dns_len,
@@ -1360,8 +1322,7 @@ static int cmd_enroll(int argc, char** argv)
     if (ret == 0 && p == WOLFCERT_PROTO_EST) {
 #ifdef WOLFCERT_HAVE_EST
         if (opts.pha) {
-            /* Keep-alive + TLS 1.3 post-handshake auth: open one session,
-             * fetch /cacerts anonymously, then let PHA drive /simpleenroll. */
+            /* TLS 1.3 post-handshake auth on one kept-alive session. */
             srv.proto_opts.est.allow_post_handshake_auth = 1;
             WolfCertEstSession* es = NULL;
             rc = wolfcert_est_session_open(&srv, &es);
@@ -1375,8 +1336,7 @@ static int cmd_enroll(int argc, char** argv)
             }
         }
         else {
-            /* Richer-shape enroll so a 202 Accepted (RFC 7030 section 4.2.3)
-             * becomes an explicit PENDING status the caller can poll. */
+            /* _ex reports 202 Accepted (RFC 7030 section 4.2.3) as PENDING. */
             WolfCertEstResult est_result = { 0 };
             rc = wolfcert_est_simple_enroll_ex(&srv, csr.data, csr.len, &est_result);
             int attempts = 0;
@@ -1588,8 +1548,7 @@ static int cmd_reenroll(int argc, char** argv)
 /* RFC 5280 section 4.1.2.2 caps a conforming serial at 20 octets. */
 #define CLI_SERIAL_MAX 20
 
-/* Parse hex into bytes, ignoring ':' and ' ' so a serial pastes in however
- * openssl printed it. */
+/* Parse hex into bytes, skipping ':' and ' ' separators. */
 static int parse_serial(const char* arg, uint8_t* out, size_t* out_len)
 {
     size_t n = 0;
@@ -1844,8 +1803,8 @@ static int cmd_getnextca(int argc, char** argv)
             ret = 1;
     }
 
-    /* The roll-over is verified against the current CA, so settle what that
-     * is: the one certificate the operator pinned, or everything served. */
+    /* The roll-over is verified against the pinned certificate, or else the
+     * whole served bundle. */
     if (ret == 0 && pin.len > 0) {
         rc = wolfcert_scep_get_ca_cert(&srv, &ca_pem);
         if (rc != WOLFCERT_OK) {
@@ -1864,9 +1823,7 @@ static int cmd_getnextca(int argc, char** argv)
         }
     }
     else if (ret == 0) {
-        /* No pin, so the whole bundle is trusted: some servers return the RA
-         * first and the roll-over may be signed by either. That bundle arrives
-         * over the transport it authenticates, which is what a pin fixes. */
+        /* Servers may return the RA first; either may sign the roll-over. */
         rc = wolfcert_scep_get_ca_cert_enc(&srv, WOLFCERT_ENCODING_DER,
                                            &ca_bundle);
         if (rc != WOLFCERT_OK) {

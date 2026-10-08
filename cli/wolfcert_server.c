@@ -366,11 +366,7 @@ int main(int argc, char** argv)
         wolfcert_set_log_level(WOLFCERT_LOG_DEBUG);
     }
 
-    /* Parse --csrattrs-file at startup so a bad blob fails fast with a
-     * clear operator-facing message instead of an obscure error from
-     * the first /csrattrs hit. CsrAttrs is an EST-only concept (RFC 7030
-     * section 4.5.2), so the validation is compiled only when EST is built;
-     * a SCEP-only server ignores the blob. */
+    /* Validate --csrattrs-file at startup; a build without EST ignores it. */
 #ifdef WOLFCERT_HAVE_EST
     if (csr_attrs_blob != NULL && csr_attrs_blob_len > 0) {
         WolfCertCsrAttrs check;

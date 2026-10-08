@@ -1,13 +1,9 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# wolfcert-client rejects an option belonging to the other protocol, and
-# validates the keyword arguments of the SCEP options, rather than accepting
-# either and quietly doing nothing. Both were only ever checked by hand.
-#
-# Most cases here fail before any network access. The --ca-fingerprint pinning
-# and server argv groups are the exception: they start wolfcert-server, and skip
-# themselves when that binary was not built.
+# wolfcert-client rejects options of the other protocol and validates the SCEP
+# keyword arguments. The --ca-fingerprint pinning and server argv groups start
+# wolfcert-server and skip when it was not built.
 
 set -u
 
@@ -21,11 +17,7 @@ if [ -z "$CLI" ]; then
 fi
 fails=0
 
-# A wolfSSL built WOLFSSL_NO_MALLOC needs a static memory pool installed before
-# anything can allocate, which the unit tests do and the CLI does not. There the
-# binary cannot get past wolfcert_init, so there is nothing to assert about
-# option scoping: skip rather than fail. 77 is the automake skip convention this
-# repo already uses in tests/interop.
+# The CLI installs no static pool, so it cannot initialise on WOLFSSL_NO_MALLOC.
 if "$CLI" getcacerts --proto scep --url "http://127.0.0.1:1/scep" 2>&1 \
         | grep -q "wolfcert_init failed"; then
     echo "SKIP: wolfcert-client cannot initialise in this build (no allocator)"
@@ -55,8 +47,7 @@ expect_reject() {
     esac
 }
 
-# Repeat a string. seq(1) is not everywhere, and where it is missing the
-# substitution collapses to an empty argument.
+# Repeat a string; seq(1) is not everywhere.
 rep() {
     local i=0
     while [ "$i" -lt "$2" ]; do
@@ -86,8 +77,7 @@ expect_reject "--content-cipher under est" "SCEP-only" \
 expect_reject "--serial under est"          "SCEP-only" \
     getcacerts --proto est --url "$EST_URL" --serial 4B3A
 
-# getcert is SCEP-only, and its --serial argument is validated before any
-# network access rather than at the point of use.
+# getcert is SCEP-only, and --serial is validated before any network access.
 expect_reject "getcert under est"      "only --proto scep" \
     getcert --proto est --url "$EST_URL" --cert /dev/null --key /dev/null
 expect_reject "getcert without --serial" "--serial required" \
@@ -117,10 +107,7 @@ for san in --san-dns --san-ip --san-uri --san-email; do
         --key /dev/null
 done
 
-# The accept side of the same boundary: 20 octets is the longest RFC 5280
-# permits and must get past parse_serial, failing later on the unreachable
-# port instead. Without this a regression to `n > CLI_SERIAL_MAX` (a one-byte
-# overflow of serial[]) or to CLI_SERIAL_MAX - 1 leaves every case green.
+# 20 octets is the RFC 5280 maximum and must get past parse_serial.
 out="$("$CLI" getcert --proto scep --url "$SCEP_URL" \
         --cert /dev/null --key /dev/null --serial "$(rep 42 20)" 2>&1)"
 case "$out" in
@@ -138,9 +125,8 @@ expect_reject "bogus --txid-mode"      "must be random or pubkey" \
 expect_reject "bogus --content-cipher" "must be auto, aes128, aes256" \
     getcacerts --proto scep --url "$SCEP_URL" --content-cipher rc4
 
-# --challenge is deliberately NOT scoped: a challengePassword is legitimate in
-# an EST CSR that /csrattrs asked for. It must get past option validation and
-# fail on the network instead, which is what the unreachable port produces.
+# --challenge is not scoped, since /csrattrs can ask for a challengePassword in
+# an EST CSR.
 out="$("$CLI" enroll --proto est --url "$EST_URL" --subject "CN=x" \
         --challenge secret --out-key /dev/null --out-cert /dev/null 2>&1)"
 case "$out" in
@@ -152,8 +138,7 @@ case "$out" in
     *)  echo "ok   --challenge accepted under est" ;;
 esac
 
-# --ca-fingerprint belongs to SCEP, and its argument is validated before any
-# network access rather than at the point of use.
+# --ca-fingerprint is SCEP-only and validated before any network access.
 expect_reject "--ca-fingerprint under est" "SCEP-only" \
     getcacerts --proto est --url "$EST_URL" \
     --ca-fingerprint sha256:0000000000000000000000000000000000000000000000000000000000000000
@@ -172,9 +157,8 @@ expect_reject "over-long --ca-fingerprint" "longer than any supported digest" \
     getcacerts --proto scep --url "$SCEP_URL" \
     --ca-fingerprint "sha512:$(rep 0 200)"
 
-# A named non-default digest parses. It then fails on the unreachable port, or
-# is refused by name on a wolfSSL built without that digest, but never as a
-# syntax error.
+# A named non-default digest may fail on the network or as unsupported, but
+# never as a syntax error.
 expect_parses() {
     local what="$1"; shift
     local out
@@ -192,8 +176,7 @@ expect_parses() {
 expect_parses sha512 "sha512:$(rep 0 128)"
 expect_parses sha1   "sha1:$(rep 0 40)"
 
-# enroll carries a well-formed pin to the transport and reports the connection
-# failure as itself. The stale-mismatch path needs more than one certificate.
+# A well-formed pin leaves a connection failure reported as such.
 GOOD_FP="sha256:$(rep 1 64)"
 out="$("$CLI" enroll --proto scep --url "$SCEP_URL" --key-type rsa:2048 \
         --subject "CN=x" --ca-fingerprint "$GOOD_FP" \
@@ -247,9 +230,7 @@ esac
 kill "$cargv_pid" 2>/dev/null
 rm -rf "$ctmp"
 
-# The pinning itself, end to end against the in-tree test server. wolfcert-server
-# is built alongside wolfcert-client whenever the server is enabled; without it
-# there is nothing to enroll against, so skip just this group.
+# The server groups need wolfcert-server (WOLFCERT_ENABLE_SERVER).
 SERVER="$(dirname "$CLI")/wolfcert-server"
 
 # wolfcert-server refuses an EST listener that could not authenticate anyone.
@@ -289,8 +270,7 @@ else
     trap '[ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null;
           [ -n "$argv_pid" ] && kill "$argv_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
 
-    # Not every sleep(1) takes a fractional delay. Poll in whole seconds where
-    # it does not, keeping the same ten-second budget.
+    # Not every sleep(1) takes a fractional delay.
     if sleep 0.1 2>/dev/null; then
         poll_delay=0.1
         poll_tries=100

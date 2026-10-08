@@ -15,7 +15,7 @@ need() {
     if ! have "$1"; then
         echo "SKIP: $1 not found in PATH." >&2
         echo "      $2" >&2
-        exit 77   # automake convention for "skipped"
+        exit 77
     fi
 }
 

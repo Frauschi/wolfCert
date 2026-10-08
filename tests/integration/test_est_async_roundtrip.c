@@ -17,20 +17,8 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * End-to-end non-blocking EST session driven through a real poll(2)
- * loop. Exercises:
- *   - wolfcert_est_session_open_async (TLS handshake async),
- *   - wolfcert_est_session_get_cacerts_nb (anonymous /cacerts),
- *   - wolfcert_est_session_simple_enroll_nb (/simpleenroll under
- *     TLS 1.3 post-handshake auth),
- * all on a single TLS connection whose fd is fed to poll() between
- * WOLFCERT_ERR_WANT_READ / _WANT_WRITE returns. A Basic-only server then
- * checks the credentials on every request and rejects a wrong password.
- *
- * Mirrors test_est_pha_roundtrip's scenario but with the caller
- * explicitly owning the event loop.
- */
+/* Non-blocking EST session driven through a poll(2) loop: /cacerts and
+ * /simpleenroll under TLS 1.3 PHA, then against a Basic-only server. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -76,7 +64,6 @@ static int wait_io(WolfCertEstSession* s, int rc)
     return poll(&p, 1, 5000) > 0 ? 0 : -1;
 }
 
-/* Pump one call until it returns OK or an error. poll() in between. */
 static int pump_get_cacerts(WolfCertEstSession* s, WolfCertBuffer* out)
 {
     for (;;) {
@@ -93,7 +80,7 @@ static int pump_get_cacerts(WolfCertEstSession* s, WolfCertBuffer* out)
     }
 }
 
-/* Returns the terminal code, so a caller can assert a rejection. */
+/* Returns the terminal rc. */
 static int pump_simple_enroll(WolfCertEstSession* s,
                               const uint8_t* csr, size_t csr_len,
                               WolfCertBuffer* out)
@@ -112,7 +99,6 @@ static int pump_simple_enroll(WolfCertEstSession* s,
     }
 }
 
-/* pump_simple_enroll() for the result-struct form. */
 static int pump_simple_enroll_ex(WolfCertEstSession* s,
                                  const uint8_t* csr, size_t csr_len,
                                  WolfCertEstResult* out)
@@ -143,7 +129,6 @@ int main(void)
     REQUIRE(mint_self_id("async-bootstrap", 1,
                         &cli_cert, &cli_cert_len, &cli_key, &cli_key_len) == 0);
 
-    /* Build a CSR off the event loop; both sections below enroll it. */
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* dk = NULL;
@@ -192,14 +177,11 @@ int main(void)
         REQUIRE(wolfcert_est_session_open_async(&cli, &es) == WOLFCERT_OK);
         REQUIRE(wolfcert_est_session_fd(es) >= 0);
 
-        /* Anonymous /cacerts, pumped via poll(2). */
         WolfCertBuffer ca_pem = { 0 };
         REQUIRE(pump_get_cacerts(es, &ca_pem) == 0);
         REQUIRE(ca_pem.len > 0);
 
-        /* /simpleenroll - server issues CertificateRequest via PHA mid-call,
-         * wolfSSL answers from the pre-loaded identity. All of this is
-         * pumped through poll() via WANT_READ/WANT_WRITE returns. */
+        /* The server sends a PHA CertificateRequest mid-call. */
         WolfCertBuffer issued = { 0 };
         REQUIRE(pump_simple_enroll(es, csr.data, csr.len, &issued) == 0);
         REQUIRE(memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) != NULL);
@@ -213,10 +195,7 @@ int main(void)
         wolfcert_server_free(srv);
     }
 
-    /* --- HTTP Basic on the async session (RFC 7030 section 3.2.3). The
-     * credentials must ride every request the session pumps out, so /cacerts
-     * and /simpleenroll both have to satisfy a server that demands them.
-     * Runs against a second, Basic-only server. */
+    /* Basic-only server: cacerts and enroll on one async session as alice. */
     WolfCertServerCfgSrv bcfg = {
         .protocol        = WOLFCERT_PROTO_EST,
         .bind_host       = "127.0.0.1",
@@ -256,8 +235,7 @@ int main(void)
     wolfcert_buffer_free(&bissued);
     wolfcert_est_session_close(bes);
 
-    /* Wrong password: both async enroll forms report the 401, one session
-     * each. */
+    /* A wrong password fails both enroll forms, one session each. */
     WolfCertServerCfg wcli = bcli;
     wcli.proto_opts.est.password = "wrong";
     bes = NULL;
@@ -270,8 +248,7 @@ int main(void)
     REQUIRE(wr.cert_pem.data == NULL);
     wolfcert_est_result_free(&wr);
 
-    /* The failed enroll is no longer in flight, so a new operation is not
-     * refused as one. */
+    /* The failed enroll no longer counts as in flight. */
     REQUIRE(wolfcert_est_session_get_cacerts_nb(bes, &bca)
             != WOLFCERT_ERR_BAD_ARG);
     wolfcert_buffer_free(&bca);

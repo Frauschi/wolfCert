@@ -1,20 +1,15 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 name: PR
 
-# Fast merge gate. Every job builds (or restores from cache) a wolfSSL config,
-# builds wolfCert to match, and runs the tests. Kept to a tight high-value set;
-# the exhaustive matrix, sanitizers and interop live in the nightly workflows.
+# Fast merge gate; the exhaustive matrix, sanitizers and interop run nightly.
 on:
-  # PRs are the gate. Push only fires for the default branches (post-merge
-  # validation): running on every feature-branch push too would double every
-  # PR run (the push event and the pull_request event both fire).
+  # Push only on the default branches, so a PR does not run twice.
   pull_request:
   push:
     branches:
       - main
       - master
 
-# Cancel superseded runs on the same ref to keep the queue short.
 concurrency:
   group: pr-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -23,7 +18,7 @@ permissions:
   contents: read
 
 env:
-  WOLFSSL_REF: master   # tracked, unpinned (per project decision)
+  WOLFSSL_REF: master   # tracked, unpinned
 
 jobs:
   build-test:
@@ -34,7 +29,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ---- Canonical full config: CMake (-Werror) + autoconf + sanitizers --
+          # Canonical full config: CMake (-Werror) + autoconf + sanitizers
           - name: cmake-full-werror
             os: ubuntu-latest
             build: cmake
@@ -54,7 +49,7 @@ jobs:
             os: ubuntu-latest
             build: autoconf
             wolfssl: full
-          # ---- The oldest wolfSSL release wolfCert supports ----
+          # The oldest wolfSSL release wolfCert supports
           - name: cmake-full-floor
             os: ubuntu-latest
             build: cmake
@@ -67,7 +62,7 @@ jobs:
             wolfssl: full
             cmake_extra: -DCMAKE_BUILD_TYPE=Debug -DWOLFCERT_BUILD_SHARED=OFF
             cflags: -fsanitize=address,undefined -fno-sanitize-recover=all
-          # ---- Protocol / server feature gating (all reuse the `full` prefix) --
+          # Protocol / server feature gating (all reuse the `full` prefix)
           - name: cmake-est-only
             os: ubuntu-latest
             build: cmake
@@ -84,7 +79,7 @@ jobs:
             wolfssl: full
             cmake_extra: -DWOLFCERT_ENABLE_SERVER=OFF
             ctest_exclude: roundtrip
-          # ---- wolfSSL key-alg / crypto variants ----
+          # wolfSSL key-alg / crypto variants
           - name: cmake-est-only-nonrsa
             os: ubuntu-latest
             build: cmake
@@ -107,7 +102,7 @@ jobs:
             os: ubuntu-latest
             build: cmake
             wolfssl: tls13-only
-          # ---- ML-DSA per-level gating ----
+          # ML-DSA per-level gating
           - name: cmake-mldsa-44off
             os: ubuntu-latest
             build: cmake
@@ -120,20 +115,19 @@ jobs:
             os: ubuntu-latest
             build: cmake
             wolfssl: mldsa-87off
-          # ---- Platform pieces compiled out (the transport/store gates) ----
+          # Platform pieces compiled out (the transport/store gates)
           - name: cmake-no-builtin-transport
             os: ubuntu-latest
             build: cmake
             wolfssl: full
-            # Neither the CLI nor the test server can supply a transport, so
-            # both build systems reject them here. The socket-driven tests
-            # exit 77 (skipped) on their own; nothing needs excluding.
+            # The CLI and server need the built-in transport; the socket tests
+            # skip themselves.
             cmake_extra: >-
               -DWOLFCERT_ENABLE_BUILTIN_TRANSPORT=OFF
               -DWOLFCERT_ENABLE_POSIX_STORE=OFF
               -DWOLFCERT_ENABLE_CLI=OFF
               -DWOLFCERT_ENABLE_SERVER=OFF
-          # ---- Constrained builds (unit tests only: single-thread / no-malloc) --
+          # Constrained builds (unit tests only: single-thread / no-malloc)
           - name: cmake-static-mem
             os: ubuntu-latest
             build: cmake
@@ -144,12 +138,10 @@ jobs:
             os: ubuntu-latest
             build: cmake
             wolfssl: no-malloc
-            # Non-TLS crypto/cert/PKCS7 units only: TLS + threads over a static
-            # pool is a separate wolfSSL concern, out of scope for the
-            # allocation-free validation. stop_idle and get_cert are named
-            # because neither carries "tls" or "roundtrip" in its test name.
+            # No TLS and no test server over a static pool; stop_idle and
+            # get_cert are named since neither matches "tls" or "roundtrip".
             ctest_exclude: "http|tls|roundtrip|est|stop_idle|get_cert"
-          # ---- macOS ----
+          # macOS
           - name: cmake-full-macos
             os: macos-latest
             build: cmake
@@ -188,19 +180,13 @@ jobs:
           if [ -n "${{ matrix.cflags }}" ]; then
             extra_cflags=(-DCMAKE_C_FLAGS="${{ matrix.cflags }}")
           fi
-          # sigpipe-launcher.sh makes each test ignore SIGPIPE (see the script);
-          # wired via CMAKE_CROSSCOMPILING_EMULATOR so ctest applies it to all
-          # tests with no source change, for plain and sanitizer builds alike.
           cmake -S . -B build \
             -DWITH_WOLFSSL="$WOLFSSL_PREFIX" \
             -DWOLFCERT_ENABLE_TESTS=ON \
             -DCMAKE_CROSSCOMPILING_EMULATOR="$PWD/scripts/ci/sigpipe-launcher.sh" \
             ${{ matrix.cmake_extra }} ${extra_cflags[@]+"${extra_cflags[@]}"}
           cmake --build build -j "$jobs"
-          # Pass the -E exclude regex as a single quoted argument so its '|'
-          # alternation is never seen by the shell as a pipe. Two explicit
-          # branches avoid the empty-array-under-`set -u` pitfall on bash 3.2
-          # (macOS runners).
+          # No args array: "${a[@]}" on an empty array fails set -u on bash 3.2.
           if [ -n "${{ matrix.ctest_exclude }}" ]; then
             ctest --test-dir build -j "$jobs" --output-on-failure \
               -E "${{ matrix.ctest_exclude }}"
@@ -213,7 +199,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          trap '' PIPE   # see note in the CMake step above
+          trap '' PIPE   # ignore SIGPIPE: tests write to sockets after peer close
           ./autogen.sh
           ./configure --with-wolfssl="$WOLFSSL_PREFIX" --enable-tests
           make -j "$(nproc)"
@@ -242,8 +228,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          # The header-only path takes the feature set from user_settings.h
-          # instead of the generated options.h. Seed it from the shipped example.
           mkdir -p "$RUNNER_TEMP/us"
           cp examples/user_settings.h.example "$RUNNER_TEMP/us/user_settings.h"
           cmake -S . -B build \
@@ -265,8 +249,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y gcc-arm-none-eabi
-      # Headers only: nothing is compiled from wolfSSL and nothing is linked,
-      # so this needs no wolfSSL build and no prefix cache.
+      # Headers only, so no wolfSSL build or prefix cache.
       - name: Check out wolfSSL headers
         run: |
           git clone --depth 1 --branch "$WOLFSSL_REF" \
@@ -291,11 +274,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential autoconf automake libtool \
             pkg-config python3
-      # Read-write cache: the negative wolfSSL configs are deterministic from
-      # build-wolfssl.sh, so save+restore on this key actually functions (the
-      # first run seeds it, later runs on the branch restore it). The negative
-      # gate only needs these to build and be rejected, so it does not depend on
-      # the wolfSSL commit -- the script hash alone is a sufficient key.
+      # The negative gate does not depend on the wolfSSL commit, so the script
+      # hash alone is the key.
       - name: Cache negative-config wolfSSL prefixes
         uses: actions/cache@v4
         with:

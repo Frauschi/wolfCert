@@ -199,8 +199,9 @@ Two related buffers are intentionally **not** exposed as knobs:
 
 Encoding a SCEP SignedData pkiMessage allocates a one-shot heap buffer
 sized `envelope + signer-cert + WOLFCERT_SCEP_PKI_SLACK`. The slack bounds
-everything else in the message (signed attributes, signature, ASN.1
-framing); see the `WOLFCERT_SCEP_PKI_SLACK` comment in `src/internal.h`.
+everything else in the message: the signed-attribute set (~2 KiB), the RSA
+signature (<=1 KiB at RSA-8192), and the SignerInfo identifier plus ASN.1
+framing (~1 KiB).
 
 | Macro | Default | Bounds |
 |-------|---------|--------|

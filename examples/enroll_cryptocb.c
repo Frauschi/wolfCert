@@ -20,18 +20,10 @@
 /*
  * CryptoCb offloading example.
  *
- * Demonstrates the integration pattern for running wolfCert with a
- * backend-resident private key: the application registers a wolfSSL
- * CryptoCb of its choice (PKCS#11 via wolfPKCS11, TPM, HSM, custom
- * accelerator, ...) and simply passes the returned devId into
- * WolfCertKeyCfg. wolfCert itself stays backend-agnostic.
- *
- * For demo purposes this example implements a pass-through CryptoCb that
- * does NOT actually offload - it returns CRYPTOCB_UNAVAILABLE for every
- * operation, letting wolfSSL fall back to software. Replace the callback
- * with a real backend to get true offloading. Real TPM integration
- * typically uses wolfTPM; real HSM/PKCS#11 integration typically uses
- * wolfPKCS11.
+ * The application registers a wolfSSL CryptoCb for its key backend
+ * (wolfPKCS11, wolfTPM, an HSM, ...) and passes its devId in WolfCertKeyCfg.
+ * The pass-through callback here returns CRYPTOCB_UNAVAILABLE, so wolfSSL
+ * does every operation in software until a real backend replaces it.
  */
 
 #include <wolfcert/wolfcert.h>
@@ -52,7 +44,7 @@ static int passthrough_cb(int devIdIn, wc_CryptoInfo* info, void* ctx)
     (void)devIdIn;
     (void)ctx;
     fprintf(stderr, "[cryptocb] algo=%d falling back to software\n", info->algo_type);
-    return CRYPTOCB_UNAVAILABLE;   /* tell wolfSSL to do it itself */
+    return CRYPTOCB_UNAVAILABLE;
 }
 
 int main(int argc, char** argv)
@@ -71,8 +63,7 @@ int main(int argc, char** argv)
         return 1;
     }
 
-    /* Now use the device id when asking wolfCert for a key. Everything
-     * else is identical to the pure-software path. */
+    /* Pass the device id; the rest matches the software path. */
     WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
                             .dev_id = MY_DEV_ID,
                             .key_label = "demo/device-key" };

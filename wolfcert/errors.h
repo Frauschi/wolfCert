@@ -40,21 +40,13 @@ enum {
     WOLFCERT_ERR_PARSE       = -10,
     WOLFCERT_ERR_NOT_FOUND   = -11,
     WOLFCERT_ERR_UNSUPPORTED = -12,
-    /* Enrollment was accepted but is not yet ready:
-     *   - SCEP PKCSReq / RenewalReq returned pkiStatus=3 (pending manual
-     *     approval) - callers that used the richer `wolfcert_scep_*_ex`
-     *     API see this through `WolfCertScepResult.status` instead.
-     *   - EST /simpleenroll or /simplereenroll returned 202 Accepted
-     *     (RFC 7030 section 4.2.3).
-     * The error code is returned only by the simple-result entry points
-     * that can't carry a richer result struct. */
+    /* Enrollment accepted but not issued yet (SCEP pkiStatus=PENDING, or EST
+     * 202 Accepted per RFC 7030 section 4.2.3). Calls that fill a result struct
+     * report it in its status instead. */
     WOLFCERT_ERR_PENDING     = -13,
 
-    /* Non-blocking session I/O: the call could not make progress
-     * because the socket would block. The caller should wait for the
-     * session fd to be readable / writable and re-invoke the same
-     * call with the same arguments to resume. Only returned by the
-     * *_nb entry points. */
+    /* Returned by the _nb calls when the socket would block. The same call
+     * with the same arguments resumes once the session fd is ready. */
     WOLFCERT_ERR_WANT_READ   = -14,
     WOLFCERT_ERR_WANT_WRITE  = -15,
 

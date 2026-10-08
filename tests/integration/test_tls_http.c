@@ -17,12 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/*
- * Exercises the TLS path of wolfcert_http_request: stands up a single-
- * shot wolfSSL TLS server on loopback with a freshly-generated self-
- * signed RSA cert, then fires an HTTPS request at it. Verifies that
- * wolfCert's trust-anchor handling, SNI, and hostname check all work.
- */
+/* wolfcert_http_request over HTTPS to a one-shot loopback wolfSSL server. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -57,7 +52,6 @@
     } while (0)
 
 #ifndef WOLFCERT_HAVE_BUILTIN_TRANSPORT
-/* Nothing below can open a socket in a build with no built-in transport. */
 int main(void)
 {
     return 77;
@@ -65,9 +59,7 @@ int main(void)
 #else
 
 struct srv_ctx {
-    /* Published by srv_thread once the ephemeral listener is bound, then
-     * polled by the main thread. Atomic so the cross-thread handoff has a
-     * happens-before edge (this is what ThreadSanitizer requires). */
+    /* Set by srv_thread once bound and polled by main; atomic for TSan. */
     wolfSSL_Atomic_Int port;
     uint8_t* cert_pem;
     size_t cert_pem_len;

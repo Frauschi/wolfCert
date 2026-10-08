@@ -20,10 +20,7 @@
 #ifndef WOLFCERT_API_H
 #define WOLFCERT_API_H
 
-/* WOLFCERT_TEST_VIS: visibility annotation for symbols that are NOT part
- * of the public ABI but that in-tree tests need to reach. When the library
- * is built with WOLFCERT_BUILD_TESTING the symbols are exported with
- * default visibility; otherwise they stay hidden. */
+/* Exports non-ABI symbols for in-tree tests under WOLFCERT_BUILD_TESTING. */
 #if defined(WOLFCERT_BUILD_TESTING) && (defined(__GNUC__) || defined(__clang__))
 #  define WOLFCERT_TEST_VIS __attribute__((visibility("default")))
 #else

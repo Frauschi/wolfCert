@@ -3,8 +3,7 @@ common:
     - wolfcert
     - est
   harness: ztest
-  # Needs a wolfcert-server on the host; twister runs this only when the
-  # fixture is named, so a plain run skips it instead of failing.
+  # Needs a host wolfcert-server; runs only when the fixture is named.
   harness_config:
     fixture: wolfcert_est_server
 tests:

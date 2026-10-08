@@ -65,19 +65,9 @@ static void fill_common(const WolfCertServerCfg* srv, WolfCertHttpRequest* req)
     req->transport         = srv->transport;
 }
 
-/* Validate the config before it is used. The protocol check comes first: it
- * gates every read of proto_opts.est below, which would otherwise reinterpret
- * a SCEP arm's storage as the HTTP Basic credentials.
- *
- * RFC 7030 then mandates EST over TLS *and* that the client authenticate the
- * server on every request. Reject an explicitly non-TLS (http://) server URL
- * first; a schemeless URL already defaults to TLS in wolfcert_http_url_parse(),
- * so only an explicit http:// scheme is refused. Then require server
- * authentication: verify_server is the sole switch for peer verification in
- * this transport (http.c installs WOLFSSL_VERIFY_PEER only when it is set), so
- * verify_server off always completes an unauthenticated handshake - a pinned
- * trust anchor is loaded but never enforced - which would leak the HTTP Basic
- * credentials and the CSR to a MITM. */
+/* The protocol check comes first because proto_opts is a union. RFC 7030
+ * requires TLS and server authentication; verify_server alone turns on peer
+ * verification, so trust_anchors are not enforced without it. */
 static int est_check_cfg(const WolfCertServerCfg* srv, void* heap)
 {
     WolfCertUrl u;
@@ -190,7 +180,6 @@ static int est_enroll_finish(void* heap, WolfCertHttpResponse* resp,
         rc = wolfcert_base64_decode(resp->body, resp->body_len, &p7, heap);
     }
 
-    /* Drop the base64 body before the PEM conversion. */
     wolfcert_http_response_free(resp);
 
     if (rc == WOLFCERT_OK && status == 200) {
@@ -202,10 +191,7 @@ static int est_enroll_finish(void* heap, WolfCertHttpResponse* resp,
     return rc;
 }
 
-/* Core round-trip for /simpleenroll and /simplereenroll, shared by the
- * simple-result `wolfcert_est_simple_enroll` / `_reenroll` (which flatten
- * 202 Accepted into WOLFCERT_ERR_PENDING and ignore Retry-After) and
- * the richer `_ex` variants (which expose the status + hint directly). */
+/* Round-trip for /simpleenroll and /simplereenroll. */
 static int post_enroll_ex(const WolfCertServerCfg* srv,
                           const char* suffix,
                           const uint8_t* csr_der, size_t csr_der_len,
@@ -224,13 +210,7 @@ static int post_enroll_ex(const WolfCertServerCfg* srv,
     if (url == NULL)
         return WOLFCERT_ERR_MEMORY;
 
-    /* RFC 7030 section 3.5 lets an EST client bind the proof-of-possession to
-     * the TLS session by carrying the tls-unique channel binding (RFC 5929)
-     * inside the CSR (typically the PKCS#9 challengePassword). This is an
-     * optional measure and we currently do not implement it: the CSR is
-     * built independently of the live TLS session and submitted as-is. If
-     * channel binding is ever required, derive tls-unique from the TLS
-     * connection and feed it to the CSR builder before this point. */
+    /* RFC 7030 section 3.5 tls-unique channel binding is not implemented. */
 
     WolfCertBuffer b64 = { 0 };
     int rc = wolfcert_base64_encode_mime(csr_der, csr_der_len, &b64, heap);
@@ -372,17 +352,13 @@ int wolfcert_est_simple_reenroll(const WolfCertServerCfg* srv,
     return est_result_flatten(rc, &r, out_cert_pem);
 }
 
-/* ---- keep-alive EST session -------------------------------------------- */
-
 struct WolfCertEstSession {
     WolfCertHttpSession* http;
     char*                base_url;     /* e.g. https://ca.example/.well-known/est */
     size_t               max_body;
     void*                heap;
 
-    /* HTTP Basic credentials, copied from the config at open (the caller's
-     * WolfCertServerCfg need not outlive the session) and replayed on every
-     * request the session issues. NULL when the caller supplied none. */
+    /* Copied at open so the cfg need not outlive the session; NULL if none. */
     char*                basic_user;
     char*                basic_pass;
 
@@ -404,28 +380,22 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
 
     void* heap = srv->heap ? srv->heap : wolfcert_default_heap();
 
-    /* The session copies proto_opts.est below, so confirm the discriminator
-     * before reading that arm. */
     int rc = wolfcert_cfg_require_proto(srv, WOLFCERT_PROTO_EST, "est");
     if (rc != WOLFCERT_OK)
         return rc;
 
-    /* Split the base URL into scheme://host[:port] for the HTTP session
-     * vs the path suffix, so per-endpoint joins still work. */
+    /* The HTTP session gets the origin; endpoint paths join onto base_url. */
     WolfCertUrl u;
     rc = wolfcert_http_url_parse(srv->server_url, &u, heap);
     if (rc != WOLFCERT_OK)
         return rc;
 
-    if (!u.tls) { /* RFC 7030: EST runs over TLS. */
+    if (!u.tls) {
         wolfcert_http_url_free(&u);
         return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
             "EST requires TLS; refusing plaintext http:// URL (RFC 7030)");
     }
 
-    /* EST also requires authenticating the server (RFC 7030); refuse a session
-     * that would run an unauthenticated (verify_server off) handshake, matching
-     * the one-shot est_check_cfg() gate. */
     if (!srv->verify_server) {
         wolfcert_http_url_free(&u);
         return WOLFCERT_ERR(WOLFCERT_ERR_TLS, "est",
@@ -455,9 +425,6 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
         return WOLFCERT_ERR_MEMORY;
     }
 
-    /* RFC 7030 section 3.2.3: HTTP Basic is one of the client authentication
-     * mechanisms an EST server may demand, so the session has to carry the
-     * credentials across every request on the connection, not just the first. */
     const char* user = srv->proto_opts.est.username;
     const char* pass = srv->proto_opts.est.password;
     if (user != NULL)
@@ -491,12 +458,7 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
 
     WOLFCERT_XFREE(origin, heap);
     if (rc != WOLFCERT_OK) {
-        /* Tear down through the close helper rather than freeing by hand: it
-         * is the one place that zeroizes the Basic password copy, and a dial
-         * failure here (DNS, connect, or a rejected server certificate) is
-         * routine enough that an enrolment retry loop would otherwise strand
-         * one plaintext copy per attempt. s->http is NULL, so the helper's
-         * `if (s->http)` guard makes it safe on a half-built session. */
+        /* Free with wolfcert_est_session_close() to zero s->basic_pass. */
         wolfcert_est_session_close(s);
         return rc;
     }
@@ -559,8 +521,6 @@ void wolfcert_est_session_close(WolfCertEstSession* s)
 
     WOLFCERT_XFREE(s->base_url, s->heap);
 
-    /* The credential pair has no reason to outlive the session; the user half
-     * counts too, since half a credential still narrows an attacker's search. */
     if (s->basic_user != NULL)
         wc_ForceZero(s->basic_user, (word32)strlen(s->basic_user));
     WOLFCERT_XFREE(s->basic_user, s->heap);
@@ -869,9 +829,7 @@ int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
     if (rc != WOLFCERT_OK)
         return rc;
 
-    /* RFC 7030 section 4.5.2: both 204 and 404 mean the server has no CSR
-     * Attributes Response to offer; treat either (and an empty body) as a
-     * normal "no attributes" result rather than a transport error. */
+    /* RFC 7030 section 4.5.2: 204 and 404 both mean no CSR attributes. */
     if (resp.status_code == 204 || resp.status_code == 404 ||
         resp.body_len == 0) {
         wolfcert_http_response_free(&resp);
@@ -883,7 +841,6 @@ int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
         return WOLFCERT_ERR_HTTP;
     }
 
-    /* Body is base64-encoded per RFC 7030; decode. */
     WolfCertBuffer dec = { 0 };
     rc = wolfcert_base64_decode(resp.body, resp.body_len, &dec, heap);
 
