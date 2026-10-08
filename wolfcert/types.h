@@ -112,12 +112,6 @@ typedef struct {
     const char*        key_usage;          /* comma-separated */
     const char*        extended_key_usage; /* comma-separated EKU names or OIDs */
 
-    /* Raw CSR attribute DER. wolfcert_csr_build does not add it to the CSR
-     * yet; customize can set other attributes on the wolfSSL Cert, and
-     * wolfcert_csr_attrs_apply maps the typed /csrattrs hints. */
-    const uint8_t*     csr_attributes_der;
-    size_t             csr_attributes_der_len;
-
     /* Optional PKCS#9 challengePassword CSR attribute, used by SCEP (RFC 8894
      * section 2.4); NULL emits none. At most CTC_NAME_SIZE - 1 chars. */
     const char*        challenge_password;
