@@ -764,11 +764,17 @@ static int check_result_defined(const char* what, int rc, const WolfCertScepResu
 #ifdef TEST_ALLOC_FAILURES
 /* Allocations left before failing_malloc() returns NULL; -1 never fails. */
 static int g_allocs_left = -1;
+static int g_alloc_failed;
+static wolfSSL_Malloc_cb  g_saved_malloc;
+static wolfSSL_Free_cb    g_saved_free;
+static wolfSSL_Realloc_cb g_saved_realloc;
 
 static void* failing_malloc(size_t sz)
 {
-    if (g_allocs_left == 0)
+    if (g_allocs_left == 0) {
+        g_alloc_failed = 1;
         return NULL;
+    }
     if (g_allocs_left > 0)
         g_allocs_left--;
     return malloc(sz);
@@ -781,35 +787,53 @@ static void failing_free(void* ptr)
 
 static void* failing_realloc(void* ptr, size_t sz)
 {
-    if (g_allocs_left == 0)
+    if (g_allocs_left == 0) {
+        g_alloc_failed = 1;
         return NULL;
+    }
     if (g_allocs_left > 0)
         g_allocs_left--;
     return realloc(ptr, sz);
+}
+
+/* Lets `n` wolfSSL allocations succeed and fails the rest. */
+static int oom_arm(int n)
+{
+    if (wolfSSL_GetAllocators(&g_saved_malloc, &g_saved_free,
+                              &g_saved_realloc) != 0)
+        return -1;
+    g_allocs_left = n;
+    g_alloc_failed = 0;
+    return wolfSSL_SetAllocators(failing_malloc, failing_free,
+                                 failing_realloc);
+}
+
+/* Restores the allocators; 1 when an allocation was failed, 0 if not, or -1. */
+static int oom_disarm(void)
+{
+    g_allocs_left = -1;
+    if (wolfSSL_SetAllocators(g_saved_malloc, g_saved_free,
+                              g_saved_realloc) != 0)
+        return -1;
+    return g_alloc_failed;
 }
 
 /* Failing each allocation in turn must give WOLFCERT_ERR_MEMORY or a match. */
 static int pem_has_cert_reports_oom(const char* pem, size_t pem_len,
                                     const DecodedCert* lc)
 {
-    wolfSSL_Malloc_cb  mf;
-    wolfSSL_Free_cb    ff;
-    wolfSSL_Realloc_cb rf;
     int fails;
+    int failed;
     int rc = 0;
 
-    REQUIRE(wolfSSL_GetAllocators(&mf, &ff, &rf) == 0);
     for (fails = 0; rc != 1; fails++) {
-        g_allocs_left = fails;
-        REQUIRE(wolfSSL_SetAllocators(failing_malloc, failing_free,
-                                      failing_realloc) == 0);
+        REQUIRE(oom_arm(fails) == 0);
         rc = wolfcert_scep_pem_has_cert((const uint8_t*)pem, pem_len,
                                         lc->issuerRaw,
                                         (size_t)lc->issuerRawLen, lc->serial,
                                         (size_t)lc->serialSz, NULL);
-        REQUIRE(wolfSSL_SetAllocators(mf, ff, rf) == 0);
-        g_allocs_left = -1;
-        if (rc != 1 && rc != WOLFCERT_ERR_MEMORY) {
+        REQUIRE((failed = oom_disarm()) >= 0);
+        if (rc != 1 && (rc != WOLFCERT_ERR_MEMORY || !failed)) {
             fprintf(stderr, "FAIL pem_has_cert with allocation %d failing: "
                     "%d\n", fails, rc);
             return 1;
@@ -822,22 +846,16 @@ static int pem_has_cert_reports_oom(const char* pem, size_t pem_len,
 static int rep_signer_reports_oom(const uint8_t* signer, size_t signer_len,
                                   const uint8_t* bundle, size_t bundle_len)
 {
-    wolfSSL_Malloc_cb  mf;
-    wolfSSL_Free_cb    ff;
-    wolfSSL_Realloc_cb rf;
     int fails;
+    int failed;
     int rc = WOLFCERT_ERR_MEMORY;
 
-    REQUIRE(wolfSSL_GetAllocators(&mf, &ff, &rf) == 0);
     for (fails = 0; rc != WOLFCERT_OK; fails++) {
-        g_allocs_left = fails;
-        REQUIRE(wolfSSL_SetAllocators(failing_malloc, failing_free,
-                                      failing_realloc) == 0);
+        REQUIRE(oom_arm(fails) == 0);
         rc = wolfcert_scep_verify_rep_signer(signer, signer_len, bundle,
                                              bundle_len, NULL);
-        REQUIRE(wolfSSL_SetAllocators(mf, ff, rf) == 0);
-        g_allocs_left = -1;
-        if (rc != WOLFCERT_OK && rc != WOLFCERT_ERR_MEMORY) {
+        REQUIRE((failed = oom_disarm()) >= 0);
+        if (rc != WOLFCERT_OK && (rc != WOLFCERT_ERR_MEMORY || !failed)) {
             fprintf(stderr, "FAIL verify_rep_signer with allocation %d "
                     "failing: %d\n", fails, rc);
             return 1;
@@ -2244,6 +2262,7 @@ static int check_text_attrib(const uint8_t* ca_der, size_t ca_len,
     REQUIRE(make_signed_with_attribs(ca_der, ca_len, ca_key, ca_key_len,
                                      &attrib, 1, &msg, &msg_len) == 0);
 
+    wolfcert_clear_error();
     rc = wolfcert_scep_parse_pki_message(msg, msg_len, &env,
             NULL, NULL, NULL, NULL, NULL, NULL,
             &mt, &ps, NULL, NULL, &fi, NULL);
@@ -2272,6 +2291,8 @@ static int test_text_attrib_printable(void)
     static const byte ps_nul[]  = { 0x13, 0x02, '2', 0x00 };
     static const byte fi_nul[]  = { 0x13, 0x03, '0', 0x00, 'x' };
     static const byte mt_utf8[] = { 0x0C, 0x01, '3' };
+    static const byte ps_short[] = { 0x13, 0x05, '2' };
+    static const byte ps_empty[] = { 0x13, 0x00 };
     uint8_t* ca_der  = NULL;
     size_t   ca_len  = 0;
     uint8_t* ca_key  = NULL;
@@ -2294,7 +2315,22 @@ static int test_text_attrib_printable(void)
         check_text_attrib(ca_der, ca_len, ca_key, ca_key_len,
                           scep_oid_msg_type, sizeof(scep_oid_msg_type),
                           mt_utf8, sizeof(mt_utf8),
-                          WOLFCERT_ERR_PROTOCOL, NULL) != 0) {
+                          WOLFCERT_ERR_PROTOCOL, NULL) != 0 ||
+        check_text_attrib(ca_der, ca_len, ca_key, ca_key_len,
+                          scep_oid_pki_status, sizeof(scep_oid_pki_status),
+                          ps_short, sizeof(ps_short),
+                          WOLFCERT_ERR_PROTOCOL, NULL) != 0 ||
+        strstr(wolfcert_last_error_message(), "truncated") == NULL ||
+        check_text_attrib(ca_der, ca_len, ca_key, ca_key_len,
+                          scep_oid_pki_status, sizeof(scep_oid_pki_status),
+                          ps_empty, sizeof(ps_empty),
+                          WOLFCERT_ERR_PROTOCOL, NULL) != 0 ||
+        strstr(wolfcert_last_error_message(), "empty") == NULL ||
+        check_text_attrib(ca_der, ca_len, ca_key, ca_key_len,
+                          scep_oid_pki_status, sizeof(scep_oid_pki_status),
+                          ps_empty, 0, WOLFCERT_ERR_PROTOCOL, NULL) != 0 ||
+        strstr(wolfcert_last_error_message(), "empty") == NULL) {
+        fprintf(stderr, "text attribute: %s\n", wolfcert_last_error_message());
         ret = 1;
     }
 
@@ -2302,6 +2338,124 @@ static int test_text_attrib_printable(void)
     free(ca_key);
     return ret;
 }
+
+/* A tag or length cut short, or a value overrunning its SET, is truncated. */
+static int test_text_attrib_truncated(void)
+{
+    static const byte cut_tag[]   = { 0x13 };
+    static const byte cut_len81[] = { 0x13, 0x81 };
+    static const byte cut_len82[] = { 0x13, 0x82, 0x00 };
+    static const byte indef[]     = { 0x13, 0x80, '2', 0x00, 0x00 };
+    static const byte cut_set[]   = { 0x31, 0x81 };
+    static const byte over_set[]  = { 0x31, 0x03, 0x13, 0x05, '2' };
+    static const struct {
+        const byte* v;
+        word32      len;
+    } cases[] = {
+        { cut_tag,   sizeof(cut_tag) },
+        { cut_len81, sizeof(cut_len81) },
+        { cut_len82, sizeof(cut_len82) },
+        { indef,     sizeof(indef) },
+        { cut_set,   sizeof(cut_set) },
+        { over_set,  sizeof(over_set) },
+    };
+    uint8_t* ca_der  = NULL;
+    size_t   ca_len  = 0;
+    uint8_t* ca_key  = NULL;
+    size_t   ca_key_len = 0;
+    size_t   i;
+    int      ret = 0;
+
+    REQUIRE(make_ca(&ca_der, &ca_len, &ca_key, &ca_key_len) == 0);
+
+    for (i = 0; ret == 0 && i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (check_text_attrib(ca_der, ca_len, ca_key, ca_key_len,
+                              scep_oid_pki_status, sizeof(scep_oid_pki_status),
+                              cases[i].v, cases[i].len,
+                              WOLFCERT_ERR_PROTOCOL, NULL) != 0 ||
+            strstr(wolfcert_last_error_message(), "truncated") == NULL) {
+            fprintf(stderr, "truncated case %zu: %s\n", i,
+                    wolfcert_last_error_message());
+            ret = 1;
+        }
+    }
+
+    free(ca_der);
+    free(ca_key);
+    return ret;
+}
+
+#ifdef TEST_ALLOC_FAILURES
+/* Failing each allocation in turn must give an error or a parse with every
+ * attribute present. */
+static int test_parse_reports_oom(void)
+{
+    static const byte msg_type[] = { 0x13, 0x02, '1', '9' };
+    static const byte tid[] = { 0x13, 0x01, 'A' };
+    PKCS7Attrib attribs[2];
+    uint8_t* ca_der = NULL;
+    size_t   ca_len = 0;
+    uint8_t* ca_key = NULL;
+    size_t   ca_key_len = 0;
+    uint8_t* msg = NULL;
+    size_t   msg_len = 0;
+    int fails;
+    int failed;
+    int rc = WOLFCERT_ERR_MEMORY;
+    int ret = 0;
+
+    attribs[0].oid     = scep_oid_msg_type;
+    attribs[0].oidSz   = sizeof(scep_oid_msg_type);
+    attribs[0].value   = msg_type;
+    attribs[0].valueSz = sizeof(msg_type);
+    attribs[1].oid     = scep_oid_trans_id;
+    attribs[1].oidSz   = sizeof(scep_oid_trans_id);
+    attribs[1].value   = tid;
+    attribs[1].valueSz = sizeof(tid);
+    REQUIRE(make_ca(&ca_der, &ca_len, &ca_key, &ca_key_len) == 0);
+    REQUIRE(make_signed_with_attribs(ca_der, ca_len, ca_key, ca_key_len,
+                                     attribs, 2, &msg, &msg_len) == 0);
+
+    for (fails = 0; ret == 0 && rc != WOLFCERT_OK; fails++) {
+        WolfCertBuffer env = { 0 };
+        uint8_t* t = NULL;
+        size_t   t_len = 0;
+        uint8_t* signer = NULL;
+        size_t   signer_len = 0;
+        char*    mt = NULL;
+
+        wolfcert_clear_error();
+        REQUIRE(oom_arm(fails) == 0);
+        rc = wolfcert_scep_parse_pki_message(msg, msg_len, &env, &t, &t_len,
+                NULL, NULL, NULL, NULL, &mt, NULL, &signer, &signer_len,
+                NULL, NULL);
+        REQUIRE((failed = oom_disarm()) >= 0);
+        /* wolfSSL's PKCS#7 verify can report a failed allocation as a parse
+         * error, so only wolfCert's own allocations must give ERR_MEMORY. */
+        if (rc == WOLFCERT_OK ?
+                (t == NULL || mt == NULL || signer == NULL) :
+                (!failed ||
+                 (rc != WOLFCERT_ERR_MEMORY &&
+                  wolfcert_last_wolfssl_err() == 0) ||
+                 t != NULL || mt != NULL || signer != NULL ||
+                 env.data != NULL)) {
+            fprintf(stderr, "FAIL parse_pki_message with allocation %d "
+                    "failing: %d\n", fails, rc);
+            ret = 1;
+        }
+        WOLFCERT_XFREE(t, NULL);
+        WOLFCERT_XFREE(signer, NULL);
+        WOLFCERT_XFREE(mt, NULL);
+        wolfcert_buffer_free(&env);
+    }
+
+    free(msg);
+    free(ca_der);
+    free(ca_key);
+    REQUIRE(fails > 1);
+    return ret;
+}
+#endif
 
 int main(void)
 {
@@ -2353,7 +2507,13 @@ int main(void)
         return 1;
     if (test_multi_value_signed_attrib())
         return 1;
+#ifdef TEST_ALLOC_FAILURES
+    if (test_parse_reports_oom())
+        return 1;
+#endif
     if (test_text_attrib_printable())
+        return 1;
+    if (test_text_attrib_truncated())
         return 1;
 #ifdef HAVE_ECC
     if (test_envelop_rejects_ecc_ra())
