@@ -75,7 +75,7 @@ wolfSCEP_response(scep, answer, &answerSz, 0);
 if (wolfSCEP_reply_status(scep) == WS_PKI_SUCCESS) { /* ... */ }
 ```
 
-The same enrollment in wolfCert, which is `examples/enroll_scep.c` with the fingerprint check added:
+The same enrollment in wolfCert; `examples/enroll_scep.c` is a runnable version of it:
 
 ```c
 WolfCertServerCfg srv = {
