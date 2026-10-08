@@ -41,6 +41,8 @@ typedef struct {
     int get_next_ca_cert;        /* GetCACaps: GetNextCACert */
 } WolfCertScepCaps;
 
+/* GET ?operation=GetCACaps. A non-200 reply returns WOLFCERT_ERR_HTTP with
+ * out_caps all zero. */
 WOLFCERT_API int wolfcert_scep_get_ca_caps(const WolfCertServerCfg* srv,
                                            WolfCertScepCaps* out_caps);
 
