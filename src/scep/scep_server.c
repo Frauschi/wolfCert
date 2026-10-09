@@ -834,17 +834,47 @@ static int handle_enroll(WolfCertServer* s, int fd, const char* mt,
                            tid, tid_len, snonce, snonce_len, NULL);
 }
 
-/* GetCertInitial (20): the first poll signed with the parked CSR's key
- * issues the cert; any other poll fails and leaves the queue unchanged. */
+/* 1 when `name` holds the contents of the CSR's subject Name. */
+static int csr_subject_is(const uint8_t* csr_der, size_t csr_len,
+                          const uint8_t* name, size_t name_len, void* heap)
+{
+    DecodedCert dc;
+    int match = 0;
+
+    wc_InitDecodedCert(&dc, (byte*)csr_der, (word32)csr_len, heap);
+    if (wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL) == 0) {
+        match = dc.subjectRaw != NULL && dc.subjectRawLen > 0 &&
+                (size_t)dc.subjectRawLen == name_len &&
+                memcmp(dc.subjectRaw, name, name_len) == 0;
+    }
+    wc_FreeDecodedCert(&dc);
+
+    return match;
+}
+
+/* GetCertInitial (20): the first poll signed by the parked CSR's key that
+ * names this CA and the CSR's subject releases it; others keep it queued. */
 static int handle_get_cert_initial(WolfCertServer* s, int fd,
+                                   const WolfCertBuffer* ias,
                                    const uint8_t* signer_cert,
                                    size_t signer_cert_len,
                                    const uint8_t* tid, size_t tid_len,
                                    const uint8_t* snonce, size_t snonce_len)
 {
     ScepPriv* p = (ScepPriv*)s->priv;
+    const uint8_t* issuer = NULL;
+    size_t issuer_len = 0;
+    const uint8_t* subject = NULL;
+    size_t subject_len = 0;
     ScepPending* e = pending_find(p, tid, tid_len);
-    if (e == NULL) {
+
+    if (e == NULL ||
+            wolfcert_scep_parse_issuer_and_subject(ias->data, ias->len,
+                &issuer, &issuer_len, &subject, &subject_len) != WOLFCERT_OK ||
+            !wolfcert_scep_issuer_name_matches(s->ca.cert_der,
+                s->ca.cert_der_len, issuer, issuer_len, s->heap) ||
+            !csr_subject_is(e->csr_der, e->csr_len, subject, subject_len,
+                            s->heap)) {
         return send_pki_failure(s, fd, tid, tid_len, snonce, snonce_len,
                                 "4" /* badCertId */);
     }
@@ -990,8 +1020,9 @@ static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
                            tid, tid_len, snonce, snonce_len);
     }
     else if (strcmp(mt, "20") == 0) {
-        rc = handle_get_cert_initial(s, fd, signer_cert, signer_cert_len,
-                                     tid, tid_len, snonce, snonce_len);
+        rc = handle_get_cert_initial(s, fd, &csr, signer_cert,
+                                     signer_cert_len, tid, tid_len,
+                                     snonce, snonce_len);
     }
     else if (strcmp(mt, "21") == 0 && s->cfg.scep_enable_get_cert) {
         const uint8_t* gc_signer     = signer_cert;

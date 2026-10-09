@@ -335,6 +335,15 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_serial(
                                      const uint8_t** out_serial,
                                      size_t* out_serial_len);
 
+/* Split an IssuerAndSubject into the contents of its two Names; both point
+ * into `der`. */
+WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_subject(
+                                     const uint8_t* der, size_t der_len,
+                                     const uint8_t** out_issuer,
+                                     size_t* out_issuer_len,
+                                     const uint8_t** out_subject,
+                                     size_t* out_subject_len);
+
 /* 1 if a certificate in `pem` has `issuer` and `serial`, 0 if not, or
  * WOLFCERT_ERR_MEMORY. Unparseable entries are skipped. */
 WOLFCERT_TEST_VIS int wolfcert_scep_pem_has_cert(const uint8_t* pem, size_t pem_len,

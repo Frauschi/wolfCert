@@ -1208,6 +1208,48 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_serial(
     return WOLFCERT_OK;
 }
 
+WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_subject(
+                                      const uint8_t* der, size_t der_len,
+                                      const uint8_t** out_issuer,
+                                      size_t* out_issuer_len,
+                                      const uint8_t** out_subject,
+                                      size_t* out_subject_len)
+{
+    byte   tag;
+    size_t clen;
+    int    hdr;
+
+    if (der == NULL || out_issuer == NULL || out_issuer_len == NULL ||
+            out_subject == NULL || out_subject_len == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    hdr = der_read_tlv(der, der_len, &tag, &clen);
+    if (hdr < 0 || tag != 0x30 || (size_t)hdr + clen != der_len)
+        return WOLFCERT_ERR_PARSE;
+
+    const uint8_t* p    = der + hdr;
+    size_t         left = clen;
+
+    hdr = der_read_tlv(p, left, &tag, &clen);
+    if (hdr < 0 || tag != 0x30)
+        return WOLFCERT_ERR_PARSE;
+
+    *out_issuer     = p + hdr;
+    *out_issuer_len = clen;
+
+    p    += (size_t)hdr + clen;
+    left -= (size_t)hdr + clen;
+
+    hdr = der_read_tlv(p, left, &tag, &clen);
+    if (hdr < 0 || tag != 0x30 || left != (size_t)hdr + clen)
+        return WOLFCERT_ERR_PARSE;
+
+    *out_subject     = p + hdr;
+    *out_subject_len = clen;
+
+    return WOLFCERT_OK;
+}
+
 WOLFCERT_TEST_VIS int wolfcert_scep_issuer_name_matches(
                                       const uint8_t* cert_der, size_t cert_len,
                                       const uint8_t* name, size_t name_len,

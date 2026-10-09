@@ -110,6 +110,33 @@ static int post_signed(const char* url, WolfCertKey* dk,
     return 0;
 }
 
+/* Poll tid with `ias` enveloped to the CA; the server must answer badCertId. */
+static int poll_ias_refused(const char* url, WolfCertKey* dk,
+                            const WolfCertBuffer* csr,
+                            const uint8_t* ca_der, size_t ca_len,
+                            const uint8_t* tid, size_t tid_len,
+                            const uint8_t* ias, size_t ias_len)
+{
+    WolfCertBuffer env = { 0 };
+    char* status = NULL;
+    char* fail_info = NULL;
+    int refused = 0;
+
+    if (wolfcert_scep_envelop(ca_der, ca_len, ias, ias_len, AES128CBCb, &env,
+                              NULL) == WOLFCERT_OK &&
+            post_signed(url, dk, csr, "20", tid, tid_len, env.data, env.len,
+                        &status, &fail_info) == 0) {
+        refused = status != NULL && strcmp(status, "2") == 0 &&
+                  fail_info != NULL && strcmp(fail_info, "4") == 0;
+    }
+
+    WOLFCERT_XFREE(status, NULL);
+    WOLFCERT_XFREE(fail_info, NULL);
+    wolfcert_buffer_free(&env);
+    REQUIRE(refused);
+    return 0;
+}
+
 /* Sign with dk a CSR that verifies but carries a directoryName SAN, which the
  * CA refuses to issue. Returns the DER length, or <= 0 on error. */
 static int dir_san_csr(WolfCertKey* dk, uint8_t* der, int der_sz)
@@ -216,6 +243,38 @@ static int poll_path(WolfCertServer* s)
     REQUIRE(rx.status == WOLFCERT_SCEP_STATUS_FAILURE);
     REQUIRE(rx.fail_info == 4);
     wolfcert_scep_result_free(&rx);
+
+    /* Nor may the parking key with a malformed IssuerAndSubject, or one that
+     * names another issuer or another subject. */
+    static const uint8_t junk_ias[] = { 0xDE, 0xAD };
+    WolfCertCertMeta subj_meta = { .subject_dn = "CN=device-poll-2" };
+    WolfCertBuffer subj_csr = { 0 };
+    WolfCertBuffer ias = { 0 };
+    uint8_t* self = NULL;
+    size_t self_len = 0;
+    REQUIRE(poll_ias_refused(url, dk, &csr, ca_der->buffer, ca_der->length,
+                             r1.transaction_id, r1.transaction_id_len,
+                             junk_ias, sizeof(junk_ias)) == 0);
+    REQUIRE(wolfcert_scep_self_signed_rsa((RsaKey*)dk->impl, csr.data,
+                                          csr.len, &self, &self_len,
+                                          NULL) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_issuer_and_subject(self, self_len, csr.data,
+                                             csr.len, &ias, NULL)
+            == WOLFCERT_OK);
+    WOLFCERT_XFREE(self, NULL);
+    REQUIRE(poll_ias_refused(url, dk, &csr, ca_der->buffer, ca_der->length,
+                             r1.transaction_id, r1.transaction_id_len,
+                             ias.data, ias.len) == 0);
+    wolfcert_buffer_free(&ias);
+    REQUIRE(wolfcert_csr_build(dk, &subj_meta, &subj_csr) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_issuer_and_subject(ca_der->buffer, ca_der->length,
+                                             subj_csr.data, subj_csr.len,
+                                             &ias, NULL) == WOLFCERT_OK);
+    wolfcert_buffer_free(&subj_csr);
+    REQUIRE(poll_ias_refused(url, dk, &csr, ca_der->buffer, ca_der->length,
+                             r1.transaction_id, r1.transaction_id_len,
+                             ias.data, ias.len) == 0);
+    wolfcert_buffer_free(&ias);
 
     /* Nor may another key's PKCSReq take over the parked transactionID. */
     WolfCertBuffer other_env = { 0 };
