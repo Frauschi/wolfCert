@@ -998,7 +998,7 @@ static int issuer_and_subject_der(DecodedCert* ic, DecodedCert* sc,
     issuing_ca_name(ic, &issuer_name, &issuer_name_len);
 
     if (issuer_name == NULL || issuer_name_len <= 0 ||
-            sc->subjectRaw == NULL || sc->subjectRawLen <= 0) {
+            sc->subjectRaw == NULL || sc->subjectRawLen < 0) {
         wc_FreeDecodedCert(ic);
         wc_FreeDecodedCert(sc);
         return WOLFCERT_ERR_PARSE;
@@ -1163,19 +1163,17 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_and_serial(
     return rc;
 }
 
-WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_serial(
-                                      const uint8_t* der, size_t der_len,
-                                      const uint8_t** out_issuer,
-                                      size_t* out_issuer_len,
-                                      const uint8_t** out_serial,
-                                      size_t* out_serial_len)
+/* Split SEQUENCE { issuer Name, element tagged want }; both point into der. */
+static int parse_issuer_and(const uint8_t* der, size_t der_len, byte want,
+                            const uint8_t** out_issuer, size_t* out_issuer_len,
+                            const uint8_t** out_next, size_t* out_next_len)
 {
     byte   tag;
     size_t clen;
     int    hdr;
 
     if (der == NULL || out_issuer == NULL || out_issuer_len == NULL ||
-            out_serial == NULL || out_serial_len == NULL)
+            out_next == NULL || out_next_len == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     hdr = der_read_tlv(der, der_len, &tag, &clen);
@@ -1196,17 +1194,42 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_serial(
     left -= (size_t)hdr + clen;
 
     hdr = der_read_tlv(p, left, &tag, &clen);
-    if (hdr < 0 || tag != 0x02 || clen == 0)
+    if (hdr < 0 || tag != want || left != (size_t)hdr + clen)
         return WOLFCERT_ERR_PARSE;
 
-    if (left != (size_t)hdr + clen)
-        return WOLFCERT_ERR_PARSE;
-
-    *out_serial     = p + hdr;
-    *out_serial_len = clen;
-    wolfcert_scep_int_magnitude(out_serial, out_serial_len);
+    *out_next     = p + hdr;
+    *out_next_len = clen;
 
     return WOLFCERT_OK;
+}
+
+WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_serial(
+                                      const uint8_t* der, size_t der_len,
+                                      const uint8_t** out_issuer,
+                                      size_t* out_issuer_len,
+                                      const uint8_t** out_serial,
+                                      size_t* out_serial_len)
+{
+    int rc = parse_issuer_and(der, der_len, 0x02, out_issuer, out_issuer_len,
+                              out_serial, out_serial_len);
+
+    if (rc == WOLFCERT_OK && *out_serial_len == 0)
+        rc = WOLFCERT_ERR_PARSE;
+    if (rc == WOLFCERT_OK)
+        wolfcert_scep_int_magnitude(out_serial, out_serial_len);
+
+    return rc;
+}
+
+WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_subject(
+                                      const uint8_t* der, size_t der_len,
+                                      const uint8_t** out_issuer,
+                                      size_t* out_issuer_len,
+                                      const uint8_t** out_subject,
+                                      size_t* out_subject_len)
+{
+    return parse_issuer_and(der, der_len, 0x30, out_issuer, out_issuer_len,
+                            out_subject, out_subject_len);
 }
 
 WOLFCERT_TEST_VIS int wolfcert_scep_issuer_name_matches(
@@ -1217,6 +1240,7 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_name_matches(
     const uint8_t* mine;
     int            mine_len;
     int            match;
+    int            wrc;
 
     if (cert_der == NULL || name == NULL || name_len == 0)
         return 0;
@@ -1224,9 +1248,10 @@ WOLFCERT_TEST_VIS int wolfcert_scep_issuer_name_matches(
     DecodedCert dc;
     wc_InitDecodedCert(&dc, (byte*)cert_der, (word32)cert_len, heap);
 
-    if (wc_ParseCert(&dc, CERT_TYPE, NO_VERIFY, NULL) != 0) {
+    wrc = wc_ParseCert(&dc, CERT_TYPE, NO_VERIFY, NULL);
+    if (wrc != 0) {
         wc_FreeDecodedCert(&dc);
-        return 0;
+        return wrc == MEMORY_E ? WOLFCERT_ERR_MEMORY : 0;
     }
 
     issuing_ca_name(&dc, &mine, &mine_len);

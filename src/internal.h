@@ -203,7 +203,8 @@ WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
     int omit_recipient_nonce, int sign_with_wrong_key, int rng_fail);
 
 /* Out of memory: 1 fails wolfcert_ca_issue, 2 the reply after issuing, 3 the
- * signer key check of a PKCSReq or GetCertInitial; 0 clears it. */
+ * PKCSReq/GetCertInitial signer key, 4 GetCertInitial and GetCert names; 0
+ * clears it. */
 WOLFCERT_TEST_VIS void wolfcert_scep_server_set_oom_fault(WolfCertServer* s,
                                                           int when);
 #endif
@@ -394,6 +395,15 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_serial(
                                      const uint8_t** out_serial,
                                      size_t* out_serial_len);
 
+/* Split an IssuerAndSubject into the contents of its two Names; both point
+ * into `der`. */
+WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_subject(
+                                     const uint8_t* der, size_t der_len,
+                                     const uint8_t** out_issuer,
+                                     size_t* out_issuer_len,
+                                     const uint8_t** out_subject,
+                                     size_t* out_subject_len);
+
 /* 1 if a certificate in `pem` has `issuer` and `serial`, 0 if not, or
  * WOLFCERT_ERR_MEMORY. Unparseable entries are skipped. */
 WOLFCERT_TEST_VIS int wolfcert_scep_pem_has_cert(const uint8_t* pem, size_t pem_len,
@@ -401,7 +411,8 @@ WOLFCERT_TEST_VIS int wolfcert_scep_pem_has_cert(const uint8_t* pem, size_t pem_
                                      const uint8_t* serial, size_t serial_len,
                                      void* heap);
 
-/* 1 if `name` is the Name the CA in `cert_der` issues under. */
+/* 1 if `name` is the Name the CA in `cert_der` issues under, 0 if not, or
+ * WOLFCERT_ERR_MEMORY. */
 WOLFCERT_TEST_VIS int wolfcert_scep_issuer_name_matches(
                                      const uint8_t* cert_der, size_t cert_len,
                                      const uint8_t* name, size_t name_len,

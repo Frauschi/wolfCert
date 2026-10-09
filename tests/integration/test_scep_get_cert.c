@@ -112,6 +112,26 @@ static int get_cert_path(WolfCertServer* s)
     REQUIRE(memcmp(fetched_der->buffer, issued_der->buffer,
                    issued_der->length) == 0);
 
+    /* Step 2b: running out of memory matching the issuer answers 500, and the
+     * next GetCert succeeds again. */
+    wolfcert_scep_result_free(&r2);
+    wolfcert_scep_server_set_oom_fault(s, 4);
+    rc = wolfcert_scep_get_cert(&cli, &caps,
+                                ca_der->buffer, ca_der->length,
+                                ca_der->buffer, ca_der->length,
+                                issued_der->buffer, issued_der->length,
+                                dk, ic.serial, (size_t)ic.serialSz, &r2);
+    wolfcert_scep_server_set_oom_fault(s, 0);
+    REQUIRE(rc == WOLFCERT_ERR_HTTP);
+    wolfcert_scep_result_free(&r2);
+    rc = wolfcert_scep_get_cert(&cli, &caps,
+                                ca_der->buffer, ca_der->length,
+                                ca_der->buffer, ca_der->length,
+                                issued_der->buffer, issued_der->length,
+                                dk, ic.serial, (size_t)ic.serialSz, &r2);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(r2.status == WOLFCERT_SCEP_STATUS_SUCCESS);
+
     /* Step 3: a serial the CA never issued -> FAILURE / badCertId. */
     uint8_t bogus[8];
     memset(bogus, 0x7E, sizeof(bogus));

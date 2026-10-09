@@ -1215,12 +1215,12 @@ static int test_issuer_and_serial(void)
     REQUIRE(got_iss_len == (size_t)cc.subjectRawLen);
     REQUIRE(memcmp(got_iss, cc.subjectRaw, got_iss_len) == 0);
     REQUIRE(wolfcert_scep_issuer_name_matches(ca_der, ca_len, got_iss,
-                                              got_iss_len, NULL));
+                                              got_iss_len, NULL) == 1);
     /* The leaf names the same CA as issuer; only the unrelated CA fails. */
     REQUIRE(wolfcert_scep_issuer_name_matches(leaf_der, leaf_len, got_iss,
-                                              got_iss_len, NULL));
-    REQUIRE(!wolfcert_scep_issuer_name_matches(other_der, other_len, got_iss,
-                                               got_iss_len, NULL));
+                                              got_iss_len, NULL) == 1);
+    REQUIRE(wolfcert_scep_issuer_name_matches(other_der, other_len, got_iss,
+                                              got_iss_len, NULL) == 0);
 
     /* A truncated encoding is rejected rather than read past the end. */
     REQUIRE(wolfcert_scep_parse_issuer_and_serial(ias.data, ias.len - 1,
@@ -1361,6 +1361,71 @@ static int test_issuer_and_subject_issuer_name(void)
     wc_FreeRng(&rng);
 
     REQUIRE(rc == 0);
+    return 0;
+}
+
+/* IssuerAndSubject parsing returns both Names and refuses any other shape. */
+static int test_parse_issuer_and_subject(void)
+{
+    static const uint8_t ias[] = {
+        0x30, 0x0A,
+        0x30, 0x03, 0x31, 0x01, 0xAA,       /* issuer */
+        0x30, 0x03, 0x31, 0x01, 0xBB        /* subject */
+    };
+    uint8_t buf[sizeof(ias) + 2];
+    const uint8_t* iss = NULL;
+    const uint8_t* sub = NULL;
+    size_t iss_len = 0;
+    size_t sub_len = 0;
+
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(ias, sizeof(ias), &iss,
+                &iss_len, &sub, &sub_len) == WOLFCERT_OK);
+    REQUIRE(iss == ias + 4 && iss_len == 3);
+    REQUIRE(sub == ias + 9 && sub_len == 3);
+
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(ias, 0, &iss, &iss_len,
+                &sub, &sub_len) == WOLFCERT_ERR_PARSE);
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(ias, sizeof(ias) - 1,
+                &iss, &iss_len, &sub, &sub_len) == WOLFCERT_ERR_PARSE);
+
+    /* Bytes after the outer SEQUENCE. */
+    memcpy(buf, ias, sizeof(ias));
+    buf[sizeof(ias)] = 0x05;
+    buf[sizeof(ias) + 1] = 0x00;
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(buf, sizeof(buf), &iss,
+                &iss_len, &sub, &sub_len) == WOLFCERT_ERR_PARSE);
+
+    /* A third element inside it. */
+    buf[1] = (uint8_t)(ias[1] + 2);
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(buf, sizeof(buf), &iss,
+                &iss_len, &sub, &sub_len) == WOLFCERT_ERR_PARSE);
+
+    /* No subject. */
+    memcpy(buf, ias, 7);
+    buf[1] = 0x05;
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(buf, 7, &iss, &iss_len,
+                &sub, &sub_len) == WOLFCERT_ERR_PARSE);
+
+    /* A Name that is not a SEQUENCE, issuer then subject. */
+    memcpy(buf, ias, sizeof(ias));
+    buf[2] = 0x31;
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(buf, sizeof(ias), &iss,
+                &iss_len, &sub, &sub_len) == WOLFCERT_ERR_PARSE);
+    buf[2] = 0x30;
+    buf[7] = 0x31;
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(buf, sizeof(ias), &iss,
+                &iss_len, &sub, &sub_len) == WOLFCERT_ERR_PARSE);
+
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(NULL, sizeof(ias), &iss,
+                &iss_len, &sub, &sub_len) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(ias, sizeof(ias), NULL,
+                &iss_len, &sub, &sub_len) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(ias, sizeof(ias), &iss,
+                NULL, &sub, &sub_len) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(ias, sizeof(ias), &iss,
+                &iss_len, NULL, &sub_len) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_parse_issuer_and_subject(ias, sizeof(ias), &iss,
+                &iss_len, &sub, NULL) == WOLFCERT_ERR_BAD_ARG);
     return 0;
 }
 
@@ -2642,6 +2707,8 @@ int main(void)
     if (test_pick_hash_oid())
         return 1;
     if (test_is_signed_data())
+        return 1;
+    if (test_parse_issuer_and_subject())
         return 1;
 #ifdef HAVE_ECC
     if (run_test(test_envelop_rejects_ecc_ra))
