@@ -418,6 +418,9 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_get_url(const char* base,
 /* base?operation=<op>[&message=<ca_id>], heap-allocated, or NULL. */
 WOLFCERT_TEST_VIS char* wolfcert_scep_build_getca_url(const char* base,
     const char* op, const char* ca_id, void* heap);
+
+/* 1 when b is a CMS ContentInfo of type signedData, not a bare cert. */
+WOLFCERT_TEST_VIS int wolfcert_scep_is_signed_data(const uint8_t* b, size_t len);
 int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_cert_len,
                             const uint8_t* recipient_key_der,  size_t recipient_key_len,
                             const uint8_t* env_der, size_t env_len,

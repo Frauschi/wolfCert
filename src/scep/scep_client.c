@@ -249,6 +249,8 @@ int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv, WolfCertEncoding
             ++p;
         is_p7 = (*p == '\0' || *p == ';');
     }
+    if (!is_p7)
+        is_p7 = wolfcert_scep_is_signed_data(resp.body, resp.body_len);
     if (is_p7) {
         if (enc == WOLFCERT_ENCODING_DER) {
             rc = wolfcert_pkcs7_certs_to_der(resp.body, resp.body_len, out_ca, heap);

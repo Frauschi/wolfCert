@@ -1285,6 +1285,26 @@ static size_t der_seq_len(const uint8_t* p, size_t len)
     return (size_t)hdr + clen;
 }
 
+WOLFCERT_TEST_VIS int wolfcert_scep_is_signed_data(const uint8_t* b,
+                                                   size_t len)
+{
+    static const uint8_t oid[] = { 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7,
+                                   0x0D, 0x01, 0x07, 0x02 };
+    byte   tag;
+    size_t clen;
+    int    hdr = 2;
+
+    /* der_read_tlv() rejects the BER indefinite length. */
+    if (len < 2 || b[1] != 0x80) {
+        hdr = der_read_tlv(b, len, &tag, &clen);
+        if (hdr < 0)
+            return 0;
+    }
+
+    return b[0] == 0x30 && len >= (size_t)hdr + sizeof(oid) &&
+           memcmp(b + hdr, oid, sizeof(oid)) == 0;
+}
+
 WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert,
                                     size_t signer_cert_len,
                                     const uint8_t* ca_bundle, size_t ca_bundle_len,

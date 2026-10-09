@@ -2383,6 +2383,47 @@ static int test_text_attrib_printable(void)
     return ret;
 }
 
+/* Short, long and indefinite outer lengths name signedData; a bare cert, a
+ * wrong outer tag, a cut OID and an overrunning length do not. */
+static int test_is_signed_data(void)
+{
+#define SD_OID 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x07, 0x02
+    static const byte short_len[] = { 0x30, 0x0B, SD_OID };
+    static const byte long_len[]  = { 0x30, 0x81, 0x0B, SD_OID };
+    static const byte indef[]     = { 0x30, 0x80, SD_OID, 0x00, 0x00 };
+    static const byte cert[]      = { 0x30, 0x05, 0x30, 0x03, 0x02, 0x01, 0x01 };
+    static const byte set_tag[]   = { 0x31, 0x0B, SD_OID };
+    static const byte cut_oid[]   = { 0x30, 0x0A, 0x06, 0x09, 0x2A, 0x86, 0x48,
+                                      0x86, 0xF7, 0x0D, 0x01, 0x07 };
+    static const byte overrun[]   = { 0x30, 0x81, 0x40, SD_OID };
+    static const byte one_byte[]  = { 0x30 };
+#undef SD_OID
+    static const struct {
+        const byte* v;
+        size_t      len;
+        int         want;
+    } cases[] = {
+        { short_len, sizeof(short_len), 1 },
+        { long_len,  sizeof(long_len),  1 },
+        { indef,     sizeof(indef),     1 },
+        { cert,      sizeof(cert),      0 },
+        { set_tag,   sizeof(set_tag),   0 },
+        { cut_oid,   sizeof(cut_oid),   0 },
+        { overrun,   sizeof(overrun),   0 },
+        { one_byte,  sizeof(one_byte),  0 },
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        if (wolfcert_scep_is_signed_data(cases[i].v, cases[i].len)
+                != cases[i].want) {
+            fprintf(stderr, "is_signed_data case %zu\n", i);
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* A tag or length cut short, or a value overrunning its SET, is truncated. */
 static int test_text_attrib_truncated(void)
 {
@@ -2558,6 +2599,8 @@ int main(void)
     if (run_test(test_text_attrib_printable))
         return 1;
     if (run_test(test_text_attrib_truncated))
+        return 1;
+    if (test_is_signed_data())
         return 1;
 #ifdef HAVE_ECC
     if (run_test(test_envelop_rejects_ecc_ra))
