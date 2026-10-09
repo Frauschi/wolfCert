@@ -225,7 +225,7 @@ contract, alone or in a group comment.
 
   README "Quick start" has the SCEP and CA-pinning variants; `--help` on
   either tool lists the client authentication and approval options.
-- `wolfcert-client` also covers `getcacerts`, `reenroll` (EST) and
+- `wolfcert-client` also covers `getcacerts`, `reenroll` (EST and SCEP) and
   `getnextca` / `getcert` (SCEP), which is handy for checking a production CA
   before writing code against it.
 - On Zephyr, the EST client sample runs against a host `wolfcert-server`;

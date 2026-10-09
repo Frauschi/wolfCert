@@ -13,7 +13,7 @@ Because a failed dependency *build* also ends in a 77 skip (the binary never lan
 | Script | Peer | What it checks |
 |---|---|---|
 | `openssl_pkcs7_xcheck.sh` | OpenSSL `cms`/`x509` | Lower-bound cross-check of wolfCert-produced PKCS#7 / certs. Always present. |
-| `scep_micromdm.sh` | micromdm/scep (`apt install scep`) | D2 wolfcert-client -> scepserver, D1 scepclient -> wolfcert-server, plus the SCEP client options: `--ca-id`, `--txid-mode pubkey`, and an AES-256 probe (note 6). |
+| `scep_micromdm.sh` | micromdm/scep (`apt install scep`) | D2 wolfcert-client -> scepserver including a RenewalReq `reenroll`, D1 scepclient -> wolfcert-server, plus the SCEP client options: `--ca-id`, `--txid-mode pubkey`, and an AES-256 probe (note 6). |
 | `est_globalsign.sh` | globalsign/est (Go) | wolfcert-client <-> globalsign estserver/estclient, both directions. |
 | `est_libest.sh` | cisco/libest (built from source) | wolfcert-client -> libest estserver, libest estclient -> wolfcert-server. |
 | `est_stepca.sh` | smallstep/step-ca (Go) | EST probe + SCEP enrollment against step-ca, plus a `--ca-id` GetCACert check. |

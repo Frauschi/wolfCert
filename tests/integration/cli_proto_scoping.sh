@@ -372,6 +372,33 @@ else
             fails=$((fails + 1))
         fi
 
+        if "$CLI" reenroll --proto scep --url "$PIN_URL" \
+                --ca-fingerprint "$fp" --cert "$tmp/ok.crt" \
+                --key "$tmp/ok.key" --out-cert "$tmp/renewed.crt" \
+                >"$tmp/reenroll.log" 2>&1 &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/renewed.crt" &&
+                ! cmp -s "$tmp/ok.crt" "$tmp/renewed.crt"; then
+            echo "ok   SCEP reenroll renews the pinned enrollment"
+        else
+            echo "FAIL: SCEP reenroll did not renew the certificate"
+            cat "$tmp/reenroll.log"
+            fails=$((fails + 1))
+        fi
+
+        awk '/^-----BEGIN/ { f = 1; next } /^-----END/ { exit } f' \
+            "$tmp/renewed.crt" | base64 --decode >"$tmp/renewed.der"
+        if "$CLI" reenroll --proto scep --url "$PIN_URL" \
+                --ca-fingerprint "$fp" --cert "$tmp/renewed.der" \
+                --key "$tmp/ok.key" --out-cert "$tmp/renewed-der.crt" \
+                >"$tmp/reenroll-der.log" 2>&1 &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/renewed-der.crt"; then
+            echo "ok   SCEP reenroll takes a DER --cert"
+        else
+            echo "FAIL: SCEP reenroll with a DER --cert"
+            cat "$tmp/reenroll-der.log"
+            fails=$((fails + 1))
+        fi
+
         # getnextca resolves the current CA through the same pin.
         expect_reject "getnextca with a mismatched --ca-fingerprint" \
             "does not match --ca-fingerprint" \
@@ -457,6 +484,18 @@ else
         else
             echo "FAIL: enroll with the CA and RA pinned"
             cat "$tmp/ra-enroll.log"
+            fails=$((fails + 1))
+        fi
+
+        if "$CLI" reenroll --proto scep --url "$RA_URL" $poll \
+                --ca-fingerprint "$ca_fp" --ra-fingerprint "$ra_fp" \
+                --cert "$tmp/ra-ok.crt" --key "$tmp/ra-ok.key" \
+                --out-cert "$tmp/ra-renewed.crt" >"$tmp/ra-reenroll.log" 2>&1 &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/ra-renewed.crt"; then
+            echo "ok   SCEP reenroll through the RA with the CA and RA pinned"
+        else
+            echo "FAIL: SCEP reenroll through the RA"
+            cat "$tmp/ra-reenroll.log"
             fails=$((fails + 1))
         fi
 
