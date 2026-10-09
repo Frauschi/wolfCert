@@ -2314,6 +2314,45 @@ static int test_text_attrib_printable(void)
     return ret;
 }
 
+/* AUTO follows the caps within the digests wolfSSL has; an explicit hash is
+ * used as is or reported unsupported. */
+static int test_pick_hash_oid(void)
+{
+    WolfCertScepCaps none = { 0 };
+    WolfCertScepCaps s512 = { .sha512 = 1, .sha384 = 1 };
+    WolfCertScepCaps s384 = { .sha384 = 1 };
+
+    REQUIRE(wolfcert_scep_pick_hash_oid(NULL, WOLFCERT_SCEP_HASH_AUTO)
+            == SHA256h);
+    REQUIRE(wolfcert_scep_pick_hash_oid(&none, WOLFCERT_SCEP_HASH_AUTO)
+            == SHA256h);
+    REQUIRE(wolfcert_scep_pick_hash_oid(&s512, WOLFCERT_SCEP_HASH_SHA256)
+            == SHA256h);
+#ifdef WOLFSSL_SHA512
+    REQUIRE(wolfcert_scep_pick_hash_oid(&s512, WOLFCERT_SCEP_HASH_AUTO)
+            == SHA512h);
+    REQUIRE(wolfcert_scep_pick_hash_oid(&none, WOLFCERT_SCEP_HASH_SHA512)
+            == SHA512h);
+#else
+    REQUIRE(wolfcert_scep_pick_hash_oid(&s512, WOLFCERT_SCEP_HASH_AUTO)
+            != SHA512h);
+    REQUIRE(wolfcert_scep_pick_hash_oid(&none, WOLFCERT_SCEP_HASH_SHA512)
+            == WOLFCERT_ERR_UNSUPPORTED);
+#endif
+#ifdef WOLFSSL_SHA384
+    REQUIRE(wolfcert_scep_pick_hash_oid(&s384, WOLFCERT_SCEP_HASH_AUTO)
+            == SHA384h);
+    REQUIRE(wolfcert_scep_pick_hash_oid(&none, WOLFCERT_SCEP_HASH_SHA384)
+            == SHA384h);
+#else
+    REQUIRE(wolfcert_scep_pick_hash_oid(&s384, WOLFCERT_SCEP_HASH_AUTO)
+            == SHA256h);
+    REQUIRE(wolfcert_scep_pick_hash_oid(&none, WOLFCERT_SCEP_HASH_SHA384)
+            == WOLFCERT_ERR_UNSUPPORTED);
+#endif
+    return 0;
+}
+
 /* A tag or length cut short, or a value overrunning its SET, is truncated. */
 static int test_text_attrib_truncated(void)
 {
@@ -2495,6 +2534,8 @@ int main(void)
     if (test_text_attrib_printable())
         return 1;
     if (test_text_attrib_truncated())
+        return 1;
+    if (test_pick_hash_oid())
         return 1;
 #ifdef HAVE_ECC
     if (test_envelop_rejects_ecc_ra())

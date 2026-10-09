@@ -272,6 +272,10 @@ while the crypto stays synchronous.
   There is no GetCACaps token for AES-256, so forcing it is a deliberate choice
   for a peer that requires it (e.g. a wolfSCEP deployment); the envelope is
   self-describing, so any AES-capable recipient decrypts it by OID.
+- `signing_hash` - `WOLFCERT_SCEP_HASH_AUTO` (default: SHA-512, then SHA-384,
+  when the CA advertises it and wolfSSL provides it, else SHA-256) or an
+  explicit `SHA256` / `SHA384` / `SHA512`, which returns
+  `WOLFCERT_ERR_UNSUPPORTED` when wolfSSL lacks that digest.
 
 **Signed attributes.** The CertRep carries the full RFC 8894 §3.1
 signed-attribute set (including `recipientNonce`) — up to 9 entries alongside

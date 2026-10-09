@@ -373,8 +373,31 @@ int wolfcert_scep_verify_ca_fingerprint(const uint8_t* ca_der, size_t ca_der_len
     return WOLFCERT_OK;
 }
 
-static int pick_hash_oid(const WolfCertScepCaps* caps)
+WOLFCERT_TEST_VIS int wolfcert_scep_pick_hash_oid(const WolfCertScepCaps* caps,
+                                                  WolfCertScepSigningHash want)
 {
+    switch (want) {
+        case WOLFCERT_SCEP_HASH_SHA256:
+            return SHA256h;
+        case WOLFCERT_SCEP_HASH_SHA384:
+#ifdef WOLFSSL_SHA384
+            return SHA384h;
+#else
+            return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+                "SHA-384 signing hash requested but wolfSSL lacks it");
+#endif
+        case WOLFCERT_SCEP_HASH_SHA512:
+#ifdef WOLFSSL_SHA512
+            return SHA512h;
+#else
+            return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+                "SHA-512 signing hash requested but wolfSSL lacks it");
+#endif
+        case WOLFCERT_SCEP_HASH_AUTO:
+        default:
+            break;
+    }
+
     if (caps == NULL)
         return SHA256h;
 #ifdef WOLFSSL_SHA512
@@ -660,12 +683,16 @@ static int scep_prepare(void* heap, const WolfCertScepCaps* caps,
                         const uint8_t* envelope_content, size_t envelope_content_len,
                         const ScepTxidSel* txid_sel,
                         WolfCertScepContentCipher cipher,
+                        WolfCertScepSigningHash hash,
                         WolfCertBuffer* out_pki,
                         uint8_t** out_txid, size_t* out_txid_len,
                         uint8_t* out_nonce)
 {
-    int hash_oid = pick_hash_oid(caps);
+    int hash_oid = wolfcert_scep_pick_hash_oid(caps, hash);
     int enc_oid;
+
+    if (hash_oid < 0)
+        return hash_oid;
 
     /* AUTO follows RFC 8894: GetCACaps "AES" means AES-128-CBC, else 3DES. */
     switch (cipher) {
@@ -904,6 +931,7 @@ static int do_scep_round_trip(const WolfCertServerCfg* srv,
                           signer_cert, signer_cert_len, signer_key, signer_key_len,
                           msg_type, envelope_content, envelope_content_len,
                           &txid_sel, srv->proto_opts.scep.content_cipher,
+                          srv->proto_opts.scep.signing_hash,
                           &pki, &txid, &txid_len, nonce);
     if (rc != WOLFCERT_OK)
         return rc;
@@ -1416,6 +1444,7 @@ struct WolfCertScepSession {
     WolfCertScepTxidMode       txid_mode;
     WolfCertScepContentCipher  content_cipher;
     WolfCertScepRenewalMsgType renewal_msg_type;
+    WolfCertScepSigningHash    signing_hash;
 
     /* In-flight state of the single active round trip. */
     int                  in_active;
@@ -1486,6 +1515,7 @@ static int scep_session_open_common(const WolfCertServerCfg* srv, int nonblockin
     s->txid_mode        = srv->proto_opts.scep.txid_mode;
     s->content_cipher   = srv->proto_opts.scep.content_cipher;
     s->renewal_msg_type = srv->proto_opts.scep.renewal_msg_type;
+    s->signing_hash     = srv->proto_opts.scep.signing_hash;
     s->server_url     = wolfcert_strdup(srv->server_url, heap);
     if (s->server_url == NULL) {
         WOLFCERT_XFREE(s, heap);
@@ -1617,7 +1647,7 @@ static int scep_session_begin(WolfCertScepSession* s, const WolfCertScepCaps* ca
     int rc = scep_prepare(heap, caps, ra_cert, ra_cert_len,
                           signer_cert, signer_cert_len, signer_key, signer_key_len,
                           msg_type, envelope_content, envelope_content_len,
-                          &txid_sel, s->content_cipher,
+                          &txid_sel, s->content_cipher, s->signing_hash,
                           &pki, &s->in_txid, &s->in_txid_len, s->in_nonce);
     if (rc != WOLFCERT_OK) {
         scep_async_reset(s);

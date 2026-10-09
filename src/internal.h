@@ -28,6 +28,7 @@
 #include <wolfcert/types.h>
 #include <wolfcert/keygen.h>
 #include <wolfcert/server.h>
+#include <wolfcert/scep.h>
 #include <wolfcert/memory.h>
 #include <wolfcert/log.h>
 #include <wolfcert/status.h>
@@ -359,6 +360,10 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_get_url(const char* base,
 /* base?operation=<op>[&message=<ca_id>], heap-allocated, or NULL. */
 WOLFCERT_TEST_VIS char* wolfcert_scep_build_getca_url(const char* base,
     const char* op, const char* ca_id, void* heap);
+
+/* The pkiMessage signature hash OID for want, or a negative error code. */
+WOLFCERT_TEST_VIS int wolfcert_scep_pick_hash_oid(const WolfCertScepCaps* caps,
+                                                  WolfCertScepSigningHash want);
 int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_cert_len,
                             const uint8_t* recipient_key_der,  size_t recipient_key_len,
                             const uint8_t* env_der, size_t env_len,

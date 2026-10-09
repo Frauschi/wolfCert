@@ -146,6 +146,14 @@ typedef enum {
     WOLFCERT_SCEP_CIPHER_DES3   = 3
 } WolfCertScepContentCipher;
 
+/* SCEP pkiMessage signature digest (WolfCertScepServerOpts.signing_hash). */
+typedef enum {
+    WOLFCERT_SCEP_HASH_AUTO   = 0, /* strongest advertised, else SHA-256 */
+    WOLFCERT_SCEP_HASH_SHA256 = 1,
+    WOLFCERT_SCEP_HASH_SHA384 = 2,
+    WOLFCERT_SCEP_HASH_SHA512 = 3
+} WolfCertScepSigningHash;
+
 /* messageType of a SCEP renewal (WolfCertScepServerOpts.renewal_msg_type).
  * Both are signed by the certificate being replaced; PKCS_REQ suits CAs that
  * predate RenewalReq. */
@@ -191,6 +199,11 @@ typedef struct {
     /* Read only by the renewal entry points. WolfCertScepCaps.renewal says
      * whether the CA advertises RenewalReq. */
     WolfCertScepRenewalMsgType renewal_msg_type;
+
+    /* Digest for the pkiMessage signature. AUTO (default) picks the strongest
+     * the CA advertises in GetCACaps and wolfSSL provides; an explicit value
+     * forces it, or returns WOLFCERT_ERR_UNSUPPORTED if wolfSSL lacks it. */
+    WolfCertScepSigningHash   signing_hash;
 } WolfCertScepServerOpts;
 
 typedef struct {

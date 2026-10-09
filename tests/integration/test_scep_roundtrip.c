@@ -434,6 +434,35 @@ static int check_bad_csr_sig(const WolfCertServerCfg* cli,
 }
 
 /* Enrollment with an explicit proto_opts.scep.content_cipher. */
+/* Enroll with the given caps digests and signing_hash; a cert comes back. */
+static int check_signing_hash(const WolfCertServerCfg* cli,
+                              const WolfCertScepCaps* caps, int sha512,
+                              int sha384, WolfCertScepSigningHash hash,
+                              WolfCertKey* key, const WolfCertBuffer* csr,
+                              const uint8_t* ca_der_buf, size_t ca_der_len)
+{
+    WolfCertServerCfg c = *cli;
+    WolfCertScepCaps  hc = *caps;
+    WolfCertBuffer    issued = { 0 };
+    int rc;
+
+    hc.sha512 = sha512;
+    hc.sha384 = sha384;
+    c.proto_opts.scep.signing_hash = hash;
+
+    rc = wolfcert_scep_pkcs_req(&c, &hc, ca_der_buf, ca_der_len, key,
+                                csr->data, csr->len, &issued);
+    if (rc == WOLFCERT_OK &&
+            memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) == NULL)
+        rc = -1;
+    if (rc != WOLFCERT_OK)
+        fprintf(stderr, "signing hash %d (caps 512=%d 384=%d): rc=%d\n",
+                (int)hash, sha512, sha384, rc);
+
+    wolfcert_buffer_free(&issued);
+    return rc;
+}
+
 static int check_content_cipher(const WolfCertServerCfg* cli,
                                 const WolfCertScepCaps* caps,
                                 const WolfCertKeyCfg* kcfg,
@@ -1602,22 +1631,21 @@ int main(void)
     REQUIRE(rc == WOLFCERT_OK);
 
     /* A CA advertising SHA-512 or SHA-384 still enrolls within the digests
-     * wolfSSL was built with. */
-    WolfCertScepCaps caps_hash = caps;
-    WolfCertBuffer   issued_hash = { 0 };
-
-    caps_hash.sha512 = 1;
-    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps_hash, ca_der->buffer,
-                                   ca_der->length, dk, csr.data, csr.len,
-                                   &issued_hash) == WOLFCERT_OK);
-    wolfcert_buffer_free(&issued_hash);
-
-    caps_hash.sha512 = 0;
-    caps_hash.sha384 = 1;
-    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps_hash, ca_der->buffer,
-                                   ca_der->length, dk, csr.data, csr.len,
-                                   &issued_hash) == WOLFCERT_OK);
-    wolfcert_buffer_free(&issued_hash);
+     * wolfSSL was built with, and so does a forced SHA-256. */
+    REQUIRE(check_signing_hash(&cli, &caps, 1, 0, WOLFCERT_SCEP_HASH_AUTO,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+    REQUIRE(check_signing_hash(&cli, &caps, 0, 1, WOLFCERT_SCEP_HASH_AUTO,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+    REQUIRE(check_signing_hash(&cli, &caps, 1, 1, WOLFCERT_SCEP_HASH_SHA256,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+#ifdef WOLFSSL_SHA384
+    REQUIRE(check_signing_hash(&cli, &caps, 0, 0, WOLFCERT_SCEP_HASH_SHA384,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+#endif
 
     /* Explicit AES-256 and AES-128 content ciphers both enroll. */
 #if defined(WOLFSSL_AES_256)
