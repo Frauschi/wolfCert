@@ -195,6 +195,21 @@ void wolfcert_scep_result_free(WolfCertScepResult* r)
     r->fail_info          = -1;
 }
 
+/* 1 when body is a CMS ContentInfo of type signedData, not a bare cert. */
+static int is_signed_data(const uint8_t* b, size_t len)
+{
+    static const uint8_t oid[] = { 0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7,
+                                   0x0D, 0x01, 0x07, 0x02 };
+    size_t off = 2;
+
+    if (len < 2 || b[0] != 0x30)
+        return 0;
+    if (b[1] & 0x80)
+        off += b[1] & 0x7F;
+
+    return len >= off + sizeof(oid) && memcmp(b + off, oid, sizeof(oid)) == 0;
+}
+
 int wolfcert_scep_get_ca_cert(const WolfCertServerCfg* srv, WolfCertBuffer* out_ca_pem)
 {
     return wolfcert_scep_get_ca_cert_enc(srv, WOLFCERT_ENCODING_PEM, out_ca_pem);
@@ -249,6 +264,8 @@ int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv, WolfCertEncoding
             ++p;
         is_p7 = (*p == '\0' || *p == ';');
     }
+    if (!is_p7)
+        is_p7 = is_signed_data(resp.body, resp.body_len);
     if (is_p7) {
         if (enc == WOLFCERT_ENCODING_DER) {
             rc = wolfcert_pkcs7_certs_to_der(resp.body, resp.body_len, out_ca, heap);

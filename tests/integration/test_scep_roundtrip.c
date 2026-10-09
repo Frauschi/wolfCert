@@ -535,6 +535,25 @@ static void* canned_srv_thread(void* arg)
     return NULL;
 }
 
+/* Start canned_srv_thread on a loopback port; the listener is closed if the
+ * thread cannot start. */
+static int start_canned(struct canned_ctx* cc, pthread_t* tid, char* url,
+                        size_t url_sz)
+{
+    int port = 0;
+
+    cc->listen_fd = listen_loopback(&port);
+    if (cc->listen_fd < 0)
+        return -1;
+    if (pthread_create(tid, NULL, canned_srv_thread, cc) != 0) {
+        close(cc->listen_fd);
+        return -1;
+    }
+
+    snprintf(url, url_sz, "http://127.0.0.1:%d/scep", port);
+    return 0;
+}
+
 /* A GetCACaps body of Renewal-Extra and AESGCM sets neither renewal nor aes. */
 static int test_caps_token_matching(void)
 {
@@ -546,17 +565,14 @@ static int test_caps_token_matching(void)
                              .body = (const uint8_t*)caps_body,
                              .body_len = strlen(caps_body) };
     pthread_t tid;
-    int port = 0;
-    cc.listen_fd = listen_loopback(&port);
-    REQUIRE(cc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, canned_srv_thread, &cc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(&cc, &tid, url, sizeof(url)) == 0);
+
     WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
     WolfCertScepCaps caps = { 0 };
-    REQUIRE(wolfcert_scep_get_ca_caps(&cli, &caps) == WOLFCERT_OK);
+    int rc = wolfcert_scep_get_ca_caps(&cli, &caps);
     pthread_join(tid, NULL);
+    REQUIRE(rc == WOLFCERT_OK);
 
     /* Exact token still matches; substring-only lines do not. */
     REQUIRE(caps.post_pki_operation == 1);
@@ -572,13 +588,9 @@ static int test_caps_scep_standard(void)
                              .body = (const uint8_t*)caps_body,
                              .body_len = strlen(caps_body) };
     pthread_t tid;
-    int port = 0;
-    cc.listen_fd = listen_loopback(&port);
-    REQUIRE(cc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, canned_srv_thread, &cc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(&cc, &tid, url, sizeof(url)) == 0);
+
     WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
     WolfCertScepCaps caps = { 0 };
     int rc = wolfcert_scep_get_ca_caps(&cli, &caps);
@@ -603,65 +615,88 @@ static int fetch_ca(const char* content_type, const uint8_t* body,
     struct canned_ctx cc = { .listen_fd = -1, .content_type = content_type,
                              .body = body, .body_len = body_len };
     pthread_t tid;
-    int port = 0;
-    cc.listen_fd = listen_loopback(&port);
-    REQUIRE(cc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, canned_srv_thread, &cc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(&cc, &tid, url, sizeof(url)) == 0);
+
     WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
     int rc = wolfcert_scep_get_ca_cert_enc(&cli, enc, out);
     pthread_join(tid, NULL);
     return rc;
 }
 
+/* Fetch body under content_type and check that exactly the CA cert comes back
+ * in the requested encoding. */
+static int check_getca_one(const char* content_type, const uint8_t* body,
+                           size_t body_len, WolfCertEncoding enc,
+                           const uint8_t* ca_der, size_t ca_der_len)
+{
+    WolfCertBuffer out = { 0 };
+    DerBuffer* pem_der = NULL;
+    const uint8_t* got = NULL;
+    size_t got_len = 0;
+    int rc;
+
+    rc = fetch_ca(content_type, body, body_len, enc, &out);
+    if (rc == WOLFCERT_OK && enc == WOLFCERT_ENCODING_PEM) {
+        if (wc_PemToDer(out.data, (long)out.len, CERT_TYPE, &pem_der,
+                        NULL, NULL, NULL) == 0) {
+            got = pem_der->buffer;
+            got_len = pem_der->length;
+        }
+    }
+    else if (rc == WOLFCERT_OK) {
+        got = out.data;
+        got_len = out.len;
+    }
+
+    if (got == NULL || got_len != ca_der_len ||
+            memcmp(got, ca_der, ca_der_len) != 0) {
+        fprintf(stderr, "FAIL GetCACert as '%s' (enc %d): rc=%d len=%zu\n",
+                content_type, (int)enc, rc, got_len);
+        rc = -1;
+    }
+
+    if (pem_der != NULL)
+        wc_FreeDer(&pem_der);
+    wolfcert_buffer_free(&out);
+    return rc == WOLFCERT_OK ? 0 : 1;
+}
+
 /* The CA/RA media type (RFC 8894 section 4.2.1.2) matches case-insensitively
- * and with parameters (RFC 9110 section 8.3.1). */
+ * and with parameters (RFC 9110 section 8.3.1); a bundle under the single-cert
+ * type is still read as a bundle. */
 static int check_getca_media_type(const uint8_t* ca_der_buf, size_t ca_der_len)
 {
     const uint8_t* certs[1] = { ca_der_buf };
     size_t lens[1] = { ca_der_len };
     WolfCertBuffer p7 = { 0 };
+    int fails = 0;
+
     REQUIRE(wolfcert_pkcs7_build_certs_only(certs, lens, 1, &p7, NULL)
             == WOLFCERT_OK);
 
-    /* Mixed case and whitespace before ';' still name the bundle type. */
-    WolfCertBuffer pem = { 0 };
-    REQUIRE(fetch_ca("Application/X-X509-CA-RA-Cert ; charset=binary",
-                     p7.data, p7.len, WOLFCERT_ENCODING_PEM, &pem)
-            == WOLFCERT_OK);
-    DerBuffer* pem_der = NULL;
-    REQUIRE(wc_PemToDer(pem.data, (long)pem.len, CERT_TYPE,
-                        &pem_der, NULL, NULL, NULL) == 0);
-    REQUIRE(pem_der->length == ca_der_len);
-    REQUIRE(memcmp(pem_der->buffer, ca_der_buf, ca_der_len) == 0);
-    wc_FreeDer(&pem_der);
-    wolfcert_buffer_free(&pem);
-
-    WolfCertBuffer der = { 0 };
-    REQUIRE(fetch_ca("application/x-x509-ca-ra-cert", p7.data, p7.len,
-                     WOLFCERT_ENCODING_DER, &der) == WOLFCERT_OK);
-    REQUIRE(der.len == ca_der_len);
-    REQUIRE(memcmp(der.data, ca_der_buf, ca_der_len) == 0);
-    wolfcert_buffer_free(&der);
-
-    /* A longer subtype is a different type: the bare cert comes back as is. */
-    REQUIRE(fetch_ca("application/x-x509-ca-ra-certs", ca_der_buf, ca_der_len,
-                     WOLFCERT_ENCODING_DER, &der) == WOLFCERT_OK);
-    REQUIRE(der.len == ca_der_len);
-    REQUIRE(memcmp(der.data, ca_der_buf, ca_der_len) == 0);
-    wolfcert_buffer_free(&der);
-
-    /* So is a different top-level type carrying the same subtype. */
-    REQUIRE(fetch_ca("text/x-x509-ca-ra-cert", ca_der_buf, ca_der_len,
-                     WOLFCERT_ENCODING_DER, &der) == WOLFCERT_OK);
-    REQUIRE(der.len == ca_der_len);
-    REQUIRE(memcmp(der.data, ca_der_buf, ca_der_len) == 0);
-    wolfcert_buffer_free(&der);
+    fails += check_getca_one("Application/X-X509-CA-RA-Cert ; charset=binary",
+                             p7.data, p7.len, WOLFCERT_ENCODING_PEM,
+                             ca_der_buf, ca_der_len);
+    fails += check_getca_one("application/x-x509-ca-ra-cert",
+                             p7.data, p7.len, WOLFCERT_ENCODING_DER,
+                             ca_der_buf, ca_der_len);
+    fails += check_getca_one("application/x-x509-ca-cert",
+                             p7.data, p7.len, WOLFCERT_ENCODING_DER,
+                             ca_der_buf, ca_der_len);
+    fails += check_getca_one("application/x-x509-ca-cert",
+                             p7.data, p7.len, WOLFCERT_ENCODING_PEM,
+                             ca_der_buf, ca_der_len);
+    /* A longer subtype or another top-level type is not the bundle type. */
+    fails += check_getca_one("application/x-x509-ca-ra-certs",
+                             ca_der_buf, ca_der_len, WOLFCERT_ENCODING_DER,
+                             ca_der_buf, ca_der_len);
+    fails += check_getca_one("text/x-x509-ca-ra-cert",
+                             ca_der_buf, ca_der_len, WOLFCERT_ENCODING_DER,
+                             ca_der_buf, ca_der_len);
 
     wolfcert_buffer_free(&p7);
-    return 0;
+    return fails;
 }
 
 static int get_ca_cert_empty(WolfCertEncoding enc)
