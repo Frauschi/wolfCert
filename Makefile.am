@@ -100,6 +100,7 @@ if WOLFCERT_HAVE_SERVER
 bin_PROGRAMS += wolfcert-server
 wolfcert_server_SOURCES = cli/wolfcert_server.c
 wolfcert_server_LDADD   = libwolfcert.la $(WOLFSSL_LIBS)
+WOLFCERT_TEST_SERVER    = $(abs_builddir)/wolfcert-server
 endif
 endif
 
@@ -223,7 +224,9 @@ endif
 TEST_EXTENSIONS = .sh
 SH_LOG_COMPILER = $(SHELL)
 AM_TESTS_ENVIRONMENT = WOLFCERT_CLI=$(abs_builddir)/wolfcert-client; \
-                       export WOLFCERT_CLI;
+                       export WOLFCERT_CLI; \
+                       WOLFCERT_SERVER=$(WOLFCERT_TEST_SERVER); \
+                       export WOLFCERT_SERVER;
 
 EXTRA_DIST = \
     README.md           \

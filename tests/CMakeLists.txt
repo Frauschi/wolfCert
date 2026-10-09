@@ -155,8 +155,12 @@ endif()
 
 # The wolfcert-server cases bind 127.0.0.1 ports from 18088 up.
 if(WOLFCERT_ENABLE_CLI AND WOLFCERT_ENABLE_EST AND WOLFCERT_ENABLE_SCEP AND UNIX)
+    set(cli_test_env "")
+    if(WOLFCERT_ENABLE_SERVER)
+        set(cli_test_env "WOLFCERT_SERVER=$<TARGET_FILE:wolfcert-server>")
+    endif()
     add_test(NAME cli_proto_scoping
-             COMMAND ${CMAKE_COMMAND} -E env bash
+             COMMAND ${CMAKE_COMMAND} -E env ${cli_test_env} bash
                      ${CMAKE_CURRENT_SOURCE_DIR}/integration/cli_proto_scoping.sh
                      $<TARGET_FILE:wolfcert-client>)
     # The script exits 77 when the CLI cannot initialise (WOLFSSL_NO_MALLOC).

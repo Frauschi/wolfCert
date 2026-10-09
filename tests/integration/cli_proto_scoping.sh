@@ -3,7 +3,8 @@
 #
 # wolfcert-client rejects options of the other protocol and validates the SCEP
 # keyword arguments. The --ca-fingerprint pinning and server argv groups start
-# wolfcert-server and skip when it was not built.
+# wolfcert-server; they fail when the build passed WOLFCERT_SERVER and the
+# server cannot start, and skip otherwise.
 
 set -u
 
@@ -18,11 +19,12 @@ fi
 fails=0
 
 # The CLI installs no static pool, so it cannot initialise on WOLFSSL_NO_MALLOC.
-if "$CLI" getcacerts --proto scep --url "http://127.0.0.1:1/scep" 2>&1 \
-        | grep -q "wolfcert_init failed"; then
-    echo "SKIP: wolfcert-client cannot initialise in this build (no allocator)"
-    exit 77
-fi
+probe="$("$CLI" getcacerts --proto scep --url "http://127.0.0.1:1/scep" 2>&1)"
+case "$probe" in
+    *"wolfcert_init failed"*)
+        echo "SKIP: wolfcert-client cannot initialise in this build (no allocator)"
+        exit 77 ;;
+esac
 
 # expect_reject <description> <substring the message must contain> <args...>
 expect_reject() {
@@ -230,8 +232,20 @@ esac
 kill "$cargv_pid" 2>/dev/null
 rm -rf "$ctmp"
 
-# The server groups need wolfcert-server (WOLFCERT_ENABLE_SERVER).
-SERVER="$(dirname "$CLI")/wolfcert-server"
+SERVER="${WOLFCERT_SERVER:-$(dirname "$CLI")/wolfcert-server}"
+server_required="${WOLFCERT_SERVER:+1}"
+# Without an allocator the tools run out of memory, so a server cannot start.
+case "$probe" in *"out of memory"*) server_required="" ;; esac
+
+# skip_group <description>: a FAIL when the build provided the server.
+skip_group() {
+    if [ -n "$server_required" ]; then
+        echo "FAIL: $1"
+        fails=$((fails + 1))
+    else
+        echo "skip $1"
+    fi
+}
 
 # wolfcert-server refuses an EST listener that could not authenticate anyone.
 # Any readable file passes as --tls-cert: these checks run before it is parsed.
@@ -262,7 +276,7 @@ if [ -x "$SERVER" ]; then
     esac
 fi
 if [ ! -x "$SERVER" ]; then
-    echo "skip --ca-fingerprint pinning (wolfcert-server not built)"
+    skip_group "--ca-fingerprint pinning (wolfcert-server not built)"
 else
     tmp="$(mktemp -d -t wolfcert-cli.XXXXXX)"
     srv_pid=""
@@ -306,7 +320,7 @@ else
     # getcacerts reports the fingerprint an operator is meant to pin.
     fp="$(sed -n 's/.*\(sha256:[0-9A-Fa-f:]\{32,\}\).*/\1/p' "$tmp/getca.log" | head -1)"
     if [ "$ready" -ne 1 ]; then
-        echo "skip --ca-fingerprint pinning (no test server would start)"
+        skip_group "--ca-fingerprint pinning (no test server would start)"
         cat "$tmp/server.log"
     elif [ -z "$fp" ]; then
         echo "FAIL: getcacerts printed no sha256 fingerprint to pin"
@@ -407,7 +421,7 @@ else
     done
 
     if [ "$listening" -ne 1 ]; then
-        echo "skip server argv scrubbing (no test server would start)"
+        skip_group "server argv scrubbing (no test server would start)"
         cat "$tmp/argv.log"
     else
         args="$(ps -ww -o args= -p "$argv_pid")"
