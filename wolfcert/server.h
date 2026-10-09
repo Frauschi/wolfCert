@@ -103,6 +103,10 @@ typedef struct {
 
     /* Lets EST start with neither Basic nor tls_client_ca_pem. */
     int              est_allow_anonymous_enroll;
+
+    /* SCEP split CA/RA: the CA issues a new RA certificate at every start and
+     * ca_store does not keep it; the RA decrypts and signs SCEP messages. */
+    int              scep_split_ra;
 } WolfCertServerCfgSrv;
 
 WOLFCERT_API int  wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out);

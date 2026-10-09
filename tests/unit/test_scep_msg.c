@@ -2487,6 +2487,213 @@ static int test_pick_hash_oid(void)
     return 0;
 }
 
+#define RA_CERT_CAP 2048
+
+/* A certificate for rsa or ecc named cn, issued by issuer_cn (self-issued when
+ * NULL) and signed by rsa; ku NULL leaves keyUsage out. */
+static int ra_cert(RsaKey* rsa, void* ecc, WC_RNG* rng, const char* cn,
+                   const char* issuer_cn, int is_ca, const char* ku,
+                   uint8_t* out, size_t* out_len)
+{
+    Cert* c = wc_CertNew(NULL);
+    int n = -1;
+
+    if (c == NULL)
+        return -1;
+    if (wc_InitCert_ex(c, NULL, INVALID_DEVID) == 0 &&
+            (ku == NULL || wc_SetKeyUsage(c, ku) == 0)) {
+        strncpy(c->subject.commonName, cn, CTC_NAME_SIZE - 1);
+        if (issuer_cn != NULL)
+            strncpy(c->issuer.commonName, issuer_cn, CTC_NAME_SIZE - 1);
+        c->selfSigned = issuer_cn == NULL;
+        c->isCA       = is_ca;
+        c->sigType    = CTC_SHA256wRSA;
+        c->daysValid  = 2;
+        n = wc_MakeCert_ex(c, out, RA_CERT_CAP, ecc != NULL ? ECC_TYPE
+                           : RSA_TYPE, ecc != NULL ? ecc : (void*)rsa, rng);
+        if (n > 0)
+            n = wc_SignCert(c->bodySz, c->sigType, out, RA_CERT_CAP, rsa,
+                            NULL, rng);
+    }
+    wc_CertFree(c);
+    if (n <= 0)
+        return -1;
+    *out_len = (size_t)n;
+    return 0;
+}
+
+enum {
+    RA_KE, RA_KE2, RA_KE_DS2, RA_KE_AGAIN, RA_NONE, RA_DE, RA_SIGN, ROOT_KE,
+    ROOT, ISSUING, ORPHAN, CA_A, CA_A_AGAIN, CA_B_KE, CA_C, NOT_CERT,
+#ifdef HAVE_ECC
+    RA_ECC, CA_ECC,
+#endif
+    RA_COUNT
+};
+
+/* Each served layout picks the expected certificate or fails as expected. */
+static int test_select_ra_cert(void)
+{
+    static const struct {
+        int idx[MAX_PKCS7_CERTS + 1];
+        int want;       /* index into idx, or a negative error code */
+    } cases[] = {
+        { { ISSUING, ROOT_KE, -1 },                       0 },
+        { { ROOT, ISSUING, -1 },                          1 },
+        { { ROOT, ORPHAN, -1 },                           1 },
+        { { ORPHAN, ROOT_KE, -1 },                        0 },
+        { { RA_SIGN, RA_DE, RA_NONE, RA_KE, -1 },         3 },
+        { { ROOT_KE, RA_SIGN, RA_DE, -1 },                2 },
+        { { RA_DE, RA_NONE, -1 },                         1 },
+        { { RA_SIGN, RA_DE, -1 },                         1 },
+        { { RA_SIGN, ISSUING, -1 },                       1 },
+        { { NOT_CERT, ISSUING, -1 },                      1 },
+        { { ROOT_KE, -1 },                                0 },
+        { { CA_A, CA_B_KE, -1 },                          1 },
+        { { RA_KE, RA_KE, ROOT_KE, -1 },                  0 },
+        { { RA_KE, RA_KE_AGAIN, -1 },                     0 },
+        { { CA_A, CA_A_AGAIN, -1 },                       0 },
+        { { RA_KE, RA_KE2, ROOT_KE, -1 },                 1 },
+        { { RA_KE2, RA_KE, -1 },                          0 },
+        { { RA_KE, RA_KE_DS2, ROOT_KE, -1 }, WOLFCERT_ERR_PROTOCOL },
+        { { CA_A, CA_C, -1 },              WOLFCERT_ERR_PROTOCOL },
+        { { RA_SIGN, NOT_CERT, -1 },       WOLFCERT_ERR_UNSUPPORTED },
+#ifdef HAVE_ECC
+        { { RA_ECC, ISSUING, -1 },                        1 },
+        { { RA_ECC, CA_ECC, -1 },          WOLFCERT_ERR_UNSUPPORTED },
+#endif
+    };
+    static const uint8_t not_cert[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
+    uint8_t* der[RA_COUNT] = { NULL };
+    size_t len[RA_COUNT] = { 0 };
+    uint8_t* bundle = NULL;
+    size_t bundle_len;
+    size_t off[MAX_PKCS7_CERTS];
+    const uint8_t* got = NULL;
+    size_t got_len = 0;
+    RsaKey rsa;
+    RsaKey rsa2;
+    WC_RNG rng;
+    size_t i;
+    size_t j;
+    int ret = 0;
+    int rc;
+#ifdef HAVE_ECC
+    ecc_key ecc;
+#endif
+
+    REQUIRE(wc_InitRng(&rng) == 0);
+    REQUIRE(wc_InitRsaKey(&rsa, NULL) == 0);
+    REQUIRE(next_rsa_key(&rsa) == 0);
+    REQUIRE(wc_InitRsaKey(&rsa2, NULL) == 0);
+    REQUIRE(next_rsa_key(&rsa2) == 0);
+    for (i = 0; i < RA_COUNT; i++) {
+        der[i] = (uint8_t*)malloc(RA_CERT_CAP);
+        REQUIRE(der[i] != NULL);
+    }
+#ifdef HAVE_ECC
+    REQUIRE(wc_ecc_init(&ecc) == 0);
+    REQUIRE(wc_ecc_make_key(&rng, 32, &ecc) == 0);
+    REQUIRE(ra_cert(&rsa, &ecc, &rng, "RA ECC", "Issuing", 0, NULL,
+                    der[RA_ECC], &len[RA_ECC]) == 0);
+    REQUIRE(ra_cert(&rsa, &ecc, &rng, "CA ECC", NULL, 1, NULL,
+                    der[CA_ECC], &len[CA_ECC]) == 0);
+#endif
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "RA KE", "Issuing", 0,
+                    "digitalSignature,keyEncipherment", der[RA_KE],
+                    &len[RA_KE]) == 0);
+    REQUIRE(ra_cert(&rsa2, NULL, &rng, "RA KE 2", "Issuing", 0,
+                    "keyEncipherment", der[RA_KE2], &len[RA_KE2]) == 0);
+    REQUIRE(ra_cert(&rsa2, NULL, &rng, "RA KE DS 2", "Issuing", 0,
+                    "digitalSignature,keyEncipherment", der[RA_KE_DS2],
+                    &len[RA_KE_DS2]) == 0);
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "RA KE Again", "Issuing", 0,
+                    "digitalSignature,keyEncipherment", der[RA_KE_AGAIN],
+                    &len[RA_KE_AGAIN]) == 0);
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "RA None", "Issuing", 0, NULL,
+                    der[RA_NONE], &len[RA_NONE]) == 0);
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "RA DE", "Issuing", 0,
+                    "dataEncipherment", der[RA_DE], &len[RA_DE]) == 0);
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "RA Sign", "Issuing", 0,
+                    "digitalSignature", der[RA_SIGN], &len[RA_SIGN]) == 0);
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "Root", NULL, 1,
+                    "keyCertSign,cRLSign,keyEncipherment", der[ROOT_KE],
+                    &len[ROOT_KE]) == 0);
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "Root", NULL, 1, "keyCertSign,cRLSign",
+                    der[ROOT], &len[ROOT]) == 0);
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "Issuing", "Root", 1,
+                    "keyCertSign,cRLSign", der[ISSUING], &len[ISSUING]) == 0);
+    REQUIRE(ra_cert(&rsa2, NULL, &rng, "Orphan", "Policy", 1,
+                    "keyCertSign,cRLSign", der[ORPHAN], &len[ORPHAN]) == 0);
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "CA A", NULL, 1, "keyCertSign",
+                    der[CA_A], &len[CA_A]) == 0);
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "CA B", NULL, 1,
+                    "keyCertSign,keyEncipherment", der[CA_B_KE],
+                    &len[CA_B_KE]) == 0);
+    REQUIRE(ra_cert(&rsa, NULL, &rng, "CA A", NULL, 1, "keyCertSign",
+                    der[CA_A_AGAIN], &len[CA_A_AGAIN]) == 0);
+    REQUIRE(ra_cert(&rsa2, NULL, &rng, "CA C", NULL, 1, "keyCertSign",
+                    der[CA_C], &len[CA_C]) == 0);
+    memcpy(der[NOT_CERT], not_cert, sizeof(not_cert));
+    len[NOT_CERT] = sizeof(not_cert);
+
+    bundle = (uint8_t*)malloc(RA_CERT_CAP * (MAX_PKCS7_CERTS + 1));
+    REQUIRE(bundle != NULL);
+    for (i = 0; ret == 0 && i < sizeof(cases) / sizeof(cases[0]); i++) {
+        bundle_len = 0;
+        for (j = 0; cases[i].idx[j] >= 0; j++) {
+            off[j] = bundle_len;
+            memcpy(bundle + bundle_len, der[cases[i].idx[j]],
+                   len[cases[i].idx[j]]);
+            bundle_len += len[cases[i].idx[j]];
+        }
+        rc = wolfcert_scep_select_ra_cert(bundle, bundle_len, &got, &got_len,
+                                          NULL);
+        if (cases[i].want < 0 ? rc != cases[i].want :
+                (rc != WOLFCERT_OK || got != bundle + off[cases[i].want] ||
+                 got_len != len[cases[i].idx[cases[i].want]])) {
+            fprintf(stderr, "select_ra_cert case %zu: rc %d\n", i, rc);
+            ret = 1;
+        }
+    }
+
+    for (i = 0, bundle_len = 0; ret == 0 && i <= MAX_PKCS7_CERTS; i++) {
+        memcpy(bundle + bundle_len, der[RA_KE], len[RA_KE]);
+        bundle_len += len[RA_KE];
+        rc = wolfcert_scep_select_ra_cert(bundle, bundle_len, &got, &got_len,
+                                          NULL);
+        if (rc != (i < MAX_PKCS7_CERTS ? WOLFCERT_OK : WOLFCERT_ERR_BAD_ARG))
+            ret = 1;
+    }
+    memcpy(bundle, der[RA_KE], len[RA_KE]);
+    memcpy(bundle + len[RA_KE], "\r\n", 2);
+    if (ret == 0 && (wolfcert_scep_select_ra_cert(bundle, len[RA_KE] + 2, &got,
+                         &got_len, NULL) != WOLFCERT_OK || got != bundle ||
+                     got_len != len[RA_KE]))
+        ret = 1;
+    memcpy(bundle, "\r\n", 2);
+    memcpy(bundle + 2, der[RA_KE], len[RA_KE]);
+    if (ret == 0 && wolfcert_scep_select_ra_cert(bundle, len[RA_KE] + 2, &got,
+                        &got_len, NULL) != WOLFCERT_ERR_PARSE)
+        ret = 1;
+    if (ret == 0 && (wolfcert_scep_select_ra_cert(der[RA_KE], len[RA_KE] - 1,
+                         &got, &got_len, NULL) != WOLFCERT_ERR_PARSE ||
+                     wolfcert_scep_select_ra_cert(NULL, 1, &got, &got_len,
+                         NULL) != WOLFCERT_ERR_BAD_ARG))
+        ret = 1;
+
+    free(bundle);
+    for (i = 0; i < RA_COUNT; i++)
+        free(der[i]);
+#ifdef HAVE_ECC
+    wc_ecc_free(&ecc);
+#endif
+    wc_FreeRsaKey(&rsa2);
+    wc_FreeRsaKey(&rsa);
+    wc_FreeRng(&rng);
+    return ret;
+}
+
 /* Short, long and indefinite outer lengths name signedData; a bare cert, a
  * wrong outer tag, a cut OID and an overrunning length do not. */
 static int test_is_signed_data(void)
@@ -2707,6 +2914,8 @@ int main(void)
     if (test_pick_hash_oid())
         return 1;
     if (test_is_signed_data())
+        return 1;
+    if (run_test(test_select_ra_cert))
         return 1;
     if (test_parse_issuer_and_subject())
         return 1;

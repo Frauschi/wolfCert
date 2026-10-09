@@ -1379,6 +1379,160 @@ WOLFCERT_TEST_VIS int wolfcert_scep_verify_rep_signer(const uint8_t* signer_cert
     return rc;
 }
 
+typedef struct {
+    const uint8_t* der;
+    size_t         len;
+    byte           subject[KEYID_SIZE];
+    byte           issuer[KEYID_SIZE];
+    byte           key[WC_SHA256_DIGEST_SIZE];
+    int            rank;
+    byte           parsed;
+    byte           is_ca;
+    byte           self_issued;
+    byte           key_encipher;
+    byte           keep;
+} RaCandidate;
+
+/* Non-CA RSA ranks 4 to 1 (keyEncipherment without, then with
+ * digitalSignature; no keyUsage; dataEncipherment only), RSA CA 0, else -1. */
+static int ra_candidate_parse(RaCandidate* c, void* heap)
+{
+    DecodedCert* dc = (DecodedCert*)WOLFCERT_XMALLOC(sizeof(*dc), heap);
+    int ku;
+    int wrc;
+
+    c->rank = -1;
+    if (dc == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    wc_InitDecodedCert(dc, c->der, (word32)c->len, heap);
+    wrc = wc_ParseCert(dc, CERT_TYPE, NO_VERIFY, NULL);
+    if (wrc == 0)
+        wrc = wc_Sha256Hash(dc->publicKey, dc->pubKeySize, c->key);
+    if (wrc == 0) {
+        ku = dc->extKeyUsageSet ? dc->extKeyUsage : -1;
+        memcpy(c->subject, dc->subjectHash, KEYID_SIZE);
+        memcpy(c->issuer, dc->issuerHash, KEYID_SIZE);
+        c->parsed       = 1;
+        c->is_ca        = dc->isCA;
+        c->self_issued  = memcmp(c->subject, c->issuer, KEYID_SIZE) == 0;
+        c->key_encipher = ku >= 0 && (ku & KEYUSE_KEY_ENCIPHER) != 0;
+        if (dc->keyOID != RSAk)
+            c->rank = -1;
+        else if (c->is_ca)
+            c->rank = 0;
+        else if (ku < 0)
+            c->rank = 2;
+        else if (c->key_encipher)
+            c->rank = (ku & KEYUSE_DIGITAL_SIG) != 0 ? 3 : 4;
+        else if ((ku & KEYUSE_DATA_ENCIPHER) != 0)
+            c->rank = 1;
+    }
+
+    wc_FreeDecodedCert(dc);
+    WOLFCERT_XFREE(dc, heap);
+    return wrc == MEMORY_E ? WOLFCERT_ERR_MEMORY : WOLFCERT_OK;
+}
+
+static int ra_candidate_issued_ca(const RaCandidate* c,
+                                  const RaCandidate* all, size_t n)
+{
+    size_t i;
+
+    for (i = 0; i < n; i++) {
+        if (&all[i] != c && all[i].parsed && all[i].is_ca &&
+                !all[i].self_issued &&
+                memcmp(all[i].issuer, c->subject, KEYID_SIZE) == 0)
+            return 1;
+    }
+    return 0;
+}
+
+int wolfcert_scep_select_ra_cert(const uint8_t* bundle, size_t bundle_len,
+                                 const uint8_t** cert, size_t* cert_len,
+                                 void* heap)
+{
+    RaCandidate* c = NULL;
+    const RaCandidate* pick = NULL;
+    size_t n = 0;
+    size_t off = 0;
+    size_t clen;
+    size_t i;
+    int best = -1;
+    int any_sub = 0;
+    int any_ke = 0;
+    int rc = WOLFCERT_OK;
+
+    if (bundle == NULL || bundle_len == 0 || cert == NULL || cert_len == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+    if (heap == NULL)
+        heap = wolfcert_default_heap();
+
+    while (off < bundle_len) {
+        clen = der_seq_len(bundle + off, bundle_len - off);
+        if (clen == 0 && n > 0)
+            break;
+        if (clen == 0)
+            return WOLFCERT_ERR(WOLFCERT_ERR_PARSE, "scep",
+                                "bundle does not start with a DER certificate");
+        if (++n > MAX_PKCS7_CERTS)
+            return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+                                "bundle holds more than MAX_PKCS7_CERTS");
+        off += clen;
+    }
+
+    c = (RaCandidate*)WOLFCERT_XMALLOC(n * sizeof(*c), heap);
+    if (c == NULL)
+        return WOLFCERT_ERR_MEMORY;
+    memset(c, 0, n * sizeof(*c));
+
+    for (i = 0, off = 0; rc == WOLFCERT_OK && i < n; i++) {
+        c[i].der = bundle + off;
+        c[i].len = der_seq_len(bundle + off, bundle_len - off);
+        off += c[i].len;
+        rc = ra_candidate_parse(&c[i], heap);
+        if (c[i].rank > best)
+            best = c[i].rank;
+    }
+
+    /* Non-CA certificates rank above CAs; among CAs only the lowest remain,
+     * and a self-issued one only when no subordinate CA does. */
+    for (i = 0; rc == WOLFCERT_OK && i < n; i++) {
+        c[i].keep = best >= 0 && c[i].rank == best &&
+                    (best > 0 || !ra_candidate_issued_ca(&c[i], c, n));
+        if (c[i].keep && best == 0 && !c[i].self_issued)
+            any_sub = 1;
+    }
+    for (i = 0; rc == WOLFCERT_OK && i < n; i++) {
+        if (any_sub && c[i].self_issued)
+            c[i].keep = 0;
+        if (c[i].keep && c[i].key_encipher)
+            any_ke = 1;
+    }
+    for (i = 0; rc == WOLFCERT_OK && i < n; i++) {
+        if (!c[i].keep || (best == 0 && any_ke && !c[i].key_encipher))
+            continue;
+        if (pick == NULL)
+            pick = &c[i];
+        else if (memcmp(pick->key, c[i].key, sizeof(pick->key)) != 0)
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "scep",
+                              "more than one certificate could receive the "
+                              "request");
+    }
+
+    if (rc == WOLFCERT_OK && pick == NULL)
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "scep",
+                          "no RSA certificate in the bundle can receive the "
+                          "request");
+    if (rc == WOLFCERT_OK) {
+        *cert     = pick->der;
+        *cert_len = pick->len;
+    }
+
+    WOLFCERT_XFREE(c, heap);
+    return rc;
+}
+
 WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
                                  const uint8_t* rx_tid, size_t rx_tid_len,
                                  const uint8_t* sent_tid, size_t sent_tid_len)

@@ -80,6 +80,25 @@ WOLFCERT_API int wolfcert_scep_verify_ca_fingerprint(const uint8_t* ca_der,
                                                      size_t expected_len,
                                                      WolfCertScepFpAlg alg);
 
+/* The certificate in a GetCACert bundle (concatenated DER, as from
+ * wolfcert_scep_get_ca_cert_enc) to envelope requests to; *cert points into
+ * bundle, and heap NULL = default. Nothing here is verified, so bundle should
+ * hold only certificates the caller trusts, such as a pinned CA and the RAs
+ * it issued. A non-CA RSA certificate is preferred:
+ * keyEncipherment without digitalSignature, keyEncipherment, no keyUsage,
+ * then dataEncipherment alone. Failing that, the RSA CA that issued no other
+ * CA in the bundle, a subordinate CA ahead of a self-issued one and
+ * keyEncipherment breaking a tie; certificates for one key count once. Returns WOLFCERT_ERR_PROTOCOL when certificates for different
+ * keys tie, WOLFCERT_ERR_UNSUPPORTED when none qualifies,
+ * WOLFCERT_ERR_BAD_ARG past MAX_PKCS7_CERTS certificates and
+ * WOLFCERT_ERR_PARSE when bundle does not start with a DER SEQUENCE. A
+ * SEQUENCE that is not a certificate is skipped, and bytes after the last
+ * SEQUENCE are ignored. */
+WOLFCERT_API int wolfcert_scep_select_ra_cert(const uint8_t* bundle,
+                                              size_t bundle_len,
+                                              const uint8_t** cert,
+                                              size_t* cert_len, void* heap);
+
 /* CertRep pkiStatus (RFC 8894 section 3.2.1.3). UNSET takes the zero value,
  * so SUCCESS is 1 where the wire encoding is "0". PENDING awaits manual
  * approval and is polled with wolfcert_scep_get_cert_initial using the
