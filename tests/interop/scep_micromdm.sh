@@ -58,8 +58,23 @@ openssl x509 -in dev.crt.pem -noout -subject \
 openssl verify -CAfile depot/ca.pem dev.crt.pem >/dev/null
 echo "    PASS  (cert chains to scepserver CA)"
 
-# The remaining variants reuse the same server and CA. Each takes a fresh CN so
-# that -allowrenew 0 never sees a repeated subject.
+# RenewalReq (messageType 17), signed by the certificate just issued.
+"$WC_CLIENT" reenroll \
+    --proto scep \
+    --url  "http://127.0.0.1:$PORT/scep" \
+    --cert dev.crt.pem \
+    --key  dev.key.pem \
+    --out-cert renewed.crt.pem \
+    >reenroll.log 2>&1 \
+    || { echo "    FAIL (reenroll failed):"; cat reenroll.log; exit 1; }
+openssl verify -CAfile depot/ca.pem renewed.crt.pem >/dev/null
+[ "$(openssl x509 -in dev.crt.pem -noout -serial)" != \
+  "$(openssl x509 -in renewed.crt.pem -noout -serial)" ] \
+    || { echo "    FAIL (reenroll returned the old certificate)"; exit 1; }
+echo "    PASS  (RenewalReq renewed the certificate)"
+
+# The remaining variants reuse the same server and CA. Each takes a fresh CN,
+# since micromdm revokes the earlier certificate of a repeated subject.
 
 # --txid-mode pubkey sends a 64-character transactionID instead of 32.
 "$WC_CLIENT" enroll \

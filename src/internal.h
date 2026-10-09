@@ -265,14 +265,6 @@ int wolfcert_csr_meta_sets_identity(const WolfCertCertMeta* meta);
 WOLFCERT_TEST_VIS int wolfcert_find_san(const DecodedCert* dc,
                                         const byte** san, word32* san_len);
 
-/* wolfcert_csr_build() for a renewal: with renew_cert (PEM or DER) set, the
- * CSR carries that certificate's Subject and SAN, and meta may not set them. */
-WOLFCERT_TEST_VIS int wolfcert_csr_build_ex(const WolfCertKey* key,
-                                            const WolfCertCertMeta* meta,
-                                            const uint8_t* renew_cert,
-                                            size_t renew_cert_len,
-                                            WolfCertBuffer* out_der);
-
 /* 1 if the buffer starts with a SEQUENCE tag after whitespace, else 0. */
 WOLFCERT_TEST_VIS int wolfcert_buffer_is_der(const uint8_t* buf, size_t len);
 

@@ -88,7 +88,7 @@ static void print_usage(FILE* out)
         "  getnextca      SCEP GetNextCACert: fetch the roll-over CA (RFC 8894 section 4.7).\n"
         "  getcert        SCEP GetCert: fetch an issued certificate by serial (RFC 8894 section 3.3.4).\n"
         "  enroll         Generate a key + CSR and enroll a new certificate.\n"
-        "  reenroll       Re-enroll an existing certificate (EST).\n"
+        "  reenroll       Re-enroll an existing certificate (EST, or SCEP RenewalReq).\n"
         "\n"
         "Common options:\n"
         "  --proto est|scep           Enrollment protocol (required)\n"
@@ -157,10 +157,11 @@ static void print_usage(FILE* out)
         "  --key  FILE                     Current private key (PEM)\n"
         "  --out-cert FILE                 Write renewed certificate (PEM;\n"
         "                                  default stdout)\n"
-        "  The renewed cert keeps --cert's subject and SAN (RFC 7030\n"
-        "  section 4.2.2), so --subject and --san-* are rejected.\n"
+        "  The renewed cert keeps --cert's subject, SAN and key (RFC 7030\n"
+        "  section 4.2.2), so --subject and --san-* are rejected. On EST\n"
         "  --cert/--key also authenticate the TLS connection, so\n"
-        "  --client-cert/--client-key are rejected.\n"
+        "  --client-cert/--client-key are rejected; on SCEP they sign the\n"
+        "  RenewalReq.\n"
         "\n"
         "getcert options (SCEP only):\n"
         "  --cert FILE                     Certificate signing the request (PEM)\n"
@@ -1179,10 +1180,12 @@ static int scep_fetch_caps(const WolfCertServerCfg* srv, WolfCertScepCaps* caps,
     return rc;
 }
 
-/* Fetch the CA, resolve any pin against it, then run PKCSReq and any polling. */
+/* Fetch the CA, resolve any pin against it, then run PKCSReq, or RenewalReq
+ * signed by renew_cert and key, and any polling. */
 static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
-                       const CaPin* pin, const WolfCertKey* key,
-                       const WolfCertBuffer* csr, WolfCertBuffer* issued)
+                       const CaPin* pin, const char* who,
+                       const WolfCertKey* key, const WolfCertBuffer* csr,
+                       const DerBuffer* renew_cert, WolfCertBuffer* issued)
 {
     WolfCertScepResult scep_result = { 0 };
     WolfCertScepCaps caps = { 0 };
@@ -1190,11 +1193,17 @@ static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
     int attempts = 0;
     int rc;
 
-    rc = scep_resolve_ca(srv, pin, "enroll", &cas);
+    rc = scep_resolve_ca(srv, pin, who, &cas);
 
     if (rc == WOLFCERT_OK)
-        rc = scep_fetch_caps(srv, &caps, "enroll");
-    if (rc == WOLFCERT_OK) {
+        rc = scep_fetch_caps(srv, &caps, who);
+    if (rc == WOLFCERT_OK && renew_cert != NULL) {
+        rc = wolfcert_scep_renewal_req_ex(srv, &caps,
+                 cas.certs[cas.ra]->buffer, cas.certs[cas.ra]->length,
+                 cas.bundle, cas.bundle_len, renew_cert->buffer,
+                 renew_cert->length, key, csr->data, csr->len, &scep_result);
+    }
+    else if (rc == WOLFCERT_OK) {
         rc = wolfcert_scep_pkcs_req_ex(srv, &caps, cas.certs[cas.ra]->buffer,
                                        cas.certs[cas.ra]->length, cas.bundle,
                                        cas.bundle_len, key, csr->data,
@@ -1214,7 +1223,10 @@ static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
         nanosleep(&ts, NULL);
         rc = wolfcert_scep_get_cert_initial(srv, &caps,
                  cas.certs[cas.ra]->buffer, cas.certs[cas.ra]->length,
-                 cas.bundle, cas.bundle_len, NULL, 0, key, csr->data, csr->len,
+                 cas.bundle, cas.bundle_len,
+                 renew_cert != NULL ? renew_cert->buffer : NULL,
+                 renew_cert != NULL ? renew_cert->length : 0,
+                 key, csr->data, csr->len,
                  scep_result.transaction_id, scep_result.transaction_id_len,
                  &poll_result);
 
@@ -1535,7 +1547,8 @@ static int cmd_enroll(int argc, char** argv)
     }
     else if (ret == 0) {
 #ifdef WOLFCERT_HAVE_SCEP
-        rc = scep_enroll(&opts, &srv, &pin, key, &csr, &issued);
+        rc = scep_enroll(&opts, &srv, &pin, "enroll", key, &csr, NULL,
+                         &issued);
 #endif
     }
 
@@ -1586,10 +1599,41 @@ static int cmd_enroll(int argc, char** argv)
     return ret;
 }
 
+#ifdef WOLFCERT_HAVE_SCEP
+/* RenewalReq signed by the current certificate and key, for a CSR that keeps
+ * the certificate's subject, SAN and key. */
+static int scep_reenroll(const Opts* opts, const WolfCertServerCfg* srv,
+                         const CaPin* pin, const uint8_t* cert_pem,
+                         size_t cert_len, const WolfCertKey* key,
+                         WolfCertBuffer* issued)
+{
+    WolfCertCertMeta meta = { .challenge_password = opts->challenge };
+    WolfCertBuffer csr = { 0 };
+    DerBuffer* cert_der = NULL;
+    int rc;
+
+    rc = wolfcert_csr_build_ex(key, &meta, cert_pem, cert_len, &csr);
+    if (rc == WOLFCERT_OK &&
+            wc_PemToDer(cert_pem, (long)cert_len, CERT_TYPE, &cert_der,
+                        NULL, NULL, NULL) != 0)
+        rc = WOLFCERT_ERR_PARSE;
+    if (rc == WOLFCERT_OK)
+        rc = scep_enroll(opts, srv, pin, "reenroll", key, &csr, cert_der,
+                         issued);
+
+    if (cert_der != NULL)
+        wc_FreeDer(&cert_der);
+    wolfcert_buffer_free(&csr);
+    return rc;
+}
+#endif
+
 static int cmd_reenroll(int argc, char** argv)
 {
     Opts opts;
     uint8_t* trust_hold = NULL;
+    uint8_t* mt_cert = NULL;
+    uint8_t* mt_key = NULL;
     uint8_t* cert_pem = NULL;
     uint8_t* key_pem = NULL;
     WolfCertKey* current_key = NULL;
@@ -1597,6 +1641,9 @@ static int cmd_reenroll(int argc, char** argv)
     WolfCertCertMeta meta = { 0 };
     WolfCertBuffer issued = { 0 };
     WolfCertProtocol p = 0;
+#ifdef WOLFCERT_HAVE_SCEP
+    CaPin pin = { 0 };
+#endif
     size_t cert_len = 0, key_len = 0;
     int rc = WOLFCERT_ERR_UNSUPPORTED;
     int ret = 0;
@@ -1611,12 +1658,12 @@ static int cmd_reenroll(int argc, char** argv)
     if (ret == 0 && check_proto_only_opts(&opts, p) != 0)
         ret = 1;
 
-    if (ret == 0 && p != WOLFCERT_PROTO_EST) {
-        fprintf(stderr, "reenroll: only EST is supported in the CLI today\n");
-        ret = 2;
-    }
+#ifdef WOLFCERT_HAVE_SCEP
+    if (ret == 0 && scep_pin_setup(&opts, p, &pin, 1) != 0)
+        ret = 1;
+#endif
 
-    if (ret == 0 &&
+    if (ret == 0 && p == WOLFCERT_PROTO_EST &&
         (opts.client_cert_file != NULL || opts.client_key_file != NULL)) {
         fprintf(stderr, "reenroll: --client-cert/--client-key are not used; "
                         "/simplereenroll authenticates TLS with --cert/--key\n");
@@ -1659,13 +1706,25 @@ static int cmd_reenroll(int argc, char** argv)
         fill_basic_auth(&opts, &srv);
         if (fill_scep_opts(&opts, &srv) != 0)
             ret = 1;
+        if (ret == 0 && p == WOLFCERT_PROTO_SCEP &&
+                fill_client_ident(&opts, &srv, &mt_cert, &mt_key) != 0)
+            ret = 1;
     }
 
-    if (ret == 0) {
+    if (ret == 0 && p == WOLFCERT_PROTO_EST) {
         meta.challenge_password = opts.challenge;
         rc = wolfcert_client_reenroll(NULL, &srv, cert_pem, cert_len,
                                       current_key, NULL, &meta, &new_key,
                                       &issued);
+    }
+#ifdef WOLFCERT_HAVE_SCEP
+    else if (ret == 0) {
+        rc = scep_reenroll(&opts, &srv, &pin, cert_pem, cert_len,
+                           current_key, &issued);
+    }
+#endif
+
+    if (ret == 0) {
         if (rc != WOLFCERT_OK) {
             fprintf(stderr, "reenroll: %s\n", wolfcert_strerror(rc));
             const char* m = wolfcert_last_error_message();
@@ -1697,6 +1756,8 @@ static int cmd_reenroll(int argc, char** argv)
     free(cert_pem);
     free_secret(key_pem, key_len);
     free(trust_hold);
+    free(mt_cert);
+    free(mt_key);
     opts_free(&opts);
     return ret;
 }

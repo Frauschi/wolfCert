@@ -362,6 +362,19 @@ else
             fails=$((fails + 1))
         fi
 
+        if "$CLI" reenroll --proto scep --url "$PIN_URL" \
+                --ca-fingerprint "$fp" --cert "$tmp/ok.crt" \
+                --key "$tmp/ok.key" --out-cert "$tmp/renewed.crt" \
+                >"$tmp/reenroll.log" 2>&1 &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/renewed.crt" &&
+                ! cmp -s "$tmp/ok.crt" "$tmp/renewed.crt"; then
+            echo "ok   SCEP reenroll renews the pinned enrollment"
+        else
+            echo "FAIL: SCEP reenroll did not renew the certificate"
+            cat "$tmp/reenroll.log"
+            fails=$((fails + 1))
+        fi
+
         # getnextca resolves the current CA through the same pin.
         expect_reject "getnextca with a mismatched --ca-fingerprint" \
             "does not match --ca-fingerprint" \
@@ -436,6 +449,18 @@ else
         else
             echo "FAIL: enroll with the CA pinned did not go through the RA"
             cat "$tmp/ra-enroll.log"
+            fails=$((fails + 1))
+        fi
+
+        if "$CLI" reenroll --proto scep --url "$RA_URL" \
+                --ca-fingerprint "$ca_fp" --cert "$tmp/ra-ok.crt" \
+                --key "$tmp/ra-ok.key" --out-cert "$tmp/ra-renewed.crt" \
+                >"$tmp/ra-reenroll.log" 2>&1 &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/ra-renewed.crt"; then
+            echo "ok   SCEP reenroll through the RA with the CA pinned"
+        else
+            echo "FAIL: SCEP reenroll through the RA"
+            cat "$tmp/ra-reenroll.log"
             fails=$((fails + 1))
         fi
 
