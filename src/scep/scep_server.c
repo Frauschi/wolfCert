@@ -198,6 +198,9 @@ static int read_request(WolfCertServer* s, int fd, ScepRequest* out, void* heap)
     if (sp2 == NULL)
         return WOLFCERT_ERR_PROTOCOL;
 
+    WolfCertReqFraming fr;
+    wolfcert_server_framing_init(&fr, sp2 + 1, (size_t)(line + llen - sp2 - 1));
+
     /* Split the request-target in place inside rawbuf. */
     *sp2 = '\0';
     out->path = sp1 + 1;
@@ -214,18 +217,20 @@ static int read_request(WolfCertServer* s, int fd, ScepRequest* out, void* heap)
         const char* v;
         size_t vlen;
 
-        if (wolfcert_http_hdr_split(line, llen, &v, &vlen) != 0)
+        if (wolfcert_http_hdr_split(line, llen, &v, &vlen) != 0 ||
+                wolfcert_server_framing_hdr(&fr, line, llen, v, vlen) < 0)
             return WOLFCERT_ERR_PROTOCOL;
-        if (wolfcert_http_hdr_is(line, llen, "Content-Length")) {
-            out->content_length = (size_t)strtoul(v, NULL, 10);
-        }
-        else if (wolfcert_http_hdr_is(line, llen, "Connection")) {
-            if (vlen >= 5 && wolfcert_ascii_ncasecmp(v, "close", 5) == 0)
-                out->connection_close = 1;
-        }
     }
 
+    out->content_length = fr.content_length;
+    out->connection_close = wolfcert_server_framing_close(&fr);
+
     size_t have = (size_t)(end - p);
+    if (fr.chunked) {
+        return wolfcert_server_read_chunked(s, fd, p, have, 1 * 1024 * 1024,
+                                            &out->body, &out->body_len, heap);
+    }
+
     if (out->content_length > 0) {
         if (out->content_length > 1 * 1024 * 1024)
             return WOLFCERT_ERR_PROTOCOL;
@@ -1095,7 +1100,7 @@ static int handle_pki_op_get(WolfCertServer* s, int fd, ScepRequest* req)
         return rc;
     }
 
-    /* Free any body a bogus Content-Length made read_request allocate. */
+    /* Free any body sent with a GET. */
     WOLFCERT_XFREE(req->body, req->heap);
     req->body     = der.data;
     req->body_len = der.len;

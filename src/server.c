@@ -31,6 +31,7 @@
 #include <errno.h>
 #include <netinet/in.h>
 #include <poll.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/time.h>
@@ -154,6 +155,157 @@ ssize_t wolfcert_io_send(WolfCertServer* srv, int fd, const void* buf, size_t le
            !io_should_stop(srv));
 
     return r;
+}
+
+static void ows_trim(const char** v, size_t* vlen)
+{
+    while (*vlen > 0 && (**v == ' ' || **v == '\t')) {
+        (*v)++;
+        (*vlen)--;
+    }
+    while (*vlen > 0 && ((*v)[*vlen - 1] == ' ' || (*v)[*vlen - 1] == '\t'))
+        (*vlen)--;
+}
+
+static int te_chunked(const char* v, size_t vlen)
+{
+    ows_trim(&v, &vlen);
+    return vlen == 7 && wolfcert_ascii_ncasecmp(v, "chunked", 7) == 0;
+}
+
+/* Connection is a comma-separated option list (RFC 9110 section 7.6.1). */
+static void conn_options(WolfCertReqFraming* f, const char* v, size_t vlen)
+{
+    const char* end = v + vlen;
+
+    while (v < end) {
+        const char* t = v;
+        size_t tlen;
+
+        while (v < end && *v != ',')
+            v++;
+        tlen = (size_t)(v - t);
+        ows_trim(&t, &tlen);
+
+        if (tlen == 5 && wolfcert_ascii_ncasecmp(t, "close", 5) == 0)
+            f->close = 1;
+        else if (tlen == 10 &&
+                 wolfcert_ascii_ncasecmp(t, "keep-alive", 10) == 0)
+            f->keep_alive = 1;
+
+        if (v < end)
+            v++;
+    }
+}
+
+void wolfcert_server_framing_init(WolfCertReqFraming* f, const char* ver,
+                                  size_t ver_len)
+{
+    memset(f, 0, sizeof(*f));
+    f->http10 = ver_len == 8 && memcmp(ver, "HTTP/1.0", 8) == 0;
+}
+
+int wolfcert_server_framing_hdr(WolfCertReqFraming* f, const char* line,
+                                size_t llen, const char* v, size_t vlen)
+{
+    if (wolfcert_http_hdr_is(line, llen, "Content-Length")) {
+        f->content_length = (size_t)strtoul(v, NULL, 10);
+        f->cl_seen = 1;
+    }
+    else if (wolfcert_http_hdr_is(line, llen, "Transfer-Encoding")) {
+        /* Any coding but a lone chunked is refused with 400. */
+        if (f->chunked || !te_chunked(v, vlen))
+            return WOLFCERT_ERR_PROTOCOL;
+
+        f->chunked = 1;
+    }
+    else if (wolfcert_http_hdr_is(line, llen, "Connection")) {
+        conn_options(f, v, vlen);
+    }
+    else {
+        return 0;
+    }
+
+    return 1;
+}
+
+int wolfcert_server_framing_close(const WolfCertReqFraming* f)
+{
+    /* RFC 9112 section 9.3: HTTP/1.0 persists only with keep-alive. Section
+     * 6.1: close after TE with Content-Length, or TE on HTTP/1.0. */
+    return f->close || (f->http10 && !f->keep_alive) ||
+           (f->chunked && (f->cl_seen || f->http10));
+}
+
+WOLFCERT_TEST_VIS int wolfcert_server_read_chunked(WolfCertServer* srv, int fd,
+                                 const void* have, size_t have_len,
+                                 size_t max_bytes, uint8_t** body,
+                                 size_t* body_len, void* heap)
+{
+    size_t raw_max = max_bytes + 64 * 1024; /* room for the framing */
+    uint8_t* raw = NULL;
+    size_t raw_len = 0;
+    size_t raw_cap = 0;
+    WolfCertChunkScan scan = { .max = max_bytes };
+    int framed;
+    int rc;
+
+    if (have_len > raw_max)
+        return WOLFCERT_ERR_PROTOCOL;
+
+    if (have_len > 0) {
+        raw = (uint8_t*)WOLFCERT_XMALLOC(have_len, heap);
+        if (raw == NULL)
+            return WOLFCERT_ERR_MEMORY;
+
+        memcpy(raw, have, have_len);
+        raw_len = have_len;
+        raw_cap = have_len;
+    }
+
+    while ((framed = wolfcert_http_chunked_complete(raw, raw_len,
+                                                    &scan)) == 0) {
+        ssize_t r;
+
+        if (raw_len == raw_cap) {
+            size_t grow = raw_cap < 2048 ? 2048 : raw_cap;
+            uint8_t* nb;
+
+            if (grow > raw_max - raw_cap)
+                grow = raw_max - raw_cap;
+            if (grow == 0) {
+                WOLFCERT_XFREE(raw, heap);
+                return WOLFCERT_ERR_PROTOCOL;
+            }
+
+            nb = (uint8_t*)WOLFCERT_XREALLOC(raw, raw_cap + grow, heap);
+            if (nb == NULL) {
+                WOLFCERT_XFREE(raw, heap);
+                return WOLFCERT_ERR_MEMORY;
+            }
+
+            raw = nb;
+            raw_cap += grow;
+        }
+
+        r = wolfcert_io_recv(srv, fd, raw + raw_len, raw_cap - raw_len);
+        if (r <= 0) {
+            WOLFCERT_XFREE(raw, heap);
+            return WOLFCERT_ERR_IO;
+        }
+
+        raw_len += (size_t)r;
+    }
+
+    if (framed < 0)
+        rc = WOLFCERT_ERR_PROTOCOL;
+    else
+        rc = wolfcert_http_chunked_decode(raw, raw_len, body, body_len,
+                                          max_bytes, heap);
+
+    WOLFCERT_XFREE(raw, heap);
+
+    return rc;
 }
 
 static int tls_setup(WolfCertServer* s, const WolfCertServerCfgSrv* cfg)
