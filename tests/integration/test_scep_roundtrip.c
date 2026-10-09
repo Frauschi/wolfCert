@@ -1548,6 +1548,120 @@ static int check_malformed_dispatch(uint16_t port, const WolfCertKeyCfg* kcfg,
     return rc;
 }
 
+/* A split CA/RA server serves its RA ahead of the CA, decrypts requests with
+ * the RA key and signs CertReps with it; issued certs still chain to the CA. */
+static int test_split_ra(void)
+{
+    WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,
+                                 .bind_host = "127.0.0.1", .bind_port = 0,
+                                 .scep_split_ra = 1 };
+    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertCertMeta meta = { .subject_dn = "CN=device-split-ra" };
+    WolfCertServer* s = NULL;
+    WolfCertScepCaps caps = { 0 };
+    WolfCertBuffer pem = { 0 };
+    WolfCertBuffer bundle = { 0 };
+    WolfCertBuffer csr = { 0 };
+    WolfCertKey* key = NULL;
+    WolfCertScepResult via_ra = { 0 };
+    WolfCertScepResult ca_trust = { 0 };
+    WolfCertScepResult to_ca = { 0 };
+    DerBuffer* ra = NULL;
+    DerBuffer* ca = NULL;
+    DerBuffer* issued = NULL;
+    WOLFSSL_CERT_MANAGER* cm = NULL;
+    const char* second = NULL;
+    pthread_t tid;
+    char url[128];
+    int via_ra_rc = -1, ca_trust_rc = -1, to_ca_rc = -1;
+    int chains = 0;
+    int rc;
+
+    REQUIRE(wolfcert_server_start(&cfg, &s) == WOLFCERT_OK);
+    if (pthread_create(&tid, NULL, server_thread, s) != 0) {
+        wolfcert_server_free(s);
+        return 1;
+    }
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/scep",
+             wolfcert_server_port(s));
+    WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP,
+                              .server_url = url };
+
+    rc = wolfcert_scep_get_ca_caps(&cli, &caps);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_scep_get_ca_cert(&cli, &pem);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_scep_get_ca_cert_enc(&cli, WOLFCERT_ENCODING_DER,
+                                           &bundle);
+    if (rc == WOLFCERT_OK) {
+        second = strstr((const char*)pem.data + 1, "-----BEGIN CERTIFICATE");
+        if (second == NULL ||
+                wc_PemToDer(pem.data, (long)pem.len, CERT_TYPE, &ra,
+                            NULL, NULL, NULL) != 0 ||
+                wc_PemToDer((const unsigned char*)second,
+                            (long)((const char*)pem.data + pem.len - second),
+                            CERT_TYPE, &ca, NULL, NULL, NULL) != 0)
+            rc = -1;
+    }
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_key_generate(&kcfg, &key);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_csr_build(key, &meta, &csr);
+
+    if (rc == WOLFCERT_OK) {
+        via_ra_rc = wolfcert_scep_pkcs_req_ex(&cli, &caps, ra->buffer,
+                        ra->length, bundle.data, bundle.len, key, csr.data,
+                        csr.len, &via_ra);
+        ca_trust_rc = wolfcert_scep_pkcs_req_ex(&cli, &caps, ra->buffer,
+                        ra->length, ca->buffer, ca->length, key, csr.data,
+                        csr.len, &ca_trust);
+        to_ca_rc = wolfcert_scep_pkcs_req_ex(&cli, &caps, ca->buffer,
+                        ca->length, bundle.data, bundle.len, key, csr.data,
+                        csr.len, &to_ca);
+    }
+
+    if (via_ra_rc == WOLFCERT_OK &&
+            via_ra.status == WOLFCERT_SCEP_STATUS_SUCCESS &&
+            wc_PemToDer(via_ra.cert_pem.data, (long)via_ra.cert_pem.len,
+                        CERT_TYPE, &issued, NULL, NULL, NULL) == 0) {
+        cm = wolfSSL_CertManagerNew();
+        chains = cm != NULL &&
+            wolfSSL_CertManagerLoadCABuffer(cm, ca->buffer, (long)ca->length,
+                WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS &&
+            wolfSSL_CertManagerVerifyBuffer(cm, issued->buffer,
+                (long)issued->length, WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS;
+    }
+
+    wolfcert_server_stop(s);
+    pthread_join(tid, NULL);
+    wolfcert_server_free(s);
+    if (cm != NULL)
+        wolfSSL_CertManagerFree(cm);
+    if (issued != NULL)
+        wc_FreeDer(&issued);
+    if (ra != NULL)
+        wc_FreeDer(&ra);
+    if (ca != NULL)
+        wc_FreeDer(&ca);
+    int to_ca_refused = to_ca_rc == WOLFCERT_OK &&
+                        to_ca.status == WOLFCERT_SCEP_STATUS_FAILURE &&
+                        to_ca.fail_info == 2;
+    wolfcert_scep_result_free(&via_ra);
+    wolfcert_scep_result_free(&ca_trust);
+    wolfcert_scep_result_free(&to_ca);
+    wolfcert_buffer_free(&csr);
+    wolfcert_buffer_free(&bundle);
+    wolfcert_buffer_free(&pem);
+    wolfcert_key_free(key);
+
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(chains);
+    REQUIRE(ca_trust_rc != WOLFCERT_OK);
+    REQUIRE(to_ca_refused);
+    return 0;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -1557,6 +1671,8 @@ int main(void)
     if (test_caps_scep_standard())
         return 1;
     if (test_get_ca_cert_empty_body())
+        return 1;
+    if (test_split_ra())
         return 1;
 
     WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,

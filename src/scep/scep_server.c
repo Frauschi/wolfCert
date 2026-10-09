@@ -24,6 +24,7 @@
 
 #include <wolfcert/server.h>
 #include <wolfcert/errors.h>
+#include <wolfcert/csr.h>
 #include "../internal.h"
 
 #include <wolfssl/wolfcrypt/asn.h>
@@ -86,6 +87,11 @@ typedef struct {
     /* Rolled-over CA for GetNextCACert; never the active issuing CA. */
     WolfCertCa   next_ca;
     int          next_ca_ready;
+    /* Split CA/RA identity and the GetCACert bundle naming it and the CA. */
+    uint8_t*     ra_cert_der;
+    size_t       ra_cert_len;
+    WolfCertBuffer ra_key_der;
+    WolfCertBuffer ca_ra_bundle;
 #if defined(WOLFCERT_BUILD_TESTING)
     /* Fault injection for the client tests. */
     int          fault_omit_recipient_nonce;
@@ -318,7 +324,36 @@ static void handle_get_ca_caps(WolfCertServer* s, int fd)
 
 static void handle_get_ca_cert(WolfCertServer* s, int fd)
 {
-    send_bin(s, fd, "application/x-x509-ca-cert", s->ca.cert_der, s->ca.cert_der_len);
+    ScepPriv* p = (ScepPriv*)s->priv;
+
+    if (p->ca_ra_bundle.data != NULL) {
+        send_bin(s, fd, "application/x-x509-ca-ra-cert", p->ca_ra_bundle.data,
+                 p->ca_ra_bundle.len);
+    }
+    else {
+        send_bin(s, fd, "application/x-x509-ca-cert", s->ca.cert_der,
+                 s->ca.cert_der_len);
+    }
+}
+
+/* The certificate and key that decrypt requests and sign CertReps. */
+static void rep_identity(const WolfCertServer* s, const uint8_t** cert,
+                         size_t* cert_len, const uint8_t** key, size_t* key_len)
+{
+    const ScepPriv* p = (const ScepPriv*)s->priv;
+
+    if (p->ra_cert_der != NULL) {
+        *cert     = p->ra_cert_der;
+        *cert_len = p->ra_cert_len;
+        *key      = p->ra_key_der.data;
+        *key_len  = p->ra_key_der.len;
+    }
+    else {
+        *cert     = s->ca.cert_der;
+        *cert_len = s->ca.cert_der_len;
+        *key      = s->ca.key_der;
+        *key_len  = s->ca.key_der_len;
+    }
 }
 
 /* RFC 8894 section 4.7.1: the current CA signs the next CA certificate. */
@@ -565,10 +600,12 @@ static int send_cert_rep(WolfCertServer* s, int fd,
 #endif
 
     /* A test fault can swap in a throwaway signer. */
-    const uint8_t* sign_cert     = s->ca.cert_der;
-    size_t         sign_cert_len = s->ca.cert_der_len;
-    const uint8_t* sign_key      = s->ca.key_der;
-    size_t         sign_key_len  = s->ca.key_der_len;
+    const uint8_t* sign_cert;
+    size_t         sign_cert_len;
+    const uint8_t* sign_key;
+    size_t         sign_key_len;
+
+    rep_identity(s, &sign_cert, &sign_cert_len, &sign_key, &sign_key_len);
 #if defined(WOLFCERT_BUILD_TESTING)
     if (p->fault_sign_with_wrong_key) {
         if (!p->wrong_ca_ready) {
@@ -998,9 +1035,15 @@ static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
         goto out;
     }
 
-    rc = wolfcert_scep_deenvelop(s->ca.cert_der, s->ca.cert_der_len,
-                                  s->ca.key_der,  s->ca.key_der_len,
-                                  env.data, env.len, &csr, s->heap);
+    const uint8_t* rcpt_cert;
+    size_t         rcpt_cert_len;
+    const uint8_t* rcpt_key;
+    size_t         rcpt_key_len;
+
+    rep_identity(s, &rcpt_cert, &rcpt_cert_len, &rcpt_key, &rcpt_key_len);
+    rc = wolfcert_scep_deenvelop(rcpt_cert, rcpt_cert_len, rcpt_key,
+                                 rcpt_key_len, env.data, env.len, &csr,
+                                 s->heap);
     if (rc != WOLFCERT_OK) {
         const char* fail_info = rc == WOLFCERT_ERR_UNSUPPORTED
                                     ? "0" /* badAlg */
@@ -1185,17 +1228,64 @@ static int handle_request(WolfCertServer* s, int fd)
     return rc;
 }
 
+/* Issue the RA identity from the CA and bundle it ahead of the CA. */
+static int make_split_ra(WolfCertServer* s, ScepPriv* p)
+{
+    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE,
+                            .heap = s->heap };
+    WolfCertCertMeta meta = { .subject_dn = "CN=wolfCert Test RA,O=wolfCert" };
+    WolfCertKey* key = NULL;
+    WolfCertBuffer csr = { 0 };
+    const uint8_t* certs[2];
+    size_t lens[2];
+    int rc;
+
+    rc = wolfcert_key_generate(&kcfg, &key);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_csr_build(key, &meta, &csr);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_key_to_der(key, &p->ra_key_der);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_ca_issue(&s->ca, csr.data, csr.len, &p->ra_cert_der,
+                               &p->ra_cert_len);
+    if (rc == WOLFCERT_OK) {
+        certs[0] = p->ra_cert_der;
+        lens[0]  = p->ra_cert_len;
+        certs[1] = s->ca.cert_der;
+        lens[1]  = s->ca.cert_der_len;
+        rc = wolfcert_pkcs7_build_certs_only(certs, lens, 2, &p->ca_ra_bundle,
+                                             s->heap);
+    }
+
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(key);
+    return rc;
+}
+
+static void free_split_ra(WolfCertServer* s, ScepPriv* p)
+{
+    WOLFCERT_XFREE(p->ra_cert_der, s->heap);
+    p->ra_cert_der = NULL;
+    wolfcert_buffer_free_secure(&p->ra_key_der);
+    wolfcert_buffer_free(&p->ca_ra_bundle);
+}
+
 static int scep_start(const WolfCertServerCfgSrv* cfg, WolfCertServer* base)
 {
-    (void)cfg;
     ScepPriv* p = (ScepPriv*)WOLFCERT_XMALLOC(sizeof(*p), base->heap);
+    int rc = WOLFCERT_OK;
+
     if (p == NULL)
         return WOLFCERT_ERR_MEMORY;
 
     memset(p, 0, sizeof(*p));
     base->priv = p;
 
-    return WOLFCERT_OK;
+    if (cfg->scep_split_ra)
+        rc = make_split_ra(base, p);
+
+    return rc;
 }
 
 static int scep_serve_fd(WolfCertServer* srv, int fd)
@@ -1221,6 +1311,7 @@ static void scep_free_priv(WolfCertServer* srv)
         WOLFCERT_XFREE(p->issued[i].cert_der, srv->heap);
 
     WOLFCERT_XFREE(p->issued, srv->heap);
+    free_split_ra(srv, p);
     if (p->next_ca_ready)
         wolfcert_ca_free(&p->next_ca);
 #if defined(WOLFCERT_BUILD_TESTING)

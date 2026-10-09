@@ -280,8 +280,10 @@ if [ ! -x "$SERVER" ]; then
 else
     tmp="$(mktemp -d -t wolfcert-cli.XXXXXX)"
     srv_pid=""
+    ra_pid=""
     argv_pid=""
     trap '[ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null;
+          [ -n "$ra_pid" ] && kill "$ra_pid" 2>/dev/null;
           [ -n "$argv_pid" ] && kill "$argv_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
 
     # Not every sleep(1) takes a fractional delay.
@@ -377,6 +379,81 @@ else
             fails=$((fails + 1))
         fi
     fi
+
+    # Against a split CA/RA server, pinning the CA trusts the RA it signed and
+    # enrolls through it; pinning the RA ignores the CA, which it did not sign.
+    ready=0
+    for port in 18087 18187 18287 18387; do
+        "$SERVER" --proto scep --listen "127.0.0.1:$port" --scep-split-ra \
+            >"$tmp/ra-server.log" 2>&1 &
+        ra_pid=$!
+        RA_URL="http://127.0.0.1:$port/scep"
+        i=0
+        while [ "$i" -lt "$poll_tries" ]; do
+            if "$CLI" getcacerts --proto scep --url "$RA_URL" \
+                    --out-cert "$tmp/ra-all.pem" >"$tmp/ra-getca.log" 2>&1; then
+                ready=1
+                break
+            fi
+            sleep "$poll_delay"
+            i=$((i + 1))
+        done
+        if [ "$ready" -eq 1 ]; then
+            break
+        fi
+        kill "$ra_pid" 2>/dev/null
+    done
+
+    ra_fp="$(sed -n 's/.*certificate 0 is \(sha256:[0-9A-Fa-f:]*\).*/\1/p' \
+             "$tmp/ra-getca.log")"
+    ca_fp="$(sed -n 's/.*certificate 1 is \(sha256:[0-9A-Fa-f:]*\).*/\1/p' \
+             "$tmp/ra-getca.log")"
+    if [ "$ready" -ne 1 ]; then
+        skip_group "split CA/RA pinning (no test server would start)"
+        cat "$tmp/ra-server.log"
+    elif [ -z "$ra_fp" ] || [ -z "$ca_fp" ]; then
+        echo "FAIL: getcacerts did not list the RA and the CA"
+        cat "$tmp/ra-getca.log"
+        fails=$((fails + 1))
+    else
+        if "$CLI" getcacerts --proto scep --url "$RA_URL" \
+                --ca-fingerprint "$ca_fp" --out-cert "$tmp/ra-pinned.pem" \
+                >"$tmp/ra-pinned.log" 2>&1 &&
+                [ "$(grep -c "BEGIN CERTIFICATE" "$tmp/ra-pinned.pem")" = "2" ]; then
+            echo "ok   CA-pinned getcacerts writes the CA and the RA it signed"
+        else
+            echo "FAIL: CA-pinned getcacerts did not write the CA and the RA"
+            cat "$tmp/ra-pinned.log"
+            fails=$((fails + 1))
+        fi
+
+        if "$CLI" enroll --proto scep --url "$RA_URL" --key-type rsa:2048 \
+                --subject "CN=ra-test" --ca-fingerprint "$ca_fp" \
+                --out-key "$tmp/ra-ok.key" --out-cert "$tmp/ra-ok.crt" \
+                >"$tmp/ra-enroll.log" 2>&1 &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/ra-ok.crt"; then
+            echo "ok   enroll through the RA with the CA pinned"
+        else
+            echo "FAIL: enroll with the CA pinned did not go through the RA"
+            cat "$tmp/ra-enroll.log"
+            fails=$((fails + 1))
+        fi
+
+        if "$CLI" enroll --proto scep --url "$RA_URL" --key-type rsa:2048 \
+                --subject "CN=ra-test" --ca-fingerprint "$ra_fp" \
+                --out-key "$tmp/ra-ra.key" --out-cert "$tmp/ra-ra.crt" \
+                >"$tmp/ra-ra.log" 2>&1 &&
+                grep -q "ignoring 1 of 2" "$tmp/ra-ra.log" &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/ra-ra.crt"; then
+            echo "ok   enroll with the RA pinned ignores the CA"
+        else
+            echo "FAIL: enroll with the RA pinned"
+            cat "$tmp/ra-ra.log"
+            fails=$((fails + 1))
+        fi
+    fi
+    kill "$ra_pid" 2>/dev/null
+    ra_pid=""
 
     # A hostname --listen is refused, and the reason reaches stderr.
     "$SERVER" --proto scep --listen localhost:18090 >"$tmp/listen.log" 2>&1 &

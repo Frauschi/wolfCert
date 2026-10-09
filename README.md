@@ -149,16 +149,18 @@ then require it on every later run:
     --out-key dev.key --out-cert dev.crt
 ```
 
-Only the certificate matching the fingerprint is used, as the envelope
-recipient and as the sole trust anchor for the reply; anything else the
-server sends alongside it is ignored. A response with no match is refused.
-Without the flag the client warns and trusts whatever it is served, which is
-fine against a test server and not fine anywhere else. A CA that answers
-`GetCACert` with a separate registration authority needs that RA's
-fingerprint for `enroll`, since the RA is what signs the reply.
-`getnextca` wants the CA's own fingerprint instead - RFC 8894 section
-4.7.1 has the current CA sign the roll-over. `getcacerts` prints one line
-per served certificate, so both values come out of one trusted read.
+Only the certificate matching the fingerprint, and the served certificates
+it signed, are trusted for the reply; anything else the server sends
+alongside them is ignored. A response with no match is refused. Without the
+flag the client warns and trusts whatever it is served, which is fine
+against a test server and not fine anywhere else. Against a CA with a
+separate registration authority, pin the CA: the client checks the RA
+certificates against it, envelopes the request to the RA that may encipher
+keys, and accepts a reply signed by either. Pinning a single RA certificate
+that both decrypts and signs works too. `getnextca` wants the CA's own
+fingerprint - RFC 8894 section 4.7.1 has the current CA sign the
+roll-over. `getcacerts` prints one line per served certificate and, when
+pinned, writes the pinned certificate and those it signed.
 
 The pin covers `GetCACert` alone. `GetCACaps` travels the same
 unauthenticated transport, so whoever controls the path can strip the

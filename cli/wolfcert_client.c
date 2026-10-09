@@ -32,6 +32,8 @@
 #  include <wolfcert/scep.h>
 #endif
 
+#include <wolfssl/ssl.h>
+#include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/asn_public.h>
 #include <wolfssl/wolfcrypt/hash.h>
 
@@ -117,11 +119,12 @@ static void print_usage(FILE* out)
         "                             no GetCACaps keyword advertises AES-256.\n"
         "  --ca-fingerprint [sha256:|sha1:|sha512:]HEX\n"
         "                             Pin the GetCACert response (SCEP only) to a value\n"
-        "                             obtained out of band; getcacerts prints it. Only\n"
-        "                             the matching certificate is used, as CSR envelope\n"
-        "                             recipient and as CertRep trust anchor, and a\n"
-        "                             response without it is refused. Unpinned, the\n"
-        "                             served CA is trusted unverified.\n"
+        "                             obtained out of band; getcacerts prints it. The\n"
+        "                             matching certificate and the served certificates\n"
+        "                             it signed are trusted for the CertRep, an RA among\n"
+        "                             them receives the CSR envelope, and a response\n"
+        "                             without a match is refused. Unpinned, the served\n"
+        "                             certificates are trusted unverified.\n"
         "\n"
         "enroll options:\n"
         "  --key-type KT                   Key type (default ecc:256; SCEP needs rsa)\n"
@@ -965,49 +968,199 @@ static int fill_client_ident(const Opts* opts, WolfCertServerCfg* cfg,
 }
 
 #ifdef WOLFCERT_HAVE_SCEP
-/* Resolve GetCACert into ra_der and the CertRep trust bundle, which aliases
- * ra_der or ca_bundle; the caller frees ca_pem, ca_bundle and ra_der. A pin
- * narrows both. */
-static int scep_resolve_ca(const WolfCertServerCfg* srv, const CaPin* pin,
-                           const char* who,
-                           WolfCertBuffer* ca_pem, WolfCertBuffer* ca_bundle,
-                           DerBuffer** ra_der,
-                           const uint8_t** bundle, size_t* bundle_len)
-{
-    size_t n_certs = 0;
-    int rc = wolfcert_scep_get_ca_cert(srv, ca_pem);
+#define SCEP_MAX_CA_CERTS 8
 
-    if (rc == WOLFCERT_OK && pin->len > 0) {
-        if (find_pinned_cert(ca_pem->data, ca_pem->len, pin, ra_der,
-                             &n_certs) != 0) {
+/* GetCACert narrowed to the certificates trusted for a request, which of them
+ * receives the envelope, and their DER concatenated as the CertRep trust. */
+typedef struct {
+    DerBuffer* certs[SCEP_MAX_CA_CERTS];
+    size_t     count;
+    size_t     ra;
+    uint8_t*   bundle;
+    size_t     bundle_len;
+} ScepCaSet;
+
+static void scep_ca_set_free(ScepCaSet* cs)
+{
+    size_t i;
+
+    for (i = 0; i < cs->count; i++)
+        wc_FreeDer(&cs->certs[i]);
+    free(cs->bundle);
+    memset(cs, 0, sizeof(*cs));
+}
+
+/* 1 when issuer's key signed cert and cert is within its validity period. */
+static int cert_signed_by(const DerBuffer* cert, const DerBuffer* issuer)
+{
+    WOLFSSL_CERT_MANAGER* cm = wolfSSL_CertManagerNew();
+    int ok;
+
+    ok = cm != NULL &&
+         wolfSSL_CertManagerLoadCABuffer(cm, issuer->buffer,
+             (long)issuer->length, WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS &&
+         wolfSSL_CertManagerVerifyBuffer(cm, cert->buffer,
+             (long)cert->length, WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS;
+
+    if (cm != NULL)
+        wolfSSL_CertManagerFree(cm);
+    return ok;
+}
+
+/* An RA that may encipher keys ranks above a CA that may, which ranks above
+ * a certificate that may not. */
+static int recipient_rank(const DerBuffer* der)
+{
+    DecodedCert* dc = (DecodedCert*)malloc(sizeof(*dc));
+    int rank = 0;
+
+    if (dc == NULL)
+        return 0;
+
+    wc_InitDecodedCert(dc, der->buffer, der->length, NULL);
+    if (wc_ParseCert(dc, CERT_TYPE, NO_VERIFY, NULL) == 0 &&
+            (!dc->extKeyUsageSet ||
+             (dc->extKeyUsage & KEYUSE_KEY_ENCIPHER) != 0)) {
+        rank = dc->isCA ? 1 : 2;
+    }
+
+    wc_FreeDecodedCert(dc);
+    free(dc);
+    return rank;
+}
+
+/* Narrow a GetCACert response to the pinned certificate and those it signed,
+ * or to every certificate when unpinned. */
+static int scep_ca_set_from_pem(const uint8_t* pem, size_t pem_len,
+                                const CaPin* pin, const char* who,
+                                ScepCaSet* cs)
+{
+    DerBuffer* der = NULL;
+    size_t served = 0;
+    size_t pinned = 0;
+    size_t i;
+    size_t j;
+    int best = -1;
+    int rank;
+    int r;
+
+    memset(cs, 0, sizeof(*cs));
+    for (i = 0; cs->count < SCEP_MAX_CA_CERTS; i++) {
+        r = pem_cert_at(pem, pem_len, i, &der);
+        if (r > 0)
+            break;
+        if (r == 0)
+            cs->certs[cs->count++] = der;
+    }
+
+    if (cs->count == 0) {
+        fprintf(stderr, "%s: the GetCACert response holds no certificate\n",
+                who);
+        return WOLFCERT_ERR_PARSE;
+    }
+
+    if (pin->len > 0) {
+        for (pinned = 0; pinned < cs->count; pinned++) {
+            if (wolfcert_scep_verify_ca_fingerprint(cs->certs[pinned]->buffer,
+                    cs->certs[pinned]->length, pin->digest, pin->len,
+                    pin->alg) == WOLFCERT_OK)
+                break;
+        }
+        if (pinned == cs->count) {
             fprintf(stderr, "%s: the GetCACert response does not match "
                             "--ca-fingerprint\n", who);
-            rc = WOLFCERT_ERR_AUTH;
+            scep_ca_set_free(cs);
+            return WOLFCERT_ERR_AUTH;
         }
-        else if (n_certs > 1) {
-            fprintf(stderr, "%s: pinned 1 of %lu served certificates; a "
-                    "CertRep signed by any of the others is refused\n",
-                    who, (unsigned long)n_certs);
+        wolfcert_clear_error();
+
+        served = cs->count;
+        der = cs->certs[0];
+        cs->certs[0] = cs->certs[pinned];
+        cs->certs[pinned] = der;
+        for (i = 1, j = 1; i < served; i++) {
+            if (cert_signed_by(cs->certs[i], cs->certs[0]))
+                cs->certs[j++] = cs->certs[i];
+            else
+                wc_FreeDer(&cs->certs[i]);
+        }
+        for (i = j; i < served; i++)
+            cs->certs[i] = NULL;
+        cs->count = j;
+
+        if (cs->count < served) {
+            fprintf(stderr, "%s: ignoring %lu of %lu served certificates, "
+                    "which the pinned certificate did not sign\n", who,
+                    (unsigned long)(served - cs->count), (unsigned long)served);
         }
     }
-    else if (rc == WOLFCERT_OK) {
-        if (pem_cert_at(ca_pem->data, ca_pem->len, 0, ra_der) != 0)
-            rc = WOLFCERT_ERR_PARSE;
-    }
 
-    if (rc == WOLFCERT_OK) {
-        *bundle     = (*ra_der)->buffer;
-        *bundle_len = (*ra_der)->length;
-
-        /* Unpinned, any served cert may sign, for split CA/RA servers. */
-        if (pin->len == 0 &&
-                wolfcert_scep_get_ca_cert_enc(srv, WOLFCERT_ENCODING_DER,
-                                              ca_bundle) == WOLFCERT_OK) {
-            *bundle     = ca_bundle->data;
-            *bundle_len = ca_bundle->len;
+    for (i = 0; i < cs->count; i++) {
+        rank = recipient_rank(cs->certs[i]);
+        if (rank > best) {
+            best = rank;
+            cs->ra = i;
         }
+        cs->bundle_len += cs->certs[i]->length;
     }
 
+    cs->bundle = (uint8_t*)malloc(cs->bundle_len);
+    if (cs->bundle == NULL) {
+        scep_ca_set_free(cs);
+        return WOLFCERT_ERR_MEMORY;
+    }
+    for (i = 0, j = 0; i < cs->count; i++) {
+        memcpy(cs->bundle + j, cs->certs[i]->buffer, cs->certs[i]->length);
+        j += cs->certs[i]->length;
+    }
+
+    return WOLFCERT_OK;
+}
+
+/* Concatenate the set's certificates as PEM, owned by the caller. */
+static int ca_set_to_pem(const ScepCaSet* cs, uint8_t** out, size_t* out_len)
+{
+    uint8_t* all = NULL;
+    size_t all_len = 0;
+    size_t i;
+
+    for (i = 0; i < cs->count; i++) {
+        uint8_t* one = NULL;
+        size_t one_len = 0;
+        uint8_t* grown;
+
+        if (der_to_pem(cs->certs[i], &one, &one_len) != 0) {
+            free(all);
+            return -1;
+        }
+        grown = (uint8_t*)realloc(all, all_len + one_len);
+        if (grown == NULL) {
+            free(one);
+            free(all);
+            return -1;
+        }
+        memcpy(grown + all_len, one, one_len);
+        all = grown;
+        all_len += one_len;
+        free(one);
+    }
+
+    *out = all;
+    *out_len = all_len;
+    return 0;
+}
+
+static int scep_resolve_ca(const WolfCertServerCfg* srv, const CaPin* pin,
+                           const char* who, ScepCaSet* cs)
+{
+    WolfCertBuffer pem = { 0 };
+    int rc = wolfcert_scep_get_ca_cert(srv, &pem);
+
+    memset(cs, 0, sizeof(*cs));
+    if (rc == WOLFCERT_OK)
+        rc = scep_ca_set_from_pem(pem.data, pem.len, pin, who, cs);
+
+    wolfcert_buffer_free(&pem);
     return rc;
 }
 
@@ -1031,25 +1184,21 @@ static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
                        const CaPin* pin, const WolfCertKey* key,
                        const WolfCertBuffer* csr, WolfCertBuffer* issued)
 {
-    WolfCertBuffer ca_pem = { 0 };
-    WolfCertBuffer ca_bundle = { 0 };
     WolfCertScepResult scep_result = { 0 };
     WolfCertScepCaps caps = { 0 };
-    DerBuffer* ca_der = NULL;
-    const uint8_t* bundle = NULL;
-    size_t bundle_len = 0;
+    ScepCaSet cas = { 0 };
     int attempts = 0;
     int rc;
 
-    rc = scep_resolve_ca(srv, pin, "enroll", &ca_pem, &ca_bundle, &ca_der,
-                         &bundle, &bundle_len);
+    rc = scep_resolve_ca(srv, pin, "enroll", &cas);
 
     if (rc == WOLFCERT_OK)
         rc = scep_fetch_caps(srv, &caps, "enroll");
     if (rc == WOLFCERT_OK) {
-        rc = wolfcert_scep_pkcs_req_ex(srv, &caps, ca_der->buffer,
-                                       ca_der->length, bundle, bundle_len,
-                                       key, csr->data, csr->len, &scep_result);
+        rc = wolfcert_scep_pkcs_req_ex(srv, &caps, cas.certs[cas.ra]->buffer,
+                                       cas.certs[cas.ra]->length, cas.bundle,
+                                       cas.bundle_len, key, csr->data,
+                                       csr->len, &scep_result);
     }
 
     /* GetCertInitial polling while PENDING (RFC 8894 section 3.3.3). */
@@ -1064,8 +1213,8 @@ static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
 
         nanosleep(&ts, NULL);
         rc = wolfcert_scep_get_cert_initial(srv, &caps,
-                 ca_der->buffer, ca_der->length, bundle, bundle_len,
-                 NULL, 0, key, csr->data, csr->len,
+                 cas.certs[cas.ra]->buffer, cas.certs[cas.ra]->length,
+                 cas.bundle, cas.bundle_len, NULL, 0, key, csr->data, csr->len,
                  scep_result.transaction_id, scep_result.transaction_id_len,
                  &poll_result);
 
@@ -1089,10 +1238,7 @@ static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
     }
 
     wolfcert_scep_result_free(&scep_result);
-    wolfcert_buffer_free(&ca_bundle);
-    wolfcert_buffer_free(&ca_pem);
-    if (ca_der != NULL)
-        wc_FreeDer(&ca_der);
+    scep_ca_set_free(&cas);
 
     return rc;
 }
@@ -1108,7 +1254,7 @@ static int cmd_getcacerts(int argc, char** argv)
     WolfCertBuffer pem = { 0 };
 #ifdef WOLFCERT_HAVE_SCEP
     CaPin pin = { 0 };
-    DerBuffer* pinned = NULL;
+    ScepCaSet cas = { 0 };
     uint8_t* pinned_pem = NULL;
     size_t pinned_pem_len = 0;
 #endif
@@ -1166,19 +1312,15 @@ static int cmd_getcacerts(int argc, char** argv)
     if (ret == 0 && p == WOLFCERT_PROTO_SCEP) {
         print_ca_fingerprints(pem.data, pem.len);
 
-        /* Only the pinned certificate is verified, so only it is written. */
-        if (pin.len > 0) {
-            if (find_pinned_cert(pem.data, pem.len, &pin, &pinned,
-                                 NULL) != 0) {
-                fprintf(stderr, "getcacerts: the response does not match "
-                                "--ca-fingerprint\n");
-                ret = 2;
-            }
-            else if (der_to_pem(pinned, &pinned_pem, &pinned_pem_len) != 0) {
-                fprintf(stderr, "getcacerts: cannot re-encode the pinned "
-                                "certificate\n");
-                ret = 2;
-            }
+        /* Only the pinned certificate and those it signed are written. */
+        if (pin.len > 0 && scep_ca_set_from_pem(pem.data, pem.len, &pin,
+                                                "getcacerts", &cas) != 0)
+            ret = 2;
+        if (ret == 0 && pin.len > 0 &&
+                ca_set_to_pem(&cas, &pinned_pem, &pinned_pem_len) != 0) {
+            fprintf(stderr, "getcacerts: cannot re-encode the pinned "
+                            "certificates\n");
+            ret = 2;
         }
     }
 #endif
@@ -1201,8 +1343,7 @@ static int cmd_getcacerts(int argc, char** argv)
     }
 
 #ifdef WOLFCERT_HAVE_SCEP
-    if (pinned != NULL)
-        wc_FreeDer(&pinned);
+    scep_ca_set_free(&cas);
     free(pinned_pem);
 #endif
     wolfcert_buffer_free(&pem);
@@ -1630,14 +1771,10 @@ static int cmd_getcert(int argc, char** argv)
     WolfCertProtocol p = 0;
     WolfCertKey* signer_key = NULL;
     DerBuffer* signer_der = NULL;
-    WolfCertBuffer ca_pem = { 0 };
-    WolfCertBuffer ca_bundle = { 0 };
     WolfCertScepCaps caps = { 0 };
     WolfCertScepResult result = { 0 };
     CaPin pin = { 0 };
-    DerBuffer* ra_der = NULL;
-    const uint8_t* bundle = NULL;
-    size_t bundle_len = 0;
+    ScepCaSet cas = { 0 };
     uint8_t serial[CLI_SERIAL_MAX];
     size_t serial_len = 0;
     int rc = WOLFCERT_ERR_UNSUPPORTED;
@@ -1705,8 +1842,7 @@ static int cmd_getcert(int argc, char** argv)
     }
 
     if (ret == 0) {
-        rc = scep_resolve_ca(&srv, &pin, "getcert", &ca_pem, &ca_bundle,
-                             &ra_der, &bundle, &bundle_len);
+        rc = scep_resolve_ca(&srv, &pin, "getcert", &cas);
         if (rc != WOLFCERT_OK) {
             if (rc != WOLFCERT_ERR_AUTH)
                 fprintf(stderr, "getcert: %s\n", wolfcert_strerror(rc));
@@ -1723,8 +1859,9 @@ static int cmd_getcert(int argc, char** argv)
     }
 
     if (ret == 0) {
-        rc = wolfcert_scep_get_cert(&srv, &caps, ra_der->buffer, ra_der->length,
-                                    bundle, bundle_len,
+        rc = wolfcert_scep_get_cert(&srv, &caps, cas.certs[cas.ra]->buffer,
+                                    cas.certs[cas.ra]->length,
+                                    cas.bundle, cas.bundle_len,
                                     signer_der->buffer, signer_der->length,
                                     signer_key, serial, serial_len, &result);
         if (rc != WOLFCERT_OK) {
@@ -1759,11 +1896,8 @@ static int cmd_getcert(int argc, char** argv)
     wolfcert_scep_result_free(&result);
     if (signer_der != NULL)
         wc_FreeDer(&signer_der);
-    if (ra_der != NULL)
-        wc_FreeDer(&ra_der);
+    scep_ca_set_free(&cas);
     wolfcert_key_free(signer_key);
-    wolfcert_buffer_free(&ca_pem);
-    wolfcert_buffer_free(&ca_bundle);
     free(cert_pem);
     free_secret(key_pem, key_len);
     free(trust_hold);

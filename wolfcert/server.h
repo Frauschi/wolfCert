@@ -102,6 +102,11 @@ typedef struct {
 
     /* Lets EST start with neither Basic nor tls_client_ca_pem. */
     int              est_allow_anonymous_enroll;
+
+    /* SCEP split CA/RA: at start the CA issues an RSA RA certificate, which
+     * GetCACert serves ahead of the CA, requests are enveloped to and CertReps
+     * are signed with. */
+    int              scep_split_ra;
 } WolfCertServerCfgSrv;
 
 WOLFCERT_API int  wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out);
