@@ -499,6 +499,35 @@ static int check_renewal_foreign_signer(const WolfCertServerCfg* cli,
     return rc;
 }
 
+/* Enroll with the given caps digests and signing_hash; a cert comes back. */
+static int check_signing_hash(const WolfCertServerCfg* cli,
+                              const WolfCertScepCaps* caps, int sha512,
+                              int sha384, WolfCertScepSigningHash hash,
+                              WolfCertKey* key, const WolfCertBuffer* csr,
+                              const uint8_t* ca_der_buf, size_t ca_der_len)
+{
+    WolfCertServerCfg c = *cli;
+    WolfCertScepCaps  hc = *caps;
+    WolfCertBuffer    issued = { 0 };
+    int rc;
+
+    hc.sha512 = sha512;
+    hc.sha384 = sha384;
+    c.proto_opts.scep.signing_hash = hash;
+
+    rc = wolfcert_scep_pkcs_req(&c, &hc, ca_der_buf, ca_der_len, key,
+                                csr->data, csr->len, &issued);
+    if (rc == WOLFCERT_OK &&
+            memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) == NULL)
+        rc = -1;
+    if (rc != WOLFCERT_OK)
+        fprintf(stderr, "signing hash %d (caps 512=%d 384=%d): rc=%d\n",
+                (int)hash, sha512, sha384, rc);
+
+    wolfcert_buffer_free(&issued);
+    return rc;
+}
+
 /* Enrollment with an explicit proto_opts.scep.content_cipher. */
 static int check_content_cipher(const WolfCertServerCfg* cli,
                                 const WolfCertScepCaps* caps,
@@ -796,6 +825,7 @@ struct msgtype_ctx {
     char   reqline[256]; /* the HTTP request line, for the GET operations */
     size_t tid_len;      /* transactionID length, 0 if not reached */
     char   cipher[8];    /* content-encryption OID seen in the EnvelopedData */
+    char   digest[8];    /* SignedData digest OID seen in the pkiMessage */
     /* When reply is set, answer with a CertRep signed by rep_cert/rep_key that
      * carries rep_status and rep_fail_info; NULL leaves that attribute out. */
     const uint8_t* rep_cert;
@@ -924,6 +954,19 @@ static void* msgtype_srv_thread(void* arg)
                     snprintf(mc->cipher, sizeof(mc->cipher), "des3");
             }
 
+            static const uint8_t OID_SHA256[] =
+                { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01 };
+            static const uint8_t OID_SHA384[] =
+                { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02 };
+            static const uint8_t OID_SHA512[] =
+                { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03 };
+            if (memmem(buf + hdr_end, want, OID_SHA512, sizeof(OID_SHA512)))
+                snprintf(mc->digest, sizeof(mc->digest), "sha512");
+            else if (memmem(buf + hdr_end, want, OID_SHA384, sizeof(OID_SHA384)))
+                snprintf(mc->digest, sizeof(mc->digest), "sha384");
+            else if (memmem(buf + hdr_end, want, OID_SHA256, sizeof(OID_SHA256)))
+                snprintf(mc->digest, sizeof(mc->digest), "sha256");
+
             if (mc->reply)
                 msgtype_send_cert_rep(mc, cs, tid, tid_len, sn, sn_len);
         }
@@ -971,6 +1014,41 @@ static int check_content_cipher_wire(const WolfCertScepCaps* caps,
     pthread_join(tid, NULL);
 
     REQUIRE(strcmp(mc.cipher, expect) == 0);
+    return 0;
+}
+
+/* The signing_hash and caps digests as seen in the request's SignedData. */
+static int check_signing_hash_wire(const WolfCertScepCaps* caps, int sha512,
+                                   int sha384, WolfCertScepSigningHash hash,
+                                   WolfCertKey* key, const WolfCertBuffer* csr,
+                                   const uint8_t* ca_der_buf, size_t ca_der_len,
+                                   const char* expect)
+{
+    struct msgtype_ctx mc = { .listen_fd = -1 };
+    WolfCertScepCaps hc = *caps;
+    pthread_t tid;
+    char url[128];
+    REQUIRE(start_canned(msgtype_srv_thread, &mc, &mc.listen_fd, &tid, url,
+                         sizeof(url)) == 0);
+    WolfCertServerCfg cli = {
+        .protocol   = WOLFCERT_PROTO_SCEP,
+        .server_url = url,
+        .proto_opts.scep = { .signing_hash = hash },
+    };
+    hc.sha512 = sha512;
+    hc.sha384 = sha384;
+
+    WolfCertBuffer issued = { 0 };
+    /* The listener never answers, so the call fails. */
+    (void)wolfcert_scep_pkcs_req(&cli, &hc, ca_der_buf, ca_der_len, key,
+                                 csr->data, csr->len, &issued);
+    wolfcert_buffer_free(&issued);
+    pthread_join(tid, NULL);
+
+    if (strcmp(mc.digest, expect) != 0)
+        fprintf(stderr, "signing hash %d (caps 512=%d 384=%d): saw \"%s\"\n",
+                (int)hash, sha512, sha384, mc.digest);
+    REQUIRE(strcmp(mc.digest, expect) == 0);
     return 0;
 }
 
@@ -1076,15 +1154,18 @@ static int check_session_opts_capture(const WolfCertScepCaps* caps,
         .proto_opts.scep = {
             .txid_mode        = WOLFCERT_SCEP_TXID_PUBKEY_HASH,
             .renewal_msg_type = WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ,
+            .signing_hash     = WOLFCERT_SCEP_HASH_SHA256,
         },
     };
+    WolfCertScepCaps hc = *caps;
+    hc.sha512 = 1;
 
     WolfCertScepSession* sess = NULL;
     REQUIRE(wolfcert_scep_session_open(&cli, &sess) == WOLFCERT_OK);
 
     WolfCertScepResult r = { 0 };
     /* The listener never answers, so this fails. */
-    (void)wolfcert_scep_session_renewal_req_ex(sess, caps, ca_der_buf, ca_der_len,
+    (void)wolfcert_scep_session_renewal_req_ex(sess, &hc, ca_der_buf, ca_der_len,
                                                ca_der_buf, ca_der_len,
                                                cur_cert, cur_cert_len, cur_key,
                                                csr, csr_len, &r);
@@ -1092,8 +1173,9 @@ static int check_session_opts_capture(const WolfCertScepCaps* caps,
     wolfcert_scep_session_close(sess);
     pthread_join(tid, NULL);
 
-    REQUIRE(strcmp(mc.seen, "19") == 0);   /* renewal_msg_type captured */
-    REQUIRE(mc.tid_len == 64);             /* txid_mode captured        */
+    REQUIRE(strcmp(mc.seen, "19") == 0);       /* renewal_msg_type captured */
+    REQUIRE(mc.tid_len == 64);                 /* txid_mode captured        */
+    REQUIRE(strcmp(mc.digest, "sha256") == 0); /* signing_hash captured     */
     return 0;
 }
 
@@ -1798,22 +1880,42 @@ int main(void)
     REQUIRE(rc == WOLFCERT_OK);
 
     /* A CA advertising SHA-512 or SHA-384 still enrolls within the digests
-     * wolfSSL was built with. */
-    WolfCertScepCaps caps_hash = caps;
-    WolfCertBuffer   issued_hash = { 0 };
+     * wolfSSL was built with, and so does a forced SHA-256. */
+    REQUIRE(check_signing_hash(&cli, &caps, 1, 0, WOLFCERT_SCEP_HASH_AUTO,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+    REQUIRE(check_signing_hash(&cli, &caps, 0, 1, WOLFCERT_SCEP_HASH_AUTO,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+    REQUIRE(check_signing_hash(&cli, &caps, 1, 1, WOLFCERT_SCEP_HASH_SHA256,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+#ifdef WOLFSSL_SHA384
+    REQUIRE(check_signing_hash(&cli, &caps, 0, 0, WOLFCERT_SCEP_HASH_SHA384,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+#endif
 
-    caps_hash.sha512 = 1;
-    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps_hash, ca_der->buffer,
-                                   ca_der->length, dk, csr.data, csr.len,
-                                   &issued_hash) == WOLFCERT_OK);
-    wolfcert_buffer_free(&issued_hash);
-
-    caps_hash.sha512 = 0;
-    caps_hash.sha384 = 1;
-    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps_hash, ca_der->buffer,
-                                   ca_der->length, dk, csr.data, csr.len,
-                                   &issued_hash) == WOLFCERT_OK);
-    wolfcert_buffer_free(&issued_hash);
+    /* The pkiMessage carries the digest signing_hash or the caps chose. */
+    REQUIRE(check_signing_hash_wire(&caps, 1, 1, WOLFCERT_SCEP_HASH_SHA256,
+                                    dk, &csr, ca_der->buffer, ca_der->length,
+                                    "sha256") == 0);
+#ifdef WOLFSSL_SHA384
+    REQUIRE(check_signing_hash_wire(&caps, 0, 1, WOLFCERT_SCEP_HASH_AUTO,
+                                    dk, &csr, ca_der->buffer, ca_der->length,
+                                    "sha384") == 0);
+    REQUIRE(check_signing_hash_wire(&caps, 0, 0, WOLFCERT_SCEP_HASH_SHA384,
+                                    dk, &csr, ca_der->buffer, ca_der->length,
+                                    "sha384") == 0);
+#endif
+#ifdef WOLFSSL_SHA512
+    REQUIRE(check_signing_hash_wire(&caps, 1, 0, WOLFCERT_SCEP_HASH_AUTO,
+                                    dk, &csr, ca_der->buffer, ca_der->length,
+                                    "sha512") == 0);
+    REQUIRE(check_signing_hash_wire(&caps, 0, 0, WOLFCERT_SCEP_HASH_SHA512,
+                                    dk, &csr, ca_der->buffer, ca_der->length,
+                                    "sha512") == 0);
+#endif
 
     /* Explicit AES-256 and AES-128 content ciphers both enroll. */
 #if defined(WOLFSSL_AES_256)
