@@ -69,6 +69,20 @@ static int assign_rdn(CertName* subject, const char* key, size_t klen,
                 return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "csr",
                     "subject %.*s is %zu bytes, limit %zu", (int)klen, key,
                     vlen, rdn_fields[i].cap - 1);
+            /* wolfSSL encodes these two as PrintableString. */
+            if ((rdn_fields[i].off == offsetof(CertName, country) ||
+                    rdn_fields[i].off == offsetof(CertName, serialDev)) &&
+                    !wolfcert_is_printable_string((const uint8_t*)val, vlen))
+                return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "csr",
+                    "subject %.*s is not a PrintableString", (int)klen, key);
+            /* And emailAddress as IA5String, which is 7-bit. */
+            if (rdn_fields[i].off == offsetof(CertName, email)) {
+                for (size_t j = 0; j < vlen; ++j) {
+                    if ((unsigned char)val[j] >= 0x80)
+                        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "csr",
+                            "subject %.*s is not an IA5String", (int)klen, key);
+                }
+            }
             memcpy(dst, val, vlen);
             dst[vlen] = '\0';
             return WOLFCERT_OK;
@@ -167,19 +181,36 @@ static int build_san_seq(const WolfCertCertMeta* meta, Cert* cert, void* heap)
     return WOLFCERT_OK;
 }
 
-/* RFC 5480 pairs P-256, P-384 and P-521 with SHA-256, SHA-384 and SHA-512. */
+/* 1 when the wolfSSL build has SHA-<bits>. */
+static int sha2_in_build(int bits)
+{
+    switch (bits) {
+        case 256:
+            return 1;
+#ifdef WOLFSSL_SHA384
+        case 384:
+            return 1;
+#endif
+#ifdef WOLFSSL_SHA512
+        case 512:
+            return 1;
+#endif
+        default:
+            return 0;
+    }
+}
+
+/* RFC 5480 pairs P-256, P-384 and P-521 with SHA-256, SHA-384 and SHA-512;
+ * a hash wolfSSL lacks steps down to the next one. */
 #ifdef WOLFCERT_HAVE_ECC
 static int ecdsa_sig_for_curve(int curve_id)
 {
-    switch (curve_id) {
-        case ECC_SECP384R1:
-            return CTC_SHA384wECDSA;
-        case ECC_SECP521R1:
-            return CTC_SHA512wECDSA;
-        case ECC_SECP256R1:
-        default:
-            return CTC_SHA256wECDSA;
-    }
+    if (curve_id == ECC_SECP521R1 && sha2_in_build(512))
+        return CTC_SHA512wECDSA;
+    if ((curve_id == ECC_SECP521R1 || curve_id == ECC_SECP384R1) &&
+            sha2_in_build(384))
+        return CTC_SHA384wECDSA;
+    return CTC_SHA256wECDSA;
 }
 #endif
 
@@ -225,6 +256,10 @@ static int choose_sig_type(const WolfCertKey* key, const WolfCertKeyAlg* alg,
 {
     if (meta != NULL && meta->preferred_hash != 0) {
         int sig = sig_type_for_hash(key->type, meta->preferred_hash);
+        if (sig != 0 && !sha2_in_build(meta->preferred_hash))
+            return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, "csr",
+                "preferred_hash %d: wolfSSL lacks SHA-%d",
+                meta->preferred_hash, meta->preferred_hash);
         if (sig != 0)
             return sig;
     }
@@ -408,7 +443,12 @@ int wolfcert_csr_build_ex(const WolfCertKey* key, const WolfCertCertMeta* meta,
         wc_CertFree(cert);
         return WOLFCERT_ERR_UNSUPPORTED;
     }
-    cert->sigType = choose_sig_type(key, alg, meta);
+    int sig_type = choose_sig_type(key, alg, meta);
+    if (sig_type < 0) {
+        wc_CertFree(cert);
+        return sig_type;
+    }
+    cert->sigType = sig_type;
 
     size_t der_cap = alg->der_cap_hint + 1024;
     if (key->type == WOLFCERT_KEY_RSA) {

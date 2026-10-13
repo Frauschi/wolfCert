@@ -74,23 +74,20 @@ static int write_all_fd(int fd, const uint8_t* buf, size_t len)
     return 0;
 }
 
-/* Raw HTTP/1.1 request to the loopback SCEP server, for malformed-request
- * branches the client API cannot produce. out_body, when set, is caller-freed. */
-static int raw_http_req(uint16_t port, const char* method, const char* target,
-                        const char* content_type,
-                        const uint8_t* body, size_t body_len, int persistent,
+/* Sends hdr and body to the loopback server and reads the reply to EOF.
+ * Returns the status code, or -1 on no reply. out_body is caller-freed. */
+static int raw_exchange(uint16_t port, const char* hdr, size_t hdr_len,
+                        const uint8_t* body, size_t body_len,
                         uint8_t** out_body, size_t* out_body_len)
 {
     struct sockaddr_in addr;
     struct timeval tv;
-    char hdr[512];
     uint8_t* resp = NULL;
     size_t resp_len = 0;
     size_t resp_cap = 0;
     const uint8_t* sep;
     int eof = 0;
     int fd;
-    int n;
     ssize_t r;
     int status = -1;
 
@@ -117,24 +114,7 @@ static int raw_http_req(uint16_t port, const char* method, const char* target,
         return -1;
     }
 
-    if (body != NULL)
-        n = snprintf(hdr, sizeof(hdr),
-                     "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: %s\r\n"
-                     "%s%s%sContent-Length: %zu\r\n\r\n",
-                     method, target, persistent ? "keep-alive" : "close",
-                     content_type != NULL ? "Content-Type: " : "",
-                     content_type != NULL ? content_type : "",
-                     content_type != NULL ? "\r\n" : "",
-                     body_len);
-    else
-        n = snprintf(hdr, sizeof(hdr),
-                     "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: %s\r\n\r\n",
-                     method, target, persistent ? "keep-alive" : "close");
-    if (n < 0 || (size_t)n >= sizeof(hdr)) {
-        close(fd);
-        return -1;
-    }
-    if (write_all_fd(fd, (const uint8_t*)hdr, (size_t)n) != 0 ||
+    if (write_all_fd(fd, (const uint8_t*)hdr, hdr_len) != 0 ||
             (body_len > 0 && write_all_fd(fd, body, body_len) != 0)) {
         close(fd);
         return -1;
@@ -185,6 +165,47 @@ static int raw_http_req(uint16_t port, const char* method, const char* target,
 
     free(resp);
     return status;
+}
+
+/* Raw HTTP/1.1 request to the loopback SCEP server, for malformed-request
+ * branches the client API cannot produce. out_body, when set, is caller-freed. */
+static int raw_http_req(uint16_t port, const char* method, const char* target,
+                        const char* content_type,
+                        const uint8_t* body, size_t body_len, int persistent,
+                        uint8_t** out_body, size_t* out_body_len)
+{
+    char hdr[512];
+    int n;
+
+    if (body != NULL)
+        n = snprintf(hdr, sizeof(hdr),
+                     "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: %s\r\n"
+                     "%s%s%sContent-Length: %zu\r\n\r\n",
+                     method, target, persistent ? "keep-alive" : "close",
+                     content_type != NULL ? "Content-Type: " : "",
+                     content_type != NULL ? content_type : "",
+                     content_type != NULL ? "\r\n" : "",
+                     body_len);
+    else
+        n = snprintf(hdr, sizeof(hdr),
+                     "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: %s\r\n\r\n",
+                     method, target, persistent ? "keep-alive" : "close");
+    if (n < 0 || (size_t)n >= sizeof(hdr)) {
+        if (out_body != NULL && out_body_len != NULL) {
+            *out_body = NULL;
+            *out_body_len = 0;
+        }
+        return -1;
+    }
+
+    return raw_exchange(port, hdr, (size_t)n, body, body_len,
+                        out_body, out_body_len);
+}
+
+/* Status code of the reply to a hand-written request, or -1 on no reply. */
+static int raw_request_status(uint16_t port, const char* req)
+{
+    return raw_exchange(port, req, strlen(req), NULL, 0, NULL, NULL);
 }
 
 static int raw_http_status(uint16_t port, const char* target, const char* body)
@@ -1656,6 +1677,15 @@ int main(void)
         tls_cli.verify_server = 1;
         REQUIRE(wolfcert_scep_get_ca_caps(&tls_cli, &tls_caps) != WOLFCERT_ERR_TLS);
     }
+
+    /* A longer field name that starts with Content-Length is not one. */
+    REQUIRE(raw_request_status(wolfcert_server_port(s),
+                "GET /scep?operation=GetCACaps HTTP/1.1\r\n"
+                "Host: 127.0.0.1\r\nContent-Length-Foo: 4\r\n"
+                "Connection: close\r\n\r\n") == 200);
+    REQUIRE(raw_request_status(wolfcert_server_port(s),
+                "GET /scep?operation=GetCACaps HTTP/1.1\r\n"
+                "Host : 127.0.0.1\r\nConnection: close\r\n\r\n") == 400);
 
     /* Malformed GET PKIOperation requests get 400 (RFC 8894 section 4.1). */
     REQUIRE(raw_http_status(wolfcert_server_port(s),

@@ -39,7 +39,6 @@
 #include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
-#include <strings.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -228,15 +227,6 @@ static int chunked_body_complete(const uint8_t* raw, size_t raw_len)
     return 0;
 }
 
-/* 1 when the line's field name is `name`, followed directly by ':'. */
-static int hdr_is(const char* line, size_t llen, const char* name)
-{
-    size_t n = strlen(name);
-
-    return llen > n && line[n] == ':' &&
-           wolfcert_ascii_ncasecmp(line, name, n) == 0;
-}
-
 static int parse_request_in(WolfCertServer* s, int fd, EstRequest* out,
                             void* heap, char* buf, size_t buf_sz)
 {
@@ -285,47 +275,29 @@ static int parse_request_in(WolfCertServer* s, int fd, EstRequest* out,
 
     int chunked = 0;
     while (read_line(&p, end, &line, &llen) == 0 && llen > 0) {
-        const char* hc = memchr(line, ':', llen);
+        const char* v;
+        size_t vlen;
 
-        /* RFC 9112 section 5.1: whitespace before the colon is a 400. */
-        if (hc != NULL && hc > line && (hc[-1] == ' ' || hc[-1] == '\t'))
+        if (wolfcert_http_hdr_split(line, llen, &v, &vlen) != 0)
             return WOLFCERT_ERR_PROTOCOL;
-        if (hdr_is(line, llen, "Content-Length")) {
-            out->content_length = (size_t)strtoul(hc + 1, NULL, 10);
+        if (wolfcert_http_hdr_is(line, llen, "Content-Length")) {
+            out->content_length = (size_t)strtoul(v, NULL, 10);
         }
-        else if (hdr_is(line, llen, "Transfer-Encoding")) {
-            const char* v = hc + 1;
-            while (v < line + llen && (*v == ' ' || *v == '\t')) {
-                ++v;
-            }
-
-            size_t vlen = (size_t)(line + llen - v);
+        else if (wolfcert_http_hdr_is(line, llen, "Transfer-Encoding")) {
             if (vlen >= 7 && wolfcert_ascii_ncasecmp(v, "chunked", 7) == 0)
                 chunked = 1;
         }
-        else if (hdr_is(line, llen, "Authorization")) {
+        else if (wolfcert_http_hdr_is(line, llen, "Authorization")) {
             if (out->auth_header != NULL)
                 return WOLFCERT_ERR_PROTOCOL;
 
-            const char* val = hc + 1;
-            while (val < line + llen && (*val == ' ' || *val == '\t')) {
-                ++val;
-            }
-
-            size_t vlen = (size_t)(line + llen - val);
             out->auth_header = (char*)WOLFCERT_XMALLOC(vlen + 1, heap);
             if (out->auth_header) {
-                memcpy(out->auth_header, val, vlen);
+                memcpy(out->auth_header, v, vlen);
                 out->auth_header[vlen] = '\0';
             }
         }
-        else if (hdr_is(line, llen, "Connection")) {
-            const char* v = hc + 1;
-            while (v < line + llen && (*v == ' ' || *v == '\t')) {
-                ++v;
-            }
-
-            size_t vlen = (size_t)(line + llen - v);
+        else if (wolfcert_http_hdr_is(line, llen, "Connection")) {
             if (vlen >= 5 && wolfcert_ascii_ncasecmp(v, "close", 5) == 0)
                 out->connection_close = 1;
         }
@@ -542,8 +514,8 @@ static int check_basic_auth(const WolfCertServer* s, const char* auth_header)
     if (auth_header == NULL)
         return 0;
 
-    if (strncasecmp(auth_header, EST_BASIC_AUTH_SCHEME,
-                    EST_BASIC_AUTH_SCHEME_LEN) != 0)
+    if (wolfcert_ascii_ncasecmp(auth_header, EST_BASIC_AUTH_SCHEME,
+                                EST_BASIC_AUTH_SCHEME_LEN) != 0)
         return 0;
 
     size_t ul = strlen(s->cfg_basic_user);
@@ -639,7 +611,7 @@ static int ensure_post_handshake_auth(WolfCertServer* s)
     size_t fin_len;
     size_t cur_len;
     char probe;
-    long deadline;
+    int64_t deadline;
     int r;
     int err;
 

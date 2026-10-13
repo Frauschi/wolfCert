@@ -100,7 +100,10 @@ typedef struct {
                                             * Values cannot hold ',';
                                             * customize can set one. A
                                             * CTC_NAME_SIZE-byte or longer
-                                            * value is WOLFCERT_ERR_BAD_ARG. */
+                                            * value, a C or serialNumber
+                                            * that is not a PrintableString,
+                                            * or a non-ASCII emailAddress is
+                                            * WOLFCERT_ERR_BAD_ARG. */
     const char* const* san_dns;            /* array of length san_dns_len */
     size_t             san_dns_len;
     const char* const* san_ip;             /* textual IPv4/IPv6 */
@@ -117,7 +120,8 @@ typedef struct {
     const char*        challenge_password;
 
     /* Optional signature hash size in bits (256 / 384 / 512); 0 uses the key
-     * type's default. Ed25519, Ed448 and ML-DSA ignore it. */
+     * type's default. A hash the wolfSSL build lacks is
+     * WOLFCERT_ERR_UNSUPPORTED. Ed25519, Ed448 and ML-DSA ignore it. */
     int                preferred_hash;
 
     /* Optional: invoked after standard fields are set, before signing. */

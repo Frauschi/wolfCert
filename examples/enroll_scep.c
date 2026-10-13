@@ -101,9 +101,13 @@ int main(int argc, char** argv)
         return 2;
     }
 
-    /* 2) Optionally query capabilities. */
+    /* 2) Query capabilities; carry on without them on a non-200. */
     WolfCertScepCaps caps = { 0 };
-    wolfcert_scep_get_ca_caps(&srv, &caps);
+    rc = wolfcert_scep_get_ca_caps(&srv, &caps);
+    if (rc != WOLFCERT_OK && rc != WOLFCERT_ERR_HTTP) {
+        fprintf(stderr, "GetCACaps failed: %s\n", wolfcert_strerror(rc));
+        return 2;
+    }
 
     /* 3) Generate RSA key + CSR. */
     WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
