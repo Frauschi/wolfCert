@@ -1823,6 +1823,10 @@ static int test_split_ra(void)
     int rc;
 
     REQUIRE(wolfcert_server_start(&cfg, &s) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_server_set_bundle_fault(s, 1)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_server_set_bundle_fault(s, 3)
+            == WOLFCERT_ERR_BAD_ARG);
     if (pthread_create(&tid, NULL, server_thread, s) != 0) {
         wolfcert_server_free(s);
         return 1;
@@ -1907,6 +1911,23 @@ static int test_split_ra(void)
     return 0;
 }
 
+#ifdef HAVE_ECC
+static int test_bundle_fault_ecc_ca(void)
+{
+    WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,
+                                 .bind_host = "127.0.0.1", .bind_port = 0,
+                                 .ca_key_type = WOLFCERT_KEY_ECC };
+    WolfCertServer* s = NULL;
+    int rc;
+
+    REQUIRE(wolfcert_server_start(&cfg, &s) == WOLFCERT_OK);
+    rc = wolfcert_scep_server_set_bundle_fault(s, 1);
+    wolfcert_server_free(s);
+    REQUIRE(rc == WOLFCERT_ERR_BAD_ARG);
+    return 0;
+}
+#endif
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -1919,12 +1940,22 @@ int main(void)
         return 1;
     if (test_split_ra())
         return 1;
+#ifdef HAVE_ECC
+    if (test_bundle_fault_ecc_ca())
+        return 1;
+#endif
 
     WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,
                                  .bind_host = "127.0.0.1", .bind_port = 0,
                                  .ca_store = test_ca_store() };
     WolfCertServer* s = NULL;
     REQUIRE(wolfcert_server_start(&cfg, &s) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_server_set_bundle_fault(s, 2)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_server_set_bundle_fault(s, 4)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_server_set_bundle_fault(s, 5)
+            == WOLFCERT_ERR_BAD_ARG);
     pthread_t tid;
     REQUIRE(pthread_create(&tid, NULL, server_thread, s) == 0);
 

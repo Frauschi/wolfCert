@@ -211,6 +211,11 @@ WOLFCERT_TEST_VIS void wolfcert_scep_server_set_oom_fault(WolfCertServer* s,
 /* GetCACaps: answer with this HTTP status and no body, or close on -1. */
 WOLFCERT_TEST_VIS void wolfcert_scep_server_set_caps_fault(WolfCertServer* s,
                                                            int status);
+
+/* RSA CA only. GetCACert: 1 adds a root over the CA, 3 an ECC leaf. With the
+ * split RA reissued, 2 adds decoys, 4 a keyEncipherment twin, 5 expires it. */
+WOLFCERT_TEST_VIS int wolfcert_scep_server_set_bundle_fault(WolfCertServer* s,
+                                                            int mode);
 #endif
 
 int  wolfcert_map_wc_err(int wc_rc);

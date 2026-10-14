@@ -36,7 +36,13 @@
 #  define SCEP_FAULT_USAGE \
         "  --scep-caps-status CODE|close\n" \
         "                           Answer GetCACaps with HTTP status CODE and no body,\n" \
-        "                           or close the connection unanswered (testing)\n"
+        "                           or close the connection unanswered (testing)\n" \
+        "  --scep-ca-bundle chain|ras|ecc|tie|expired\n" \
+        "                           Serve a root CA that issued the CA (chain),\n" \
+        "                           decoy RAs ahead of the --scep-split-ra RA (ras),\n" \
+        "                           an ECC leaf ahead of the CA (ecc), a second\n" \
+        "                           keyEncipherment RA (tie) or an expired split RA\n" \
+        "                           (expired) (testing)\n"
 #else
 #  define SCEP_FAULT_USAGE ""
 #endif
@@ -208,6 +214,7 @@ int main(int argc, char** argv)
         { "scep-split-ra",           no_argument,       NULL, 'S' },
 #ifdef CLI_SCEP_FAULTS
         { "scep-caps-status",        required_argument, NULL, 'P' },
+        { "scep-ca-bundle",          required_argument, NULL, 'B' },
 #endif
         { "est-require-approval",    no_argument,       NULL, 'E' },
         { "est-retry-after",         required_argument, NULL, 'T' },
@@ -238,6 +245,7 @@ int main(int argc, char** argv)
     int scep_split_ra         = 0;
 #ifdef CLI_SCEP_FAULTS
     int scep_caps_status      = 0;
+    int scep_ca_bundle        = 0;
 #endif
     int est_require_approval  = 0;
     int est_retry_after_sec   = 0;
@@ -322,6 +330,28 @@ int main(int argc, char** argv)
                                         "200-599 or close)\n");
                         return 1;
                     }
+                }
+                break;
+            case 'B':
+                if (strcmp(optarg, "chain") == 0) {
+                    scep_ca_bundle = 1;
+                }
+                else if (strcmp(optarg, "ras") == 0) {
+                    scep_ca_bundle = 2;
+                }
+                else if (strcmp(optarg, "ecc") == 0) {
+                    scep_ca_bundle = 3;
+                }
+                else if (strcmp(optarg, "tie") == 0) {
+                    scep_ca_bundle = 4;
+                }
+                else if (strcmp(optarg, "expired") == 0) {
+                    scep_ca_bundle = 5;
+                }
+                else {
+                    fprintf(stderr, "invalid --scep-ca-bundle (expected "
+                                    "chain, ras, ecc, tie or expired)\n");
+                    return 1;
                 }
                 break;
 #endif
@@ -467,6 +497,14 @@ int main(int argc, char** argv)
 #ifdef CLI_SCEP_FAULTS
     if (sel == WOLFCERT_PROTO_SCEP)
         wolfcert_scep_server_set_caps_fault(g_server, scep_caps_status);
+    if (sel == WOLFCERT_PROTO_SCEP && scep_ca_bundle != 0) {
+        rc = wolfcert_scep_server_set_bundle_fault(g_server, scep_ca_bundle);
+        if (rc != WOLFCERT_OK) {
+            fprintf(stderr, "wolfcert-server: --scep-ca-bundle failed (%s)\n",
+                    wolfcert_strerror(rc));
+            goto out;
+        }
+    }
 #endif
 
     fprintf(stderr, "wolfcert-server: %s listening on %s:%u\n",
