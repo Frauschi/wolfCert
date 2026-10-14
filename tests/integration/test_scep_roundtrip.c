@@ -465,6 +465,39 @@ static int check_bad_csr_sig(const WolfCertServerCfg* cli,
     return rc;
 }
 
+/* RenewalReq signed by a self-signed cert with the CSR's key -> badRequest. */
+static int check_renewal_foreign_signer(const WolfCertServerCfg* cli,
+                                        const WolfCertScepCaps* caps,
+                                        const WolfCertKey* key,
+                                        const uint8_t* csr, size_t csr_len,
+                                        const uint8_t* ca_der_buf,
+                                        size_t ca_der_len)
+{
+    WolfCertScepResult r = { 0 };
+    uint8_t* signer = NULL;
+    size_t signer_len = 0;
+    int rc;
+
+    rc = wolfcert_scep_self_signed_rsa((RsaKey*)key->impl, csr, csr_len,
+                                       &signer, &signer_len, NULL);
+    if (rc == WOLFCERT_OK) {
+        rc = wolfcert_scep_renewal_req_ex(cli, caps, ca_der_buf, ca_der_len,
+                                          ca_der_buf, ca_der_len,
+                                          signer, signer_len, key,
+                                          csr, csr_len, &r);
+        if (rc != WOLFCERT_OK)
+            fprintf(stderr, "foreign renewal signer: rc=%d (%s)\n", rc,
+                    wolfcert_strerror(rc));
+    }
+    if (rc == WOLFCERT_OK && (r.status != WOLFCERT_SCEP_STATUS_FAILURE ||
+                              r.fail_info != 2))
+        rc = -1;
+
+    wolfcert_scep_result_free(&r);
+    WOLFCERT_XFREE(signer, NULL);
+    return rc;
+}
+
 /* Enrollment with an explicit proto_opts.scep.content_cipher. */
 static int check_content_cipher(const WolfCertServerCfg* cli,
                                 const WolfCertScepCaps* caps,
@@ -1735,6 +1768,10 @@ int main(void)
 
     REQUIRE(check_bad_csr_sig(&cli, &caps, dk, csr.data, csr.len,
                               ca_der->buffer, ca_der->length) == WOLFCERT_OK);
+
+    REQUIRE(check_renewal_foreign_signer(&cli, &caps, dk, csr.data, csr.len,
+                                         ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
 
     rc = check_rsa4096(&cli, &caps, ca_der->buffer, ca_der->length);
     if (rc != WOLFCERT_OK)
