@@ -29,6 +29,7 @@
 #include <wolfcert/server.h>
 
 #include "tls_test_util.h"
+#include "internal.h"
 
 #include <wolfssl/wolfcrypt/wc_port.h>
 
@@ -56,9 +57,10 @@
 #define STOP_DEADLINE_MS 5000
 #define POLL_STEP_MS     10
 
-/* How long a client queued behind a stalled peer waits for the server to
- * answer. Must exceed WOLFCERT_SERVER_REQUEST_TIMEOUT_MS. */
-#define STALL_WAIT_MS    20000
+/* Request timeout for cases 6-8, and how long the queued client waits; the wait
+ * is below WOLFCERT_SERVER_REQUEST_TIMEOUT_MS, so an ignored override fails. */
+#define STALL_TIMEOUT_MS 2000
+#define STALL_WAIT_MS    5000
 
 #if defined(WOLFCERT_HAVE_EST)
     #define TLS_LISTENER_PROTO WOLFCERT_PROTO_EST
@@ -381,6 +383,7 @@ int main(void)
 
     memset(&ctx, 0, sizeof(ctx));
     REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
+    wolfcert_server_set_request_timeout(ctx.srv, STALL_TIMEOUT_MS);
     REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
 
     REQUIRE(test_tls_connect_partial(&stalled, wolfcert_server_port(ctx.srv),
@@ -403,6 +406,7 @@ int main(void)
     /* 7. The next client is served behind a peer silent after its handshake. */
     memset(&ctx, 0, sizeof(ctx));
     REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
+    wolfcert_server_set_request_timeout(ctx.srv, STALL_TIMEOUT_MS);
     REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
 
     REQUIRE(test_tls_connect(&stalled, wolfcert_server_port(ctx.srv),
@@ -431,6 +435,7 @@ int main(void)
 
     memset(&ctx, 0, sizeof(ctx));
     REQUIRE(wolfcert_server_start(&cfg, &ctx.srv) == WOLFCERT_OK);
+    wolfcert_server_set_request_timeout(ctx.srv, STALL_TIMEOUT_MS);
     REQUIRE(pthread_create(&tid, NULL, server_thread, &ctx) == 0);
 
     stalled_fd = connect_loopback(wolfcert_server_port(ctx.srv));
