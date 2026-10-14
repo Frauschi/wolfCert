@@ -74,6 +74,8 @@ optional key types wolfCert picks up when available:
 
 `-DKEEP_PEER_CERT` and `-DWOLFSSL_HAVE_TLS_UNIQUE` are needed only by the test server. Its post-handshake-auth mode (`wolfcert-server --tls-post-handshake-auth`) needs both, and its `/simplereenroll` needs `KEEP_PEER_CERT` to compare the CSR with the certificate being renewed. Without them that mode returns `WOLFCERT_ERR_UNSUPPORTED`, an mTLS server answers `/simplereenroll` with 500, `est_pha_roundtrip` / `est_async_roundtrip` skip, and `est_mtls_roundtrip` skips its reenroll cases. `--enable-opensslextra` gives `KEEP_PEER_CERT` but not `WOLFSSL_HAVE_TLS_UNIQUE`.
 
+Certs-only PKCS#7 responses (EST `/cacerts` and enrollment, SCEP GetCACert and CertRep) are read through wolfSSL's `MAX_PKCS7_CERTS`: 4 certificates by default, 15 with `OPENSSL_ALL`. If the CA can send more, for example an RFC 7030 `/cacerts` with rollover certificates, add `-DMAX_PKCS7_CERTS=<n>` to the `CPPFLAGS` above. See [`docs/EMBEDDED.md`](docs/EMBEDDED.md#wolfssl-max_pkcs7_certs).
+
 ### Header-based configuration (no build system)
 
 Embedded toolchains that drive their own build can skip wolfCert's configure

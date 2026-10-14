@@ -152,6 +152,26 @@ Trade-offs:
   build requires both (see `AGENTS.md` / `CMakeLists.txt`), so prefer
   shrinking `WC_CTC_NAME_SIZE` over dropping these.
 
+### wolfSSL `MAX_PKCS7_CERTS`
+
+| Macro | Default | Effect |
+|-------|---------|--------|
+| `MAX_PKCS7_CERTS` | `4` (`15` with `OPENSSL_ALL`) | certificates read from one certs-only PKCS#7 response: EST `/cacerts` and enrollment, SCEP GetCACert and CertRep |
+
+- wolfSSL drops the certificates past the limit without an error, so `n` has
+  to cover the largest bundle the CA can send. An RFC 7030 `/cacerts` with a
+  root, one intermediate and the three rollover certificates already holds 5.
+- Each slot is a pointer and a length, so raising it costs little.
+- The value changes the layout of `PKCS7`, so wolfCert has to be compiled
+  with the same value as the wolfSSL library. A `-D` in wolfSSL's autoconf
+  `CPPFLAGS` lands in `wolfssl/options.h` and covers that; a CMake or
+  `user_settings.h` wolfSSL build has to make the value visible to wolfCert
+  itself.
+
+```sh
+./configure ... CPPFLAGS="... -DMAX_PKCS7_CERTS=16"
+```
+
 ## 2. wolfCert HTTP stack buffers
 
 The in-tree test server and HTTP client size a few request-handling
