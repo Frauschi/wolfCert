@@ -185,6 +185,159 @@ static int accept_wellformed_chunks(uint16_t port)
     return 0;
 }
 
+/* RFC 9112 section 7.1: legal framings reach the CSR check, malformed ones
+ * fail at the framing. */
+static int check_chunk_framing(uint16_t port)
+{
+    static const struct {
+        const char* framing;
+        const char* want;
+    } cases[] = {
+        { "000000004\r\nAAAA\r\n0\r\n\r\n",          "Bad CSR" },
+        { "4 ;n=v\r\nAAAA\r\n0\r\n\r\n",             "Bad CSR" },
+        { "4\t;n=v\r\nAAAA\r\n0\r\n\r\n",            "Bad CSR" },
+        { "4\r\nAAAA\r\n0\r\nX-T: 1\r\n\r\n",        "Bad CSR" },
+        { "4 5\r\nAAAA\r\n0\r\n\r\n",                "Bad Request" },
+        { "4\r\nAAAA\r\n0\r\ngarbage\r\n\r\n",       "Bad Request" },
+        { "4\r\nAAAA\r\n0\r\n: v\r\n\r\n",           "Bad Request" },
+    };
+    static const char hdr[] =
+        "POST /.well-known/est/simpleenroll HTTP/1.1\r\n"
+        "Host: 127.0.0.1\r\n"
+        "Content-Type: application/pkcs10\r\n"
+        "Transfer-Encoding: chunked\r\n"
+        "\r\n";
+    char req[256];
+    char status[128];
+    int failed = 0;
+    size_t i;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int n = snprintf(req, sizeof(req), "%s%s", hdr, cases[i].framing);
+        REQUIRE(n > 0 && (size_t)n < sizeof(req));
+        memset(status, 0, sizeof(status));
+        send_and_read_status(port, req, (size_t)n, status, sizeof(status));
+        if (strstr(status, cases[i].want) == NULL) {
+            fprintf(stderr, "FAIL framing case %zu: want '%s', got '%.40s'\n",
+                    i, cases[i].want, status);
+            failed = 1;
+        }
+    }
+    return failed;
+}
+
+/* Send req over a new TLS connection and read the response head into resp. */
+static int read_head(uint16_t port, const char* req, size_t len, char* resp,
+                     size_t cap)
+{
+    TestTlsConn c;
+    size_t n = 0;
+
+    resp[0] = '\0';
+    REQUIRE(test_tls_connect(&c, port, g_tls_cert, g_tls_cert_len) == 0);
+    REQUIRE(test_tls_write(&c, req, len) == 0);
+    while (n + 1 < cap) {
+        int r = test_tls_read(&c, resp + n, cap - 1 - n);
+        if (r <= 0)
+            break;
+        n += (size_t)r;
+        resp[n] = '\0';
+        if (strstr(resp, "\r\n\r\n") != NULL)
+            break;
+    }
+    resp[n] = '\0';
+    test_tls_close(&c);
+    return 0;
+}
+
+/* Only an exact "chunked" coding is decoded, and a request framed by both
+ * Transfer-Encoding and Content-Length, or sent as HTTP/1.0, closes. */
+static int check_transfer_encoding(uint16_t port)
+{
+    static const struct {
+        const char* headers;
+        const char* want;
+        const char* conn;
+        const char* version;
+    } cases[] = {
+        { "Transfer-Encoding: chunked \r\n",
+          "Bad CSR", "keep-alive", "1.1" },
+        { "Transfer-Encoding: chunkedX\r\n",
+          "Bad Request", "close", "1.1" },
+        { "Transfer-Encoding: gzip, chunked\r\n",
+          "Bad Request", "close", "1.1" },
+        { "Transfer-Encoding: chunked\r\n"
+          "Transfer-Encoding: chunked\r\n",
+          "Bad Request", "close", "1.1" },
+        { "Transfer-Encoding: chunked\r\n"
+          "Content-Length: 4\r\n",
+          "Bad CSR", "close", "1.1" },
+        { "Transfer-Encoding: chunked\r\n",
+          "Bad CSR", "close", "1.0" },
+        { "Connection: keep-alive\r\n"
+          "Transfer-Encoding: chunked\r\n",
+          "Bad CSR", "close", "1.0" },
+    };
+    char req[512];
+    char resp[1024];
+    char conn[32];
+    size_t i;
+    int failed = 0;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int len = snprintf(req, sizeof(req),
+                           "POST /.well-known/est/simpleenroll HTTP/%s\r\n"
+                           "Host: 127.0.0.1\r\n"
+                           "Content-Type: application/pkcs10\r\n"
+                           "%s\r\n4\r\nAAAA\r\n0\r\n\r\n",
+                           cases[i].version, cases[i].headers);
+        REQUIRE(len > 0 && (size_t)len < sizeof(req));
+        REQUIRE(read_head(port, req, (size_t)len, resp, sizeof(resp)) == 0);
+        snprintf(conn, sizeof(conn), "Connection: %s\r\n", cases[i].conn);
+        if (strstr(resp, cases[i].want) == NULL ||
+                strstr(resp, conn) == NULL) {
+            fprintf(stderr, "FAIL coding case %zu: want '%s' and '%s', "
+                            "got '%.60s'\n", i, cases[i].want, cases[i].conn,
+                    resp);
+            failed = 1;
+        }
+    }
+    return failed;
+}
+
+/* An HTTP/1.0 request closes the connection unless it asks for keep-alive. */
+static int check_http10_persistence(uint16_t port)
+{
+    static const struct {
+        const char* headers;
+        const char* want;
+    } cases[] = {
+        { "",                                   "Connection: close" },
+        { "Connection: keep-alive\r\n",         "Connection: keep-alive" },
+        { "Connection: TE, keep-alive\r\n",     "Connection: keep-alive" },
+        { "Connection: keep-alive, close\r\n",  "Connection: close" },
+        { "Connection: keep-alivex\r\n",        "Connection: close" },
+    };
+    char req[256];
+    char resp[1024];
+    size_t i;
+    int failed = 0;
+
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        int len = snprintf(req, sizeof(req),
+                           "GET /.well-known/est/cacerts HTTP/1.0\r\n"
+                           "Host: 127.0.0.1\r\n%s\r\n", cases[i].headers);
+        REQUIRE(len > 0 && (size_t)len < sizeof(req));
+        REQUIRE(read_head(port, req, (size_t)len, resp, sizeof(resp)) == 0);
+        if (strstr(resp, cases[i].want) == NULL) {
+            fprintf(stderr, "FAIL HTTP/1.0 case %zu: want '%s', got '%.40s'\n",
+                    i, cases[i].want, resp);
+            failed = 1;
+        }
+    }
+    return failed;
+}
+
 /* The chunk-size line "10\r\n" contains "0\r\n", so a framer that scans for
  * the terminator stops early and answers "Bad Request" instead of "Bad CSR". */
 static int accept_multisegment_chunked_body(uint16_t port)
@@ -481,6 +634,12 @@ int main(void)
         rc = reject_corrupt_chunk_trailer(port);
     if (rc == 0)
         rc = accept_wellformed_chunks(port);
+    if (rc == 0)
+        rc = check_chunk_framing(port);
+    if (rc == 0)
+        rc = check_transfer_encoding(port);
+    if (rc == 0)
+        rc = check_http10_persistence(port);
     if (rc == 0)
         rc = accept_multisegment_chunked_body(port);
     if (rc == 0)

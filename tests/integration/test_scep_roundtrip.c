@@ -74,10 +74,40 @@ static int write_all_fd(int fd, const uint8_t* buf, size_t len)
     return 0;
 }
 
+#define RAW_KEEP_ALIVE 0x1
+#define RAW_CHUNKED    0x2
+
+/* Up to two chunks with a zero-padded size and a chunk-ext, then a trailer. */
+static int write_chunked_fd(int fd, const uint8_t* body, size_t body_len)
+{
+    static const char TRAILER[] = "0\r\nX-T: 1\r\n\r\n";
+    size_t half = body_len >= 2 ? body_len / 2 : body_len;
+    char line[32];
+    int n;
+
+    if (half > 0) {
+        n = snprintf(line, sizeof(line), "%09zx ;x=1\r\n", half);
+        if (write_all_fd(fd, (const uint8_t*)line, (size_t)n) != 0 ||
+                write_all_fd(fd, body, half) != 0 ||
+                write_all_fd(fd, (const uint8_t*)"\r\n", 2) != 0)
+            return -1;
+    }
+
+    if (body_len > half) {
+        n = snprintf(line, sizeof(line), "%zx\r\n", body_len - half);
+        if (write_all_fd(fd, (const uint8_t*)line, (size_t)n) != 0 ||
+                write_all_fd(fd, body + half, body_len - half) != 0 ||
+                write_all_fd(fd, (const uint8_t*)"\r\n", 2) != 0)
+            return -1;
+    }
+
+    return write_all_fd(fd, (const uint8_t*)TRAILER, sizeof(TRAILER) - 1);
+}
+
 /* Sends hdr and body to the loopback server and reads the reply to EOF.
  * Returns the status code, or -1 on no reply. out_body is caller-freed. */
 static int raw_exchange(uint16_t port, const char* hdr, size_t hdr_len,
-                        const uint8_t* body, size_t body_len,
+                        const uint8_t* body, size_t body_len, int chunked,
                         uint8_t** out_body, size_t* out_body_len)
 {
     struct sockaddr_in addr;
@@ -115,7 +145,9 @@ static int raw_exchange(uint16_t port, const char* hdr, size_t hdr_len,
     }
 
     if (write_all_fd(fd, (const uint8_t*)hdr, hdr_len) != 0 ||
-            (body_len > 0 && write_all_fd(fd, body, body_len) != 0)) {
+            (chunked && write_chunked_fd(fd, body, body_len) != 0) ||
+            (!chunked && body_len > 0 &&
+             write_all_fd(fd, body, body_len) != 0)) {
         close(fd);
         return -1;
     }
@@ -171,17 +203,27 @@ static int raw_exchange(uint16_t port, const char* hdr, size_t hdr_len,
  * branches the client API cannot produce. out_body, when set, is caller-freed. */
 static int raw_http_req(uint16_t port, const char* method, const char* target,
                         const char* content_type,
-                        const uint8_t* body, size_t body_len, int persistent,
+                        const uint8_t* body, size_t body_len, int flags,
                         uint8_t** out_body, size_t* out_body_len)
 {
+    const char* conn = (flags & RAW_KEEP_ALIVE) ? "keep-alive" : "close";
+    int chunked = body != NULL && (flags & RAW_CHUNKED);
     char hdr[512];
     int n;
 
-    if (body != NULL)
+    if (chunked)
+        n = snprintf(hdr, sizeof(hdr),
+                     "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: %s\r\n"
+                     "%s%s%sTransfer-Encoding: chunked\r\n\r\n",
+                     method, target, conn,
+                     content_type != NULL ? "Content-Type: " : "",
+                     content_type != NULL ? content_type : "",
+                     content_type != NULL ? "\r\n" : "");
+    else if (body != NULL)
         n = snprintf(hdr, sizeof(hdr),
                      "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: %s\r\n"
                      "%s%s%sContent-Length: %zu\r\n\r\n",
-                     method, target, persistent ? "keep-alive" : "close",
+                     method, target, conn,
                      content_type != NULL ? "Content-Type: " : "",
                      content_type != NULL ? content_type : "",
                      content_type != NULL ? "\r\n" : "",
@@ -189,7 +231,7 @@ static int raw_http_req(uint16_t port, const char* method, const char* target,
     else
         n = snprintf(hdr, sizeof(hdr),
                      "%s %s HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: %s\r\n\r\n",
-                     method, target, persistent ? "keep-alive" : "close");
+                     method, target, conn);
     if (n < 0 || (size_t)n >= sizeof(hdr)) {
         if (out_body != NULL && out_body_len != NULL) {
             *out_body = NULL;
@@ -198,14 +240,14 @@ static int raw_http_req(uint16_t port, const char* method, const char* target,
         return -1;
     }
 
-    return raw_exchange(port, hdr, (size_t)n, body, body_len,
+    return raw_exchange(port, hdr, (size_t)n, body, body_len, chunked,
                         out_body, out_body_len);
 }
 
 /* Status code of the reply to a hand-written request, or -1 on no reply. */
 static int raw_request_status(uint16_t port, const char* req)
 {
-    return raw_exchange(port, req, strlen(req), NULL, 0, NULL, NULL);
+    return raw_exchange(port, req, strlen(req), NULL, 0, 0, NULL, NULL);
 }
 
 static int raw_http_status(uint16_t port, const char* target, const char* body)
@@ -1165,7 +1207,8 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
             if (raw_http_req(wolfcert_server_port(s), "POST",
                              "/scep?operation=PKIOperation",
                              "application/x-pki-message",
-                             msg.data, msg.len, 1, NULL, NULL) != 400) {
+                             msg.data, msg.len, RAW_KEEP_ALIVE,
+                             NULL, NULL) != 400) {
                 fprintf(stderr, "FAIL %s:%d required-attrs did not reject "
                                 "and close ahead of the messageType check\n",
                         __FILE__, __LINE__);
@@ -1187,7 +1230,7 @@ static int check_required_attrs(WolfCertServer* s, const WolfCertKeyCfg* kcfg,
 /* POST a signed PKCSReq whose transactionID `tid` is tagged PrintableString
  * whatever its bytes, which wolfcert_scep_build_pki_message will not encode. */
 static int post_raw_tid(uint16_t port, const uint8_t* signer, size_t signer_len,
-                        const WolfCertBuffer* kder, const char* tid)
+                        const WolfCertBuffer* kder, const char* tid, int flags)
 {
     static const byte oid_msg_type[] =
         { 0x06,0x0A,0x60,0x86,0x48,0x01,0x86,0xF8,0x45,0x01,0x09,0x02 };
@@ -1250,7 +1293,7 @@ static int post_raw_tid(uint16_t port, const uint8_t* signer, size_t signer_len,
 
     if (n > 0)
         st = raw_http_req(port, "POST", "/scep?operation=PKIOperation",
-                          "application/x-pki-message", buf, (size_t)n, 0,
+                          "application/x-pki-message", buf, (size_t)n, flags,
                           &rsp, &rsp_len);
 
     free(rsp);
@@ -1259,6 +1302,137 @@ static int post_raw_tid(uint16_t port, const uint8_t* signer, size_t signer_len,
         wc_PKCS7_Free(p7);
     wc_FreeRng(&rng);
     return st;
+}
+
+static int connect_loopback(uint16_t port)
+{
+    struct sockaddr_in addr;
+    struct timeval tv = { .tv_sec = 5 };
+    int fd = socket(AF_INET, SOCK_STREAM, 0);
+
+    if (fd < 0)
+        return -1;
+    setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
+/* Send req on fd and read one response into buf; returns its status or -1. */
+static int exchange(int fd, const char* req, char* buf, size_t cap)
+{
+    const char* eoh = NULL;
+    const char* cl;
+    size_t need = 0;
+    size_t n = 0;
+    ssize_t r;
+
+    if (write_all_fd(fd, (const uint8_t*)req, strlen(req)) != 0)
+        return -1;
+
+    while (n + 1 < cap && (eoh == NULL || n < need)) {
+        r = read(fd, buf + n, cap - 1 - n);
+        if (r <= 0)
+            break;
+        n += (size_t)r;
+        buf[n] = '\0';
+        if (eoh == NULL && (eoh = strstr(buf, "\r\n\r\n")) != NULL) {
+            cl = strstr(buf, "Content-Length:");
+            need = (size_t)(eoh + 4 - buf) +
+                   (cl != NULL && cl < eoh ? strtoul(cl + 15, NULL, 10) : 0);
+        }
+    }
+    buf[n] = '\0';
+
+    if (eoh == NULL || n < need || strncmp(buf, "HTTP/1.1 ", 9) != 0)
+        return -1;
+    return atoi(buf + 9);
+}
+
+#define CAPS_REQ "GET /scep?operation=GetCACaps HTTP/1.1\r\nHost: 127.0.0.1\r\n"
+#define CAPS_REQ_10 \
+    "GET /scep?operation=GetCACaps HTTP/1.0\r\nHost: 127.0.0.1\r\n"
+
+/* Chunked framing is consumed exactly, bad framing gets 400, and TE with
+ * Content-Length or HTTP/1.0 without keep-alive closes the connection. */
+static int check_scep_chunked_framing(uint16_t port)
+{
+    static const char* const kept[] = {
+        CAPS_REQ "Transfer-Encoding: chunked\r\nContent-Length-Hint: 0\r\n"
+                 "\r\n4 ;x=1\r\nAAAA\r\n0\r\nX-T: 1\r\n\r\n",
+        CAPS_REQ_10 "Connection: keep-alive\r\n\r\n",
+        CAPS_REQ_10 "Connection: TE, keep-alive\r\n\r\n",
+    };
+    static const char plain[] = CAPS_REQ "\r\n";
+    static const char* const closing[] = {
+        CAPS_REQ "Transfer-Encoding: chunked\r\nContent-Length: 4\r\n\r\n"
+                 "4\r\nAAAA\r\n0\r\n\r\n",
+        CAPS_REQ_10 "Transfer-Encoding: chunked\r\n\r\n4\r\nAAAA\r\n0\r\n\r\n",
+        CAPS_REQ_10 "\r\n",
+        CAPS_REQ_10 "Connection: keep-alive, close\r\n\r\n",
+        CAPS_REQ_10 "Connection: keep-alive\r\nTransfer-Encoding: chunked\r\n"
+                    "\r\n4\r\nAAAA\r\n0\r\n\r\n",
+    };
+    static const char* const bad[] = {
+        CAPS_REQ "Transfer-Encoding: chunked\r\n\r\n4 5\r\nAAAA\r\n0\r\n\r\n",
+        CAPS_REQ "Transfer-Encoding: chunkedX\r\n\r\n4\r\nAAAA\r\n0\r\n\r\n",
+        CAPS_REQ "Transfer-Encoding: gzip, chunked\r\n\r\n"
+                 "4\r\nAAAA\r\n0\r\n\r\n",
+        CAPS_REQ "Transfer-Encoding: chunked\r\nTransfer-Encoding: chunked\r\n"
+                 "\r\n4\r\nAAAA\r\n0\r\n\r\n",
+        CAPS_REQ "Transfer-Encoding : chunked\r\n\r\n4\r\nAAAA\r\n0\r\n\r\n",
+    };
+    char buf[2048];
+    size_t i;
+    int fails = 0;
+    int fd;
+    int st1, st2;
+
+    for (i = 0; i < sizeof(kept) / sizeof(kept[0]); i++) {
+        fd = connect_loopback(port);
+        REQUIRE(fd >= 0);
+        st1 = exchange(fd, kept[i], buf, sizeof(buf));
+        st2 = exchange(fd, plain, buf, sizeof(buf));
+        close(fd);
+        if (st1 != 200 || st2 != 200) {
+            fprintf(stderr, "FAIL keep-alive case %zu: %d then %d\n", i, st1,
+                    st2);
+            fails++;
+        }
+    }
+
+    for (i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        fd = connect_loopback(port);
+        REQUIRE(fd >= 0);
+        st1 = exchange(fd, bad[i], buf, sizeof(buf));
+        close(fd);
+        if (st1 != 400) {
+            fprintf(stderr, "FAIL bad framing %zu got %d\n", i, st1);
+            fails++;
+        }
+    }
+
+    for (i = 0; i < sizeof(closing) / sizeof(closing[0]); i++) {
+        fd = connect_loopback(port);
+        REQUIRE(fd >= 0);
+        st1 = exchange(fd, closing[i], buf, sizeof(buf));
+        st2 = st1 == 200 && strstr(buf, "Connection: close") != NULL &&
+              read(fd, buf, sizeof(buf)) == 0;
+        close(fd);
+        if (!st2) {
+            fprintf(stderr, "FAIL closing case %zu kept the connection "
+                            "(status %d)\n", i, st1);
+            fails++;
+        }
+    }
+
+    return fails;
 }
 
 /* A transactionID that is not a PrintableString gets 400. */
@@ -1283,7 +1457,7 @@ static int check_unprintable_tid(uint16_t port, const WolfCertKeyCfg* kcfg)
                                            csr.len, &signer, &signer_len, NULL);
 
     if (rc == WOLFCERT_OK) {
-        st = post_raw_tid(port, signer, signer_len, &kder, "tid@1");
+        st = post_raw_tid(port, signer, signer_len, &kder, "tid@1", 0);
         if (st != 400) {
             fprintf(stderr, "FAIL %s:%d '@' transactionID got status %d\n",
                     __FILE__, __LINE__, st);
@@ -1294,9 +1468,19 @@ static int check_unprintable_tid(uint16_t port, const WolfCertKeyCfg* kcfg)
     /* The control reaches de-enveloping, which answers the junk content with
      * a signed FAILURE. */
     if (rc == WOLFCERT_OK) {
-        st = post_raw_tid(port, signer, signer_len, &kder, "tid-1");
+        st = post_raw_tid(port, signer, signer_len, &kder, "tid-1", 0);
         if (st != 200) {
             fprintf(stderr, "FAIL %s:%d control transactionID got status %d\n",
+                    __FILE__, __LINE__, st);
+            rc = -1;
+        }
+    }
+
+    if (rc == WOLFCERT_OK) {
+        st = post_raw_tid(port, signer, signer_len, &kder, "tid-2",
+                          RAW_CHUNKED);
+        if (st != 200) {
+            fprintf(stderr, "FAIL %s:%d chunked control got status %d\n",
                     __FILE__, __LINE__, st);
             rc = -1;
         }
@@ -1455,7 +1639,8 @@ static int check_malformed_dispatch(uint16_t port, const WolfCertKeyCfg* kcfg,
         if (rc == WOLFCERT_OK) {
             if (raw_http_req(port, "POST", "/scep?operation=PKIOperation",
                              "application/x-pki-message",
-                             msg.data, msg.len, 1, NULL, NULL) != 200) {
+                             msg.data, msg.len, RAW_KEEP_ALIVE,
+                             NULL, NULL) != 200) {
                 fprintf(stderr, "FAIL %s:%d dispatch failure did not answer "
                                 "and close\n", __FILE__, __LINE__);
                 rc = -1;
@@ -1705,6 +1890,7 @@ int main(void)
 
     REQUIRE(check_unprintable_tid(wolfcert_server_port(s), &kcfg)
             == WOLFCERT_OK);
+    REQUIRE(check_scep_chunked_framing(wolfcert_server_port(s)) == 0);
 
     REQUIRE(check_malformed_dispatch(wolfcert_server_port(s), &kcfg,
                                      ca_der->buffer, ca_der->length)
