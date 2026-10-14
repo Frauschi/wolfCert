@@ -207,6 +207,10 @@ WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
  * clears it. */
 WOLFCERT_TEST_VIS void wolfcert_scep_server_set_oom_fault(WolfCertServer* s,
                                                           int when);
+
+/* GetCACaps: answer with this HTTP status and no body, or close on -1. */
+WOLFCERT_TEST_VIS void wolfcert_scep_server_set_caps_fault(WolfCertServer* s,
+                                                           int status);
 #endif
 
 int  wolfcert_map_wc_err(int wc_rc);

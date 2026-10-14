@@ -154,7 +154,7 @@ if(WOLFCERT_ENABLE_SCEP AND WOLFCERT_ENABLE_SERVER)
 
 endif()
 
-# The wolfcert-server cases bind 127.0.0.1 ports from 18087 up.
+# The wolfcert-server cases bind 127.0.0.1 ports from 18086 up.
 if(WOLFCERT_ENABLE_CLI AND WOLFCERT_ENABLE_EST AND WOLFCERT_ENABLE_SCEP AND UNIX)
     set(cli_test_env "")
     if(WOLFCERT_ENABLE_SERVER)

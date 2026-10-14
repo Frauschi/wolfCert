@@ -292,8 +292,10 @@ else
     srv_pid=""
     ra_pid=""
     argv_pid=""
+    caps_pid=""
     trap '[ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null;
           [ -n "$ra_pid" ] && kill "$ra_pid" 2>/dev/null;
+          [ -n "$caps_pid" ] && kill "$caps_pid" 2>/dev/null;
           [ -n "$argv_pid" ] && kill "$argv_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
 
     # Not every sleep(1) takes a fractional delay.
@@ -574,6 +576,147 @@ else
     fi
     kill "$ra_pid" 2>/dev/null
     ra_pid=""
+
+    # A non-200 GetCACaps warns and carries on; a dropped one stops enroll and
+    # getcert with exit 2. AES is forced; NO_DES3 builds lack the 3DES default.
+    for caps in 404 close; do
+        ready=0
+        for port in 18086 18186 18286 18386; do
+            "$SERVER" --proto scep --listen "127.0.0.1:$port" \
+                --scep-enable-get-cert --scep-caps-status "$caps" \
+                >"$tmp/caps-server.log" 2>&1 &
+            caps_pid=$!
+            CAPS_URL="http://127.0.0.1:$port/scep"
+            i=0
+            while [ "$i" -lt "$poll_tries" ]; do
+                if "$CLI" getcacerts --proto scep --url "$CAPS_URL" \
+                        --out-cert "$tmp/caps-ca.pem" >/dev/null 2>&1; then
+                    ready=1
+                    break
+                fi
+                sleep "$poll_delay"
+                i=$((i + 1))
+            done
+            if [ "$ready" -eq 1 ]; then
+                break
+            fi
+            kill "$caps_pid" 2>/dev/null
+        done
+
+        if [ "$ready" -ne 1 ]; then
+            skip_group "GetCACaps $caps (no test server would start)"
+            cat "$tmp/caps-server.log"
+            continue
+        fi
+
+        "$CLI" enroll --proto scep --url "$CAPS_URL" --key-type rsa:2048 \
+            --content-cipher aes128 \
+            --subject "CN=caps-test" --out-key "$tmp/caps-$caps.key" \
+            --out-cert "$tmp/caps-$caps.crt" >"$tmp/caps-enroll.log" 2>&1
+        rc=$?
+        if [ "$caps" = 404 ]; then
+            if [ "$rc" -eq 0 ] &&
+                    grep -q "enroll: GetCACaps failed, assuming" \
+                        "$tmp/caps-enroll.log"; then
+                echo "ok   enroll warns and carries on after a GetCACaps 404"
+            else
+                echo "FAIL: enroll after a GetCACaps 404 (exit $rc)"
+                cat "$tmp/caps-enroll.log"
+                fails=$((fails + 1))
+            fi
+        elif [ "$rc" -eq 2 ] &&
+                grep -q "enroll: GetCACaps: " "$tmp/caps-enroll.log"; then
+            echo "ok   enroll stops on a dropped GetCACaps"
+        else
+            echo "FAIL: enroll on a dropped GetCACaps (exit $rc)"
+            cat "$tmp/caps-enroll.log"
+            fails=$((fails + 1))
+        fi
+
+        if [ ! -s "$tmp/caps-404.crt" ]; then
+            skip_group "getcert GetCACaps $caps (no enrolled signer)"
+        else
+            "$CLI" getcert --proto scep --url "$CAPS_URL" \
+                --content-cipher aes128 \
+                --cert "$tmp/caps-404.crt" --key "$tmp/caps-404.key" \
+                --serial 01 --out-cert "$tmp/caps-got.crt" \
+                >"$tmp/caps-getcert.log" 2>&1
+            rc=$?
+            if [ "$caps" = 404 ]; then
+                if grep -q "getcert: GetCACaps failed, assuming" \
+                        "$tmp/caps-getcert.log" &&
+                        grep -q "no certificate with that serial" \
+                        "$tmp/caps-getcert.log"; then
+                    echo "ok   getcert reaches GetCert after a GetCACaps 404"
+                else
+                    echo "FAIL: getcert after a GetCACaps 404 (exit $rc)"
+                    cat "$tmp/caps-getcert.log"
+                    fails=$((fails + 1))
+                fi
+
+                awk '/^-----BEGIN/ { f = 1; next } /^-----END/ { exit } f' \
+                    "$tmp/caps-404.crt" | base64 --decode >"$tmp/caps-404.der"
+                printf '\n' >>"$tmp/caps-404.der"
+                if "$CLI" getcert --proto scep --url "$CAPS_URL" \
+                        --content-cipher aes128 \
+                        --cert "$tmp/caps-404.der" --key "$tmp/caps-404.key" \
+                        --serial 01 --out-cert "$tmp/caps-got-der.crt" \
+                        >"$tmp/caps-getcert-der.log" 2>&1 ||
+                        grep -q "no certificate with that serial" \
+                            "$tmp/caps-getcert-der.log"; then
+                    echo "ok   getcert takes a DER --cert with a trailing newline"
+                else
+                    echo "FAIL: getcert with a DER --cert"
+                    cat "$tmp/caps-getcert-der.log"
+                    fails=$((fails + 1))
+                fi
+
+                { printf ' 0 s:CN=caps\n'; cat "$tmp/caps-404.crt"; } \
+                    >"$tmp/caps-404-pre.crt"
+                if "$CLI" getcert --proto scep --url "$CAPS_URL" \
+                        --content-cipher aes128 \
+                        --cert "$tmp/caps-404-pre.crt" \
+                        --key "$tmp/caps-404.key" \
+                        --serial 01 --out-cert "$tmp/caps-got-pre.crt" \
+                        >"$tmp/caps-getcert-pre.log" 2>&1 ||
+                        grep -q "no certificate with that serial" \
+                            "$tmp/caps-getcert-pre.log"; then
+                    echo "ok   getcert takes a PEM --cert behind a '0' preamble"
+                else
+                    echo "FAIL: getcert with a PEM --cert behind a preamble"
+                    cat "$tmp/caps-getcert-pre.log"
+                    fails=$((fails + 1))
+                fi
+            elif [ "$rc" -eq 2 ] &&
+                    grep -q "getcert: GetCACaps: " "$tmp/caps-getcert.log"; then
+                echo "ok   getcert stops on a dropped GetCACaps"
+            else
+                echo "FAIL: getcert on a dropped GetCACaps (exit $rc)"
+                cat "$tmp/caps-getcert.log"
+                fails=$((fails + 1))
+            fi
+        fi
+
+        if [ "$caps" = 404 ] && [ -s "$tmp/caps-404.crt" ]; then
+            if "$CLI" reenroll --proto scep --url "$CAPS_URL" \
+                    --content-cipher aes128 \
+                    --cert "$tmp/caps-404.crt" --key "$tmp/caps-404.key" \
+                    --out-cert "$tmp/caps-renewed.crt" \
+                    >"$tmp/caps-reenroll.log" 2>&1 &&
+                    grep -q "does not advertise Renewal, sending a PKCSReq" \
+                        "$tmp/caps-reenroll.log" &&
+                    grep -q "BEGIN CERTIFICATE" "$tmp/caps-renewed.crt"; then
+                echo "ok   reenroll sends a PKCSReq after a GetCACaps 404"
+            else
+                echo "FAIL: reenroll after a GetCACaps 404"
+                cat "$tmp/caps-reenroll.log"
+                fails=$((fails + 1))
+            fi
+        fi
+        kill "$caps_pid" 2>/dev/null
+        wait "$caps_pid" 2>/dev/null
+        caps_pid=""
+    done
 
     # A hostname --listen is refused, and the reason reaches stderr.
     "$SERVER" --proto scep --listen localhost:18090 >"$tmp/listen.log" 2>&1 &

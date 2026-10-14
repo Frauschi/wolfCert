@@ -98,6 +98,7 @@ typedef struct {
     int          fault_getcert_wrong_cert;
     int          fault_getcert_no_signer;
     int          fault_oom;
+    int          fault_caps_status;
     WolfCertCa   wrong_ca;
     int          wrong_ca_ready;
 #endif
@@ -128,6 +129,12 @@ WOLFCERT_TEST_VIS void wolfcert_scep_server_set_oom_fault(WolfCertServer* s,
                                                           int when)
 {
     ((ScepPriv*)s->priv)->fault_oom = when;
+}
+
+WOLFCERT_TEST_VIS void wolfcert_scep_server_set_caps_fault(WolfCertServer* s,
+                                                           int status)
+{
+    ((ScepPriv*)s->priv)->fault_caps_status = status;
 }
 #endif
 
@@ -309,6 +316,18 @@ static void send_bin(WolfCertServer* s, int fd, const char* content_type,
 
 static void handle_get_ca_caps(WolfCertServer* s, int fd)
 {
+#if defined(WOLFCERT_BUILD_TESTING)
+    int fault = ((ScepPriv*)s->priv)->fault_caps_status;
+
+    if (fault < 0) {
+        s->keep_alive = 0;
+        return;
+    }
+    if (fault != 0) {
+        send_text(s, fd, fault, "Error", "text/plain", "");
+        return;
+    }
+#endif
     if (s->cfg.scep_enable_next_ca) {
         send_text(s, fd, 200, "OK", "text/plain",
                   "POSTPKIOperation\r\nSHA-256\r\n" SCEP_SRV_CIPHER_CAP

@@ -30,6 +30,16 @@
 #ifdef WOLFCERT_HAVE_EST
 #  include <wolfcert/est.h>
 #endif
+#if defined(WOLFCERT_BUILD_TESTING) && defined(WOLFCERT_HAVE_SCEP)
+#  include "src/internal.h"
+#  define CLI_SCEP_FAULTS
+#  define SCEP_FAULT_USAGE \
+        "  --scep-caps-status CODE|close\n" \
+        "                           Answer GetCACaps with HTTP status CODE and no body,\n" \
+        "                           or close the connection unanswered (testing)\n"
+#else
+#  define SCEP_FAULT_USAGE ""
+#endif
 
 #include <getopt.h>
 #include <signal.h>
@@ -88,6 +98,7 @@ static void print_usage(FILE* out)
         "  --scep-split-ra          Act as a split CA/RA: issue a new RSA RA certificate at\n"
         "                           every start, serve it with the CA from GetCACert, and\n"
         "                           decrypt requests and sign CertReps with it\n"
+        SCEP_FAULT_USAGE
         "  --est-require-approval   Defer EST /simpleenroll + /simplereenroll: first POST for\n"
         "                           a CSR returns 202 Accepted + Retry-After; next POST of\n"
         "                           the same CSR body issues the cert (RFC 7030 section 4.2.3)\n"
@@ -195,6 +206,9 @@ int main(int argc, char** argv)
         { "scep-enable-next-ca",     no_argument,       NULL, 'N' },
         { "scep-enable-get-cert",    no_argument,       NULL, 'G' },
         { "scep-split-ra",           no_argument,       NULL, 'S' },
+#ifdef CLI_SCEP_FAULTS
+        { "scep-caps-status",        required_argument, NULL, 'P' },
+#endif
         { "est-require-approval",    no_argument,       NULL, 'E' },
         { "est-retry-after",         required_argument, NULL, 'T' },
         { "tls-post-handshake-auth", no_argument,       NULL, 'H' },
@@ -222,6 +236,9 @@ int main(int argc, char** argv)
     int scep_enable_next_ca   = 0;
     int scep_enable_get_cert  = 0;
     int scep_split_ra         = 0;
+#ifdef CLI_SCEP_FAULTS
+    int scep_caps_status      = 0;
+#endif
     int est_require_approval  = 0;
     int est_retry_after_sec   = 0;
     int tls_post_handshake_auth = 0;
@@ -293,6 +310,21 @@ int main(int argc, char** argv)
             case 'S':
                 scep_split_ra         = 1;
                 break;
+#ifdef CLI_SCEP_FAULTS
+            case 'P':
+                if (strcmp(optarg, "close") == 0) {
+                    scep_caps_status  = -1;
+                }
+                else {
+                    scep_caps_status  = atoi(optarg);
+                    if (scep_caps_status < 200 || scep_caps_status > 599) {
+                        fprintf(stderr, "invalid --scep-caps-status (expected "
+                                        "200-599 or close)\n");
+                        return 1;
+                    }
+                }
+                break;
+#endif
             case 'N':
                 scep_enable_next_ca   = 1;
                 break;
@@ -432,6 +464,10 @@ int main(int argc, char** argv)
             fprintf(stderr, "wolfcert-server: %s\n", m);
         goto out;
     }
+#ifdef CLI_SCEP_FAULTS
+    if (sel == WOLFCERT_PROTO_SCEP)
+        wolfcert_scep_server_set_caps_fault(g_server, scep_caps_status);
+#endif
 
     fprintf(stderr, "wolfcert-server: %s listening on %s:%u\n",
             sel == WOLFCERT_PROTO_EST ? "EST" : "SCEP",
