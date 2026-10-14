@@ -452,10 +452,10 @@ static int check_challenge(const uint8_t* csr_der, size_t csr_len,
     return ok ? WOLFCERT_OK : WOLFCERT_ERR_AUTH;
 }
 
-/* The signer cert must carry the CSR's public key. */
-static int signer_matches_csr(const uint8_t* signer_der, size_t signer_len,
-                              const uint8_t* csr_der, size_t csr_len,
-                              void* heap)
+/* The signer cert must carry the public key in `der`. */
+static int signer_matches_key(const uint8_t* signer_der, size_t signer_len,
+                              const uint8_t* der, size_t der_len,
+                              int is_csr, void* heap)
 {
     uint8_t* sa = NULL;
     size_t sa_len = 0;
@@ -465,7 +465,7 @@ static int signer_matches_csr(const uint8_t* signer_der, size_t signer_len,
     if (rc != WOLFCERT_OK)
         return rc;
 
-    rc = wolfcert_extract_spki(csr_der, csr_len, 1, &sb, &sb_len, heap);
+    rc = wolfcert_extract_spki(der, der_len, is_csr, &sb, &sb_len, heap);
     if (rc != WOLFCERT_OK) {
         WOLFCERT_XFREE(sa, heap);
         return rc;
@@ -476,6 +476,41 @@ static int signer_matches_csr(const uint8_t* signer_der, size_t signer_len,
 
     WOLFCERT_XFREE(sa, heap);
     WOLFCERT_XFREE(sb, heap);
+    return rc;
+}
+
+/* RFC 8894 section 2.3: a RenewalReq is signed by the certificate it renews. */
+static int signer_issued_by_ca(WolfCertServer* s, const uint8_t* signer_der,
+                               size_t signer_len)
+{
+    WOLFSSL_CERT_MANAGER* cm;
+    int rc = WOLFCERT_ERR_AUTH;
+    int wrc;
+
+    if (signer_der == NULL)
+        return WOLFCERT_ERR_AUTH;
+
+    cm = wolfSSL_CertManagerNew_ex(s->heap);
+    if (cm == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    wrc = wolfSSL_CertManagerLoadCABuffer(cm, s->ca.cert_der,
+                                          (long)s->ca.cert_der_len,
+                                          WOLFSSL_FILETYPE_ASN1);
+    if (wrc != WOLFSSL_SUCCESS) {
+        rc = WOLFCERT_ERR(WOLFCERT_ERR_CRYPTO, "scep",
+                          "cannot load the CA certificate (%d)", wrc);
+    }
+    else {
+        wrc = wolfSSL_CertManagerVerifyBuffer(cm, signer_der, (long)signer_len,
+                                              WOLFSSL_FILETYPE_ASN1);
+        if (wrc == WOLFSSL_SUCCESS)
+            rc = WOLFCERT_OK;
+        else if (wrc == MEMORY_E)
+            rc = WOLFCERT_ERR_MEMORY;
+    }
+
+    wolfSSL_CertManagerFree(cm);
     return rc;
 }
 
@@ -748,26 +783,30 @@ static int handle_enroll(WolfCertServer* s, int fd, const char* mt,
                          const uint8_t* tid, size_t tid_len,
                          const uint8_t* snonce, size_t snonce_len)
 {
-    (void)mt;
     const uint8_t* env_target     = signer_cert ? signer_cert : s->ca.cert_der;
     size_t         env_target_len = signer_cert ? signer_cert_len : s->ca.cert_der_len;
+    int            mrc            = WOLFCERT_OK;
 
-    if (signer_cert != NULL) {
-        int mrc = signer_matches_csr(signer_cert, signer_cert_len,
-                                     csr->data, csr->len, s->heap);
+    /* A RenewalReq's CSR may carry a new key, unlike its signer cert. */
+    if (strcmp(mt, "17") == 0) {
+        mrc = signer_issued_by_ca(s, signer_cert, signer_cert_len);
+    }
+    else if (signer_cert != NULL) {
+        mrc = signer_matches_key(signer_cert, signer_cert_len,
+                                 csr->data, csr->len, 1, s->heap);
 #if defined(WOLFCERT_BUILD_TESTING)
         if (mrc == WOLFCERT_OK && ((ScepPriv*)s->priv)->fault_oom == 3)
             mrc = WOLFCERT_ERR_MEMORY;
 #endif
-        if (mrc == WOLFCERT_ERR_MEMORY) {
-            send_text(s, fd, 500, "Server Error", "text/plain", "");
-            return mrc;
-        }
-        if (mrc != WOLFCERT_OK) {
-            s->keep_alive = 0;
-            return send_pki_failure(s, fd, tid, tid_len, snonce, snonce_len,
-                                    "2" /* badRequest */);
-        }
+    }
+    if (mrc == WOLFCERT_ERR_MEMORY || mrc == WOLFCERT_ERR_CRYPTO) {
+        send_text(s, fd, 500, "Server Error", "text/plain", "");
+        return mrc;
+    }
+    if (mrc != WOLFCERT_OK) {
+        s->keep_alive = 0;
+        return send_pki_failure(s, fd, tid, tid_len, snonce, snonce_len,
+                                "2" /* badRequest */);
     }
 
     if (check_challenge(csr->data, csr->len, s->cfg_challenge,
@@ -806,10 +845,15 @@ static int handle_enroll(WolfCertServer* s, int fd, const char* mt,
             }
         }
         else {
-            /* Only the key that parked the request may resend it. */
+            /* Only the signer that parked the request may resend it. */
             int krc = signer_cert == NULL ? WOLFCERT_ERR_AUTH :
-                      signer_matches_csr(signer_cert, signer_cert_len,
-                                         e->csr_der, e->csr_len, s->heap);
+                      signer_matches_key(signer_cert, signer_cert_len,
+                                         e->signer_cert_der, e->signer_cert_len,
+                                         0, s->heap);
+            if (krc == WOLFCERT_OK &&
+                    (csr->len != e->csr_len ||
+                     memcmp(csr->data, e->csr_der, csr->len) != 0))
+                krc = WOLFCERT_ERR_AUTH;
             if (krc == WOLFCERT_ERR_MEMORY) {
                 send_text(s, fd, 500, "Server Error", "text/plain", "");
                 return krc;
@@ -830,8 +874,8 @@ static int handle_enroll(WolfCertServer* s, int fd, const char* mt,
                            tid, tid_len, snonce, snonce_len, NULL);
 }
 
-/* GetCertInitial (20): the first poll signed with the parked CSR's key
- * issues the cert; any other poll fails and leaves the queue unchanged. */
+/* GetCertInitial (20): the first accepted poll issues the cert; any other
+ * poll fails and leaves the queue unchanged. */
 static int handle_get_cert_initial(WolfCertServer* s, int fd,
                                    const uint8_t* signer_cert,
                                    size_t signer_cert_len,
@@ -847,8 +891,9 @@ static int handle_get_cert_initial(WolfCertServer* s, int fd,
 
     /* Only the key that parked the request may release it. */
     int mrc = signer_cert == NULL ? WOLFCERT_ERR_AUTH :
-              signer_matches_csr(signer_cert, signer_cert_len,
-                                 e->csr_der, e->csr_len, s->heap);
+              signer_matches_key(signer_cert, signer_cert_len,
+                                 e->signer_cert_der, e->signer_cert_len,
+                                 0, s->heap);
 #if defined(WOLFCERT_BUILD_TESTING)
     if (mrc == WOLFCERT_OK && p->fault_oom == 3)
         mrc = WOLFCERT_ERR_MEMORY;

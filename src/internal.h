@@ -167,7 +167,7 @@ WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
     int omit_recipient_nonce, int sign_with_wrong_key, int rng_fail);
 
 /* Out of memory: 1 fails wolfcert_ca_issue, 2 the reply after issuing, 3 the
- * signer/CSR key match; 0 clears it. */
+ * signer key check of a PKCSReq or GetCertInitial; 0 clears it. */
 WOLFCERT_TEST_VIS void wolfcert_scep_server_set_oom_fault(WolfCertServer* s,
                                                           int when);
 #endif

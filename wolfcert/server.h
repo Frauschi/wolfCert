@@ -62,7 +62,8 @@ typedef struct {
 
     /* SCEP manual approval: PKCSReq/RenewalReq answer PENDING, or FAILURE
      * for a bad CSR signature. The first GetCertInitial that quotes the
-     * transactionID and is signed with the parked CSR's key approves it. */
+     * transactionID and is signed with the parked request's signer key
+     * approves it. */
     int              scep_require_approval;
 
     /* SCEP CA roll-over: advertise GetNextCACert and answer it with a second

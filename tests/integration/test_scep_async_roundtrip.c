@@ -214,6 +214,32 @@ static int bootstrap(const WolfCertServerCfg* cli, const char* cn,
     return 0;
 }
 
+/* 1 if the PEM certificate carries the public key of the DER CSR. */
+static int cert_has_csr_key(const WolfCertBuffer* cert_pem,
+                            const WolfCertBuffer* csr)
+{
+    DerBuffer* der = NULL;
+    DecodedCert dc;
+    DecodedCert dr;
+    int ok = 0;
+
+    if (wc_PemToDer(cert_pem->data, (long)cert_pem->len, CERT_TYPE, &der,
+                    NULL, NULL, NULL) != 0)
+        return 0;
+
+    wc_InitDecodedCert(&dc, der->buffer, der->length, NULL);
+    wc_InitDecodedCert(&dr, csr->data, (word32)csr->len, NULL);
+    if (wc_ParseCert(&dc, CERT_TYPE, NO_VERIFY, NULL) == 0 &&
+            wc_ParseCert(&dr, CERTREQ_TYPE, NO_VERIFY, NULL) == 0)
+        ok = dc.pubKeySize == dr.pubKeySize &&
+             memcmp(dc.publicKey, dr.publicKey, dc.pubKeySize) == 0;
+
+    wc_FreeDecodedCert(&dr);
+    wc_FreeDecodedCert(&dc);
+    wc_FreeDer(&der);
+    return ok;
+}
+
 /* Scenario A: async PKCSReq, then blocking enroll and RenewalReq. */
 static int async_enroll_path(WolfCertServer* s)
 {
@@ -235,6 +261,9 @@ static int async_enroll_path(WolfCertServer* s)
     WolfCertScepResult rb = { 0 };
     DerBuffer* rb_der = NULL;
     WolfCertScepResult rbr = { 0 };
+    WolfCertKey* dk3 = NULL;
+    WolfCertBuffer csr3 = { 0 };
+    WolfCertScepResult rnk = { 0 };
     int ret = 1;
 
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/scep", wolfcert_server_port(s));
@@ -272,6 +301,16 @@ static int async_enroll_path(WolfCertServer* s)
             == WOLFCERT_OK);
     REQUIRE_CLEAN(rbr.status == WOLFCERT_SCEP_STATUS_SUCCESS);
 
+    /* Old cert signs a RenewalReq for a new key -> cert for the new key. */
+    REQUIRE_CLEAN(wolfcert_key_generate(&kcfg2, &dk3) == WOLFCERT_OK);
+    REQUIRE_CLEAN(wolfcert_csr_build(dk3, &meta2, &csr3) == WOLFCERT_OK);
+    REQUIRE_CLEAN(wolfcert_scep_session_renewal_req_ex(bsess, &caps,
+                ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
+                rb_der->buffer, rb_der->length, dk2, csr3.data, csr3.len, &rnk)
+            == WOLFCERT_OK);
+    REQUIRE_CLEAN(rnk.status == WOLFCERT_SCEP_STATUS_SUCCESS);
+    REQUIRE_CLEAN(cert_has_csr_key(&rnk.cert_pem, &csr3));
+
     ret = 0;
 cleanup:
     if (sess != NULL)
@@ -281,6 +320,10 @@ cleanup:
     wolfcert_scep_result_free(&r);
     wolfcert_scep_result_free(&rb);
     wolfcert_scep_result_free(&rbr);
+    wolfcert_scep_result_free(&rnk);
+    wolfcert_buffer_free(&csr3);
+    if (dk3 != NULL)
+        wolfcert_key_free(dk3);
     if (rb_der != NULL)
         wc_FreeDer(&rb_der);
     wolfcert_buffer_free(&csr2);
@@ -725,6 +768,23 @@ static int blocking_renewal_poll_path(WolfCertServer* s)
     DerBuffer* issued_der = NULL;
     WolfCertScepResult r3 = { 0 };
     WolfCertScepResult r4 = { 0 };
+    WolfCertKeyCfg nkcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertCertMeta nmeta = { .subject_dn = "CN=sync-renew-poll" };
+    WolfCertKey* nk = NULL;
+    WolfCertBuffer ncsr = { 0 };
+    WolfCertScepResult r5 = { 0 };
+    WolfCertScepResult r6 = { 0 };
+    WolfCertScepResult rx = { 0 };
+    WolfCertServerCfg hcli;
+    WolfCertKey* ka = NULL;
+    WolfCertBuffer csra = { 0 };
+    WolfCertKey* kb = NULL;
+    WolfCertBuffer csrb = { 0 };
+    WolfCertScepResult r7 = { 0 };
+    WolfCertScepResult r8 = { 0 };
+    WolfCertScepResult r9 = { 0 };
+    WolfCertScepResult rr = { 0 };
     int ret = 1;
 
     snprintf(url, sizeof(url), "http://127.0.0.1:%u/scep", wolfcert_server_port(s));
@@ -759,14 +819,95 @@ static int blocking_renewal_poll_path(WolfCertServer* s)
     REQUIRE_CLEAN(r4.status == WOLFCERT_SCEP_STATUS_SUCCESS);
     REQUIRE_CLEAN(memmem(r4.cert_pem.data, r4.cert_pem.len, "BEGIN CERTIFICATE", 17) != NULL);
 
+    /* Renew with a CSR for a new key -> PENDING; the old cert and key sign
+     * both the renewal and the poll -> SUCCESS for the new key. */
+    REQUIRE_CLEAN(wolfcert_key_generate(&nkcfg, &nk) == WOLFCERT_OK);
+    REQUIRE_CLEAN(wolfcert_csr_build(nk, &nmeta, &ncsr) == WOLFCERT_OK);
+    REQUIRE_CLEAN(wolfcert_scep_session_renewal_req_ex(sess, &caps,
+                ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
+                issued_der->buffer, issued_der->length, dk, ncsr.data, ncsr.len,
+                &r5) == WOLFCERT_OK);
+    REQUIRE_CLEAN(r5.status == WOLFCERT_SCEP_STATUS_PENDING);
+    /* A poll signed only by the new key, as for a PKCSReq -> badCertId. */
+    REQUIRE_CLEAN(wolfcert_scep_session_get_cert_initial_ex(sess, &caps,
+                ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
+                NULL, 0, nk, ncsr.data, ncsr.len,
+                r5.transaction_id, r5.transaction_id_len, &rx) == WOLFCERT_OK);
+    REQUIRE_CLEAN(rx.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE_CLEAN(rx.fail_info == 4);
+    REQUIRE_CLEAN(wolfcert_scep_session_get_cert_initial_ex(sess, &caps,
+                ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
+                issued_der->buffer, issued_der->length, dk, ncsr.data, ncsr.len,
+                r5.transaction_id, r5.transaction_id_len, &r6) == WOLFCERT_OK);
+    REQUIRE_CLEAN(r6.status == WOLFCERT_SCEP_STATUS_SUCCESS);
+    REQUIRE_CLEAN(cert_has_csr_key(&r6.cert_pem, &ncsr));
+
+    /* The server serves one connection at a time. */
+    wolfcert_scep_session_close(sess);
+    sess = NULL;
+
+    /* With a public-key-hash transactionID, renewals signed by the same cert
+     * share one: key A parks, a retry of A -> PENDING, key B -> badRequest,
+     * and the poll issues A. */
+    hcli = cli;
+    hcli.proto_opts.scep.txid_mode = WOLFCERT_SCEP_TXID_PUBKEY_HASH;
+    REQUIRE_CLEAN(wolfcert_key_generate(&nkcfg, &ka) == WOLFCERT_OK);
+    REQUIRE_CLEAN(wolfcert_csr_build(ka, &nmeta, &csra) == WOLFCERT_OK);
+    REQUIRE_CLEAN(wolfcert_key_generate(&nkcfg, &kb) == WOLFCERT_OK);
+    REQUIRE_CLEAN(wolfcert_csr_build(kb, &nmeta, &csrb) == WOLFCERT_OK);
+    REQUIRE_CLEAN(wolfcert_scep_renewal_req_ex(&hcli, &caps,
+                ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
+                issued_der->buffer, issued_der->length, dk, csra.data, csra.len,
+                &r7) == WOLFCERT_OK);
+    REQUIRE_CLEAN(r7.status == WOLFCERT_SCEP_STATUS_PENDING);
+    REQUIRE_CLEAN(wolfcert_scep_renewal_req_ex(&hcli, &caps,
+                ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
+                issued_der->buffer, issued_der->length, dk, csra.data, csra.len,
+                &rr) == WOLFCERT_OK);
+    REQUIRE_CLEAN(rr.transaction_id_len == r7.transaction_id_len &&
+                  memcmp(rr.transaction_id, r7.transaction_id,
+                         r7.transaction_id_len) == 0);
+    REQUIRE_CLEAN(rr.status == WOLFCERT_SCEP_STATUS_PENDING);
+    REQUIRE_CLEAN(wolfcert_scep_renewal_req_ex(&hcli, &caps,
+                ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
+                issued_der->buffer, issued_der->length, dk, csrb.data, csrb.len,
+                &r8) == WOLFCERT_OK);
+    REQUIRE_CLEAN(r8.transaction_id_len == r7.transaction_id_len &&
+                  memcmp(r8.transaction_id, r7.transaction_id,
+                         r7.transaction_id_len) == 0);
+    REQUIRE_CLEAN(r8.status == WOLFCERT_SCEP_STATUS_FAILURE);
+    REQUIRE_CLEAN(r8.fail_info == 2);
+    REQUIRE_CLEAN(wolfcert_scep_get_cert_initial(&hcli, &caps,
+                ca_der->buffer, ca_der->length, ca_der->buffer, ca_der->length,
+                issued_der->buffer, issued_der->length, dk, csra.data, csra.len,
+                r7.transaction_id, r7.transaction_id_len, &r9) == WOLFCERT_OK);
+    REQUIRE_CLEAN(r9.status == WOLFCERT_SCEP_STATUS_SUCCESS);
+    REQUIRE_CLEAN(cert_has_csr_key(&r9.cert_pem, &csra));
+
     ret = 0;
 cleanup:
     if (sess != NULL)
         wolfcert_scep_session_close(sess);
+    wolfcert_scep_result_free(&rx);
+    wolfcert_scep_result_free(&r7);
+    wolfcert_scep_result_free(&r8);
+    wolfcert_scep_result_free(&r9);
+    wolfcert_scep_result_free(&rr);
+    wolfcert_buffer_free(&csra);
+    wolfcert_buffer_free(&csrb);
+    if (ka != NULL)
+        wolfcert_key_free(ka);
+    if (kb != NULL)
+        wolfcert_key_free(kb);
     wolfcert_scep_result_free(&r1);
     wolfcert_scep_result_free(&r2);
     wolfcert_scep_result_free(&r3);
     wolfcert_scep_result_free(&r4);
+    wolfcert_scep_result_free(&r5);
+    wolfcert_scep_result_free(&r6);
+    wolfcert_buffer_free(&ncsr);
+    if (nk != NULL)
+        wolfcert_key_free(nk);
     if (issued_der != NULL)
         wc_FreeDer(&issued_der);
     if (ca_der != NULL)
