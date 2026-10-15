@@ -91,5 +91,45 @@ if(CONFIG_WOLFCERT)
     zephyr_library_compile_options(-g3 -O0)
   endif()
 
+  # west build -t wolfcert-sbom
+  set(WOLFCERT_SBOM_LICENSE "GPL-3.0-or-later" CACHE STRING
+      "SPDX license expression recorded in the SBOM")
+  set(WOLFCERT_SBOM_LICENSE_TEXT "" CACHE FILEPATH
+      "License text for a LicenseRef-* in WOLFCERT_SBOM_LICENSE")
+  set(WOLFCERT_SBOM_WOLFSSL_VERSION "" CACHE STRING
+      "wolfSSL version recorded in the SBOM (default: from wolfssl/version.h)")
+  set(_wc_version "${WOLFCERT_SBOM_WOLFSSL_VERSION}")
+  if(NOT _wc_version AND EXISTS ${ZEPHYR_WOLFSSL_MODULE_DIR}/wolfssl/version.h)
+    file(STRINGS ${ZEPHYR_WOLFSSL_MODULE_DIR}/wolfssl/version.h _wc_line
+         REGEX "^#define[ \t]+LIBWOLFSSL_VERSION_STRING[ \t]")
+    if(_wc_line MATCHES "\"([^\"]+)\"")
+      set(_wc_version "${CMAKE_MATCH_1}")
+    endif()
+  endif()
+  if(_wc_version)
+    include(${WOLFCERT_DIR}/tools/sbom/build/sbom.cmake)
+    set(_wc_sbom_args
+      NAME wolfcert
+      VERSION_FILE ${WOLFCERT_DIR}/wolfcert/version.h
+      VERSION_MACRO WOLFCERT_VERSION_STRING
+      TARGETS ${ZEPHYR_CURRENT_LIBRARY}
+      OPTIONS_H ${WOLFCERT_GEN_DIR}/wolfcert/options.h
+      ROOT ${WOLFCERT_DIR}
+      LICENSE_OVERRIDE "${WOLFCERT_SBOM_LICENSE}"
+      DEP_WOLFSSL yes
+      DEP_VERSION wolfssl=${_wc_version}
+      TARGET_NAME wolfcert-sbom)
+    if(WOLFCERT_SBOM_LICENSE_TEXT)
+      list(APPEND _wc_sbom_args LICENSE_TEXT ${WOLFCERT_SBOM_LICENSE_TEXT})
+    endif()
+    wolfssl_compliance_tooling_add_sbom(${_wc_sbom_args})
+  else()
+    add_custom_target(wolfcert-sbom
+      COMMAND ${CMAKE_COMMAND} -E echo "sbom: cannot read the wolfSSL version,"
+              "set WOLFCERT_SBOM_WOLFSSL_VERSION"
+      COMMAND ${CMAKE_COMMAND} -E false
+      VERBATIM)
+  endif()
+
   target_link_libraries(wolfCert INTERFACE zephyr_interface)
 endif()
