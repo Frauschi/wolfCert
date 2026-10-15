@@ -255,3 +255,45 @@ EXTRA_DIST = \
 
 # Zephyr module port
 include zephyr/include.am
+
+# SBOM generation, vendored from wolfssl-compliance-tooling
+CLEANFILES =
+SBOM_PKGNAME          = wolfcert
+SBOM_LICENSE_FILE     = $(srcdir)/LICENSE
+SBOM_LICENSE_OVERRIDE = GPL-3.0-or-later
+SBOM_DEP_WOLFSSL      = yes
+SBOM_WOLFSSL_VERSION  = $(WOLFCERT_WOLFSSL_VERSION)
+if WOLFCERT_USER_SETTINGS
+SBOM_OPTIONS_H        = $(abs_builddir)/sbom-options.h
+SBOM_PREREQS          = sbom-options.h
+CLEANFILES           += sbom-options.h
+sbom-options.h:
+	$(AM_V_GEN)$(PYTHON3) $(srcdir)/scripts/sbom-user-settings.py $@ $(COMPILE)
+else
+SBOM_OPTIONS_H        = $(abs_builddir)/wolfcert/options.h
+SBOM_PREREQS          =
+endif
+include tools/sbom/sbom.am
+sbom-wolfssl-version:
+	@test -n "$(SBOM_WOLFSSL_VERSION)" || { \
+	    echo "ERROR: configure could not read the wolfSSL version."; \
+	    echo "       Run make sbom SBOM_WOLFSSL_VERSION=X.Y.Z"; \
+	    exit 1; }
+.PHONY: sbom-options.h sbom-wolfssl-version
+sbom: sbom-wolfssl-version $(SBOM_PREREQS)
+
+EXTRA_DIST += \
+    scripts/sbom-user-settings.py \
+    tools/sbom/.wolfssl-compliance-tooling-rev \
+    tools/sbom/VERSION \
+    tools/sbom/README.md \
+    tools/sbom/gen-sbom \
+    tools/sbom/sbom-driver \
+    tools/sbom/sbom-driver.py \
+    tools/sbom/sbom.am \
+    tools/sbom/validate_sbom.py \
+    tools/sbom/build/sbom.cmake \
+    tools/sbom/build/sbom.mk \
+    tools/sbom/frontends/compdb_sbom.py \
+    tools/sbom/frontends/iar_sbom.py \
+    tools/sbom/frontends/zephyr_sbom.py
