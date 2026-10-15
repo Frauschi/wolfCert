@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: GPL-3.0-or-later
 #
-# Fail on library or test source drift between CMake and autoconf, or Zephyr
-# module sources that differ from the client set.
+# Fail on library or test source drift between CMake and autoconf, Zephyr
+# module sources that differ from the client set, or a version mismatch.
 
 set -euo pipefail
 
@@ -71,9 +71,23 @@ am_tests="$(extract_tests_am "$ROOT/Makefile.am")"
 compare "test sources" \
     "$cmake_tests" tests/CMakeLists.txt "$am_tests" Makefile.am
 
+# The SBOM takes the version from AC_INIT, project() or version.h.
+am_ver="$(sed -n 's/^AC_INIT(\[wolfCert\], *\[\([^]]*\)\].*/\1/p' "$ROOT/configure.ac")"
+cmake_ver="$(sed -n '/^project(wolfCert/,/)/s/^ *VERSION \([0-9.]*\).*/\1/p' \
+    "$ROOT/CMakeLists.txt")"
+hdr_ver="$(sed -n 's/^#define WOLFCERT_VERSION_STRING "\(.*\)"/\1/p' \
+    "$ROOT/wolfcert/version.h")"
+if [ -z "$am_ver" ] || [ "$am_ver" != "$cmake_ver" ] || \
+   [ "$am_ver" != "$hdr_ver" ]; then
+    echo "ERROR: version mismatch: configure.ac '$am_ver'," \
+         "CMakeLists.txt '$cmake_ver', wolfcert/version.h '$hdr_ver'"
+    status=1
+fi
+
 if [ "$status" -eq 0 ]; then
     echo "build-system parity OK: $(echo "$cmake_srcs" | wc -l | tr -d ' ') library"\
          "sources, $(echo "$zephyr_srcs" | wc -l | tr -d ' ') of them in the Zephyr"\
-         "module, and $(echo "$cmake_tests" | wc -l | tr -d ' ') test sources match."
+         "module, $(echo "$cmake_tests" | wc -l | tr -d ' ') test sources and the"\
+         "version ($am_ver) match."
 fi
 exit "$status"
