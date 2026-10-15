@@ -109,6 +109,7 @@ Email **support@wolfssl.com** instead, and please keep the issue private until a
 - **License header.** Every `.c` and `.h` file opens with the full GPL copyright block, copied from an existing source file; the Lint workflow checks it. Build files (`CMakeLists.txt`, `configure.ac`, `Makefile.am`) use the `SPDX-License-Identifier: GPL-3.0-or-later` line instead.
 - **Include order.** The module's own headers (`<wolfcert/*.h>`, `"internal.h"`) first, then wolfSSL, then system headers.
 - **Both build systems.** CMake and autoconf are kept at parity. A new source file goes into `CMakeLists.txt` and `Makefile.am` (or `zephyr/include.am` for Zephyr files), and a new non-source file into `EXTRA_DIST`. `scripts/ci/check-buildsystem-parity.sh` checks the library source lists.
+- **Vendored SBOM tooling.** `tools/sbom/` is a copy of wolfssl-compliance-tooling, checked against its pinned commit in CI. Update it with the toolkit's sync script as `docs/SBOM.md` describes, never by hand.
 - **A new key algorithm** is one `WolfCertKeyAlg` entry in `src/key_algs.c`, plus a `WOLFCERT_HAVE_<ALG>` guard if wolfSSL can build without it.
 
 ### Adding a Zephyr board to the EST sample

@@ -240,6 +240,7 @@ EXTRA_DIST = \
     docs/EMBEDDED.md    \
     docs/INTEROP.md     \
     docs/MIGRATING-FROM-WOLFSCEP.md \
+    docs/SBOM.md        \
     autogen.sh          \
     CMakeLists.txt      \
     wolfcert/options.h.in \

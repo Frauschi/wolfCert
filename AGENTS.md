@@ -269,5 +269,6 @@ contract, alone or in a group comment.
   sockets or a filesystem, Zephyr.
 - `docs/INTEROP.md`: tested third-party EST and SCEP peers.
 - `docs/MIGRATING-FROM-WOLFSCEP.md`: call mapping from wolfSCEP.
+- `docs/SBOM.md`: generating the CycloneDX and SPDX SBOM.
 - Support and commercial licensing: support@wolfssl.com,
   licensing@wolfssl.com.

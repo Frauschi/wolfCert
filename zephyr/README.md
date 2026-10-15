@@ -79,6 +79,12 @@ See `docs/EMBEDDED.md` section 8. The short version: build with
 `CONFIG_HW_STACK_PROTECTION=y` while tuning `CONFIG_MAIN_STACK_SIZE`, because
 a stack overflow here is reported as something else entirely.
 
+## SBOM
+
+`west build -t wolfcert-sbom` writes a CycloneDX and an SPDX SBOM to
+`build/modules/wolfcert/`, listing the wolfCert sources the application
+compiles. See `docs/SBOM.md`.
+
 ## Networking on qemu_x86
 
 A networked QEMU image defaults to SLIP and waits forever on `/tmp/slip.sock`.
