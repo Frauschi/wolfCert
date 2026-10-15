@@ -202,6 +202,7 @@ endif
 if WOLFCERT_HAVE_SERVER
 check_PROGRAMS += test_server_stop_idle test_server_ca_store
 test_server_stop_idle_SOURCES = tests/integration/test_server_stop_idle.c
+test_server_stop_idle_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src
 test_server_stop_idle_LDADD   = libwolfcert.la $(WOLFSSL_LIBS) -lpthread
 test_server_ca_store_SOURCES = tests/unit/test_server_ca_store.c
 test_server_ca_store_CPPFLAGS = $(AM_CPPFLAGS) -I$(top_srcdir)/src

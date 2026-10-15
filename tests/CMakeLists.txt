@@ -113,6 +113,7 @@ endif()
 # Protocol-agnostic server tests.
 if(WOLFCERT_ENABLE_SERVER)
     add_executable(test_server_stop_idle integration/test_server_stop_idle.c)
+    target_include_directories(test_server_stop_idle PRIVATE ${CMAKE_SOURCE_DIR}/src)
     target_link_libraries(test_server_stop_idle PRIVATE wolfcert Threads::Threads)
     add_test(NAME server_stop_idle COMMAND test_server_stop_idle)
     # A stop that cannot interrupt an idle peer hangs the serving thread.

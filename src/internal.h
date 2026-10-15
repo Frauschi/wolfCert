@@ -142,6 +142,10 @@ struct WolfCertServer {
     int                     poll_timeouts_armed;
     void*                   heap;
     int64_t                 deadline_ms; /* 0 when none is armed */
+#if defined(WOLFCERT_BUILD_TESTING)
+    /* Set by wolfcert_server_set_request_timeout(). */
+    int                     request_timeout_ms;
+#endif
 };
 
 /* wolfSSL_read/write on a TLS connection, else recv()/send(). */
@@ -183,6 +187,11 @@ WOLFCERT_API const WolfCertServerOps* wolfcert_est_server_ops(void);
 WOLFCERT_API const WolfCertServerOps* wolfcert_scep_server_ops(void);
 
 #if defined(WOLFCERT_BUILD_TESTING)
+/* Overrides WOLFCERT_SERVER_REQUEST_TIMEOUT_MS before wolfcert_server_run();
+ * 0 restores it and a negative value disables the deadline. */
+WOLFCERT_TEST_VIS void wolfcert_server_set_request_timeout(WolfCertServer* srv,
+                                                           int ms);
+
 /* GetCert faults: answer with the CA cert, or drop the signer cert. */
 WOLFCERT_TEST_VIS void wolfcert_scep_server_set_getcert_fault(WolfCertServer* s,
                                                               int wrong_cert,

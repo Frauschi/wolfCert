@@ -76,11 +76,14 @@ static int tls_want_io(WOLFSSL* ssl, int ret)
 /* Start the connection's deadline for its next phase. */
 static void arm_deadline(WolfCertServer* srv)
 {
-#if WOLFCERT_SERVER_REQUEST_TIMEOUT_MS > 0
-    srv->deadline_ms = wolfcert_mono_ms() + WOLFCERT_SERVER_REQUEST_TIMEOUT_MS;
-#else
-    (void)srv;
+    int64_t ms = WOLFCERT_SERVER_REQUEST_TIMEOUT_MS;
+
+#if defined(WOLFCERT_BUILD_TESTING)
+    if (srv->request_timeout_ms != 0)
+        ms = srv->request_timeout_ms;
 #endif
+    if (ms > 0)
+        srv->deadline_ms = wolfcert_mono_ms() + ms;
 }
 
 /* True once shutdown is requested or the connection's deadline has passed. */
@@ -718,3 +721,11 @@ uint16_t wolfcert_server_port(const WolfCertServer* srv)
 {
     return srv ? srv->cfg.bind_port : 0;
 }
+
+#if defined(WOLFCERT_BUILD_TESTING)
+WOLFCERT_TEST_VIS void wolfcert_server_set_request_timeout(WolfCertServer* srv,
+                                                           int ms)
+{
+    srv->request_timeout_ms = ms;
+}
+#endif
