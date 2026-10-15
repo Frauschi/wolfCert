@@ -297,12 +297,14 @@ else
     srv_pid=""
     ra_pid=""
     argv_pid=""
+    est_pid=""
     caps_pid=""
     bundle_pid=""
     started_pid=""
     trap '[ -n "$started_pid" ] && kill "$started_pid" 2>/dev/null;
           [ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null;
           [ -n "$ra_pid" ] && kill "$ra_pid" 2>/dev/null;
+          [ -n "$est_pid" ] && kill "$est_pid" 2>/dev/null;
           [ -n "$caps_pid" ] && kill "$caps_pid" 2>/dev/null;
           [ -n "$bundle_pid" ] && kill "$bundle_pid" 2>/dev/null;
           [ -n "$argv_pid" ] && kill "$argv_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
@@ -423,6 +425,80 @@ else
             cat "$tmp/reenroll-der.log"
             fails=$((fails + 1))
         fi
+
+        { printf ' 0 s:CN=ok\n'; cat "$tmp/renewed.crt"; } \
+            >"$tmp/renewed-pre.crt"
+        { printf '\n '; cat "$tmp/renewed.der"; } >"$tmp/renewed-ws.der"
+        { cat "$tmp/renewed.der"; printf '\n'; } >"$tmp/renewed-nl.der"
+        for f in renewed-pre.crt renewed-ws.der renewed-nl.der; do
+            if "$CLI" reenroll --proto scep --url "$PIN_URL" \
+                    --ca-fingerprint "$fp" --cert "$tmp/$f" \
+                    --key "$tmp/ok.key" --out-cert "$tmp/$f.out" \
+                    >"$tmp/reenroll-$f.log" 2>&1 &&
+                    grep -q "BEGIN CERTIFICATE" "$tmp/$f.out"; then
+                echo "ok   SCEP reenroll takes --cert $f"
+            else
+                echo "FAIL: SCEP reenroll with --cert $f"
+                cat "$tmp/reenroll-$f.log"
+                fails=$((fails + 1))
+            fi
+        done
+
+        # EST reenroll presents --cert as the TLS client certificate too, so it
+        # renews against an mTLS server whose TLS identity this CA issued.
+        est_ready=0
+        if "$CLI" enroll --proto scep --url "$PIN_URL" --key-type rsa:2048 \
+                --subject "CN=localhost" --san-ip 127.0.0.1 \
+                --ca-fingerprint "$fp" --out-key "$tmp/tls.key" \
+                --out-cert "$tmp/tls.crt" >"$tmp/tls-enroll.log" 2>&1; then
+            port=18092
+            for n in 0 1 2 3; do
+                "$SERVER" --proto est --listen "127.0.0.1:$port" \
+                    --tls-cert "$tmp/tls.crt" --tls-key "$tmp/tls.key" \
+                    --tls-client-ca "$tmp/pin-ca.pem" \
+                    >"$tmp/est-server.log" 2>&1 &
+                est_pid=$!
+                est_url="https://127.0.0.1:$port/.well-known/est"
+                i=0
+                while [ "$i" -lt "$poll_tries" ] &&
+                        kill -0 "$est_pid" 2>/dev/null; do
+                    if "$CLI" getcacerts --proto est --url "$est_url" \
+                            --trust "$tmp/pin-ca.pem" \
+                            --client-cert "$tmp/ok.crt" \
+                            --client-key "$tmp/ok.key" \
+                            --out-cert "$tmp/est-ca.pem" \
+                            >"$tmp/est-getca.log" 2>&1; then
+                        est_ready=1
+                        break 2
+                    fi
+                    sleep "$poll_delay"
+                    i=$((i + 1))
+                done
+                kill "$est_pid" 2>/dev/null
+                wait "$est_pid" 2>/dev/null
+                port=$((port + 100))
+            done
+        fi
+        if [ "$est_ready" -ne 1 ]; then
+            skip_group "EST reenroll --cert forms (no mTLS server would start)"
+            cat "$tmp/tls-enroll.log" "$tmp/est-server.log" 2>/dev/null
+        else
+            for f in renewed.crt renewed-pre.crt renewed-ws.der renewed-nl.der; do
+                if "$CLI" reenroll --proto est --url "$est_url" \
+                        --trust "$tmp/pin-ca.pem" --cert "$tmp/$f" \
+                        --key "$tmp/ok.key" --out-cert "$tmp/est-$f.out" \
+                        >"$tmp/est-reenroll-$f.log" 2>&1 &&
+                        grep -q "BEGIN CERTIFICATE" "$tmp/est-$f.out"; then
+                    echo "ok   EST reenroll takes --cert $f"
+                else
+                    echo "FAIL: EST reenroll with --cert $f"
+                    cat "$tmp/est-reenroll-$f.log"
+                    fails=$((fails + 1))
+                fi
+            done
+        fi
+        kill "$est_pid" 2>/dev/null
+        est_pid=""
 
         # getnextca resolves the current CA through the same pin.
         expect_reject "getnextca with a mismatched --ca-fingerprint" \

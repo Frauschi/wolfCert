@@ -653,6 +653,53 @@ static int fill_scep_opts(const Opts* opts, WolfCertServerCfg* cfg)
     return 0;
 }
 
+/* Length of the DER certificate at p, or 0 when none fits in left. */
+static size_t der_cert_len(const uint8_t* p, size_t left)
+{
+    word32 idx = 1;
+    int len;
+
+    if (left < 2 || p[0] != 0x30 ||
+            GetLength(p, &idx, &len, (word32)left) < 0)
+        return 0;
+    return idx + (size_t)len;
+}
+
+static int is_blank(uint8_t c)
+{
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+/* A certificate given as PEM or DER, as DER owned by the caller; 0 or -1.
+ * DER must fill the file up to trailing whitespace, since 0x30 is ASCII 0. */
+static int cert_to_der(const uint8_t* buf, size_t len, DerBuffer** out)
+{
+    size_t i = 0;
+    size_t end;
+    size_t dlen;
+
+    *out = NULL;
+    while (i < len && is_blank(buf[i]))
+        i++;
+    dlen = der_cert_len(buf + i, len - i);
+    end = i + dlen;
+    while (dlen != 0 && end < len && is_blank(buf[end]))
+        end++;
+    if (dlen != 0 && end == len) {
+        if (wc_AllocDer(out, (word32)dlen, CERT_TYPE, NULL) != 0)
+            return -1;
+        memcpy((*out)->buffer, buf + i, dlen);
+        return 0;
+    }
+
+    if (wc_PemToDer(buf, (long)len, CERT_TYPE, out, NULL, NULL, NULL) != 0) {
+        if (*out != NULL)
+            wc_FreeDer(out);
+        return -1;
+    }
+    return 0;
+}
+
 #ifdef WOLFCERT_HAVE_SCEP
 
 /* SHA-512, the widest digest --ca-fingerprint accepts. */
@@ -828,53 +875,6 @@ static int scep_pin_setup(const Opts* opts, WolfCertProtocol p, CaPin* pin,
                         "server offers is trusted unverified\n");
     }
 
-    return 0;
-}
-
-/* Length of the DER certificate at p, or 0 when none fits in left. */
-static size_t der_cert_len(const uint8_t* p, size_t left)
-{
-    word32 idx = 1;
-    int len;
-
-    if (left < 2 || p[0] != 0x30 ||
-            GetLength(p, &idx, &len, (word32)left) < 0)
-        return 0;
-    return idx + (size_t)len;
-}
-
-static int is_blank(uint8_t c)
-{
-    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
-}
-
-/* A certificate given as PEM or DER, as DER owned by the caller; 0 or -1.
- * DER must fill the file up to trailing whitespace, since 0x30 is ASCII 0. */
-static int cert_to_der(const uint8_t* buf, size_t len, DerBuffer** out)
-{
-    size_t i = 0;
-    size_t end;
-    size_t dlen;
-
-    *out = NULL;
-    while (i < len && is_blank(buf[i]))
-        i++;
-    dlen = der_cert_len(buf + i, len - i);
-    end = i + dlen;
-    while (dlen != 0 && end < len && is_blank(buf[end]))
-        end++;
-    if (dlen != 0 && end == len) {
-        if (wc_AllocDer(out, (word32)dlen, CERT_TYPE, NULL) != 0)
-            return -1;
-        memcpy((*out)->buffer, buf + i, dlen);
-        return 0;
-    }
-
-    if (wc_PemToDer(buf, (long)len, CERT_TYPE, out, NULL, NULL, NULL) != 0) {
-        if (*out != NULL)
-            wc_FreeDer(out);
-        return -1;
-    }
     return 0;
 }
 
@@ -1679,24 +1679,19 @@ static int cmd_enroll(int argc, char** argv)
 /* RenewalReq signed by the current certificate and key, for a CSR that keeps
  * the certificate's subject, SAN and key. */
 static int scep_reenroll(const Opts* opts, const WolfCertServerCfg* srv,
-                         const CaPin* pin, const uint8_t* cert_pem,
-                         size_t cert_len, const WolfCertKey* key,
-                         WolfCertBuffer* issued)
+                         const CaPin* pin, const DerBuffer* cert_der,
+                         const WolfCertKey* key, WolfCertBuffer* issued)
 {
     WolfCertCertMeta meta = { .challenge_password = opts->challenge };
     WolfCertBuffer csr = { 0 };
-    DerBuffer* cert_der = NULL;
     int rc;
 
-    rc = wolfcert_csr_build_ex(key, &meta, cert_pem, cert_len, &csr);
-    if (rc == WOLFCERT_OK && cert_to_der(cert_pem, cert_len, &cert_der) != 0)
-        rc = WOLFCERT_ERR_PARSE;
+    rc = wolfcert_csr_build_ex(key, &meta, cert_der->buffer, cert_der->length,
+                               &csr);
     if (rc == WOLFCERT_OK)
         rc = scep_enroll(opts, srv, pin, "reenroll", key, &csr, cert_der,
                          issued);
 
-    if (cert_der != NULL)
-        wc_FreeDer(&cert_der);
     wolfcert_buffer_free(&csr);
     return rc;
 }
@@ -1710,6 +1705,7 @@ static int cmd_reenroll(int argc, char** argv)
     uint8_t* mt_key = NULL;
     uint8_t* cert_pem = NULL;
     uint8_t* key_pem = NULL;
+    DerBuffer* cert_der = NULL;
     WolfCertKey* current_key = NULL;
     WolfCertKey* new_key = NULL;
     WolfCertCertMeta meta = { 0 };
@@ -1767,6 +1763,11 @@ static int cmd_reenroll(int argc, char** argv)
         }
     }
 
+    if (ret == 0 && cert_to_der(cert_pem, cert_len, &cert_der) != 0) {
+        fprintf(stderr, "reenroll: bad --cert\n");
+        ret = 2;
+    }
+
     if (ret == 0 &&
         wolfcert_key_from_pem(key_pem, key_len, NULL, &current_key) != WOLFCERT_OK) {
         fprintf(stderr, "reenroll: bad current key PEM\n");
@@ -1787,14 +1788,13 @@ static int cmd_reenroll(int argc, char** argv)
 
     if (ret == 0 && p == WOLFCERT_PROTO_EST) {
         meta.challenge_password = opts.challenge;
-        rc = wolfcert_client_reenroll(NULL, &srv, cert_pem, cert_len,
-                                      current_key, NULL, &meta, &new_key,
-                                      &issued);
+        rc = wolfcert_client_reenroll(NULL, &srv, cert_der->buffer,
+                                      cert_der->length, current_key, NULL,
+                                      &meta, &new_key, &issued);
     }
 #ifdef WOLFCERT_HAVE_SCEP
     else if (ret == 0) {
-        rc = scep_reenroll(&opts, &srv, &pin, cert_pem, cert_len,
-                           current_key, &issued);
+        rc = scep_reenroll(&opts, &srv, &pin, cert_der, current_key, &issued);
     }
 #endif
 
@@ -1827,6 +1827,8 @@ static int cmd_reenroll(int argc, char** argv)
         wolfcert_key_free(new_key);
     if (current_key != NULL)
         wolfcert_key_free(current_key);
+    if (cert_der != NULL)
+        wc_FreeDer(&cert_der);
     free(cert_pem);
     free_secret(key_pem, key_len);
     free(trust_hold);
