@@ -3,7 +3,8 @@
 #
 # wolfcert-client rejects options of the other protocol and validates the SCEP
 # keyword arguments. The --ca-fingerprint pinning and server argv groups start
-# wolfcert-server and skip when it was not built.
+# wolfcert-server; they fail when the build passed WOLFCERT_SERVER and the
+# server cannot start, and skip otherwise.
 
 set -u
 
@@ -18,11 +19,12 @@ fi
 fails=0
 
 # The CLI installs no static pool, so it cannot initialise on WOLFSSL_NO_MALLOC.
-if "$CLI" getcacerts --proto scep --url "http://127.0.0.1:1/scep" 2>&1 \
-        | grep -q "wolfcert_init failed"; then
-    echo "SKIP: wolfcert-client cannot initialise in this build (no allocator)"
-    exit 77
-fi
+probe="$("$CLI" getcacerts --proto scep --url "http://127.0.0.1:1/scep" 2>&1)"
+case "$probe" in
+    *"wolfcert_init failed"*)
+        echo "SKIP: wolfcert-client cannot initialise in this build (no allocator)"
+        exit 77 ;;
+esac
 
 # expect_reject <description> <substring the message must contain> <args...>
 expect_reject() {
@@ -156,6 +158,21 @@ expect_reject "sha256 --ca-fingerprint of the wrong length" "needs 32 bytes" \
 expect_reject "over-long --ca-fingerprint" "longer than any supported digest" \
     getcacerts --proto scep --url "$SCEP_URL" \
     --ca-fingerprint "sha512:$(rep 0 200)"
+expect_reject "--ra-fingerprint under est" "SCEP-only" \
+    getcacerts --proto est --url "$EST_URL" --ra-fingerprint "sha256:$(rep 0 64)"
+expect_reject "--ra-fingerprint without --ca-fingerprint" "needs --ca-fingerprint" \
+    getcacerts --proto scep --url "$SCEP_URL" --ra-fingerprint "sha256:$(rep 0 64)"
+expect_reject "odd-length --ra-fingerprint" "--ra-fingerprint needs an even number" \
+    getcacerts --proto scep --url "$SCEP_URL" \
+    --ca-fingerprint "sha256:$(rep 0 64)" --ra-fingerprint abc
+expect_reject "getnextca with --ra-fingerprint" "does not apply" \
+    getnextca --proto scep --url "$SCEP_URL" \
+    --ca-fingerprint "sha256:$(rep 0 64)" --ra-fingerprint "sha256:$(rep 0 64)"
+z="sha256:$(rep 0 64)"
+expect_reject "five --ra-fingerprint values" "takes at most 4 values" \
+    getcacerts --proto scep --url "$SCEP_URL" --ca-fingerprint "$z" \
+    --ra-fingerprint "$z" --ra-fingerprint "$z" --ra-fingerprint "$z" \
+    --ra-fingerprint "$z" --ra-fingerprint "$z"
 
 # A named non-default digest may fail on the network or as unsupported, but
 # never as a syntax error.
@@ -230,8 +247,20 @@ esac
 kill "$cargv_pid" 2>/dev/null
 rm -rf "$ctmp"
 
-# The server groups need wolfcert-server (WOLFCERT_ENABLE_SERVER).
-SERVER="$(dirname "$CLI")/wolfcert-server"
+SERVER="${WOLFCERT_SERVER:-$(dirname "$CLI")/wolfcert-server}"
+server_required="${WOLFCERT_SERVER:+1}"
+# Without an allocator the tools run out of memory, so a server cannot start.
+case "$probe" in *"out of memory"*) server_required="" ;; esac
+
+# skip_group <description>: a FAIL when the build provided the server.
+skip_group() {
+    if [ -n "$server_required" ]; then
+        echo "FAIL: $1"
+        fails=$((fails + 1))
+    else
+        echo "skip $1"
+    fi
+}
 
 # wolfcert-server refuses an EST listener that could not authenticate anyone.
 # Any readable file passes as --tls-cert: these checks run before it is parsed.
@@ -262,12 +291,22 @@ if [ -x "$SERVER" ]; then
     esac
 fi
 if [ ! -x "$SERVER" ]; then
-    echo "skip --ca-fingerprint pinning (wolfcert-server not built)"
+    skip_group "--ca-fingerprint pinning (wolfcert-server not built)"
 else
     tmp="$(mktemp -d -t wolfcert-cli.XXXXXX)"
     srv_pid=""
+    ra_pid=""
     argv_pid=""
-    trap '[ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null;
+    est_pid=""
+    caps_pid=""
+    bundle_pid=""
+    started_pid=""
+    trap '[ -n "$started_pid" ] && kill "$started_pid" 2>/dev/null;
+          [ -n "$srv_pid" ] && kill "$srv_pid" 2>/dev/null;
+          [ -n "$ra_pid" ] && kill "$ra_pid" 2>/dev/null;
+          [ -n "$est_pid" ] && kill "$est_pid" 2>/dev/null;
+          [ -n "$caps_pid" ] && kill "$caps_pid" 2>/dev/null;
+          [ -n "$bundle_pid" ] && kill "$bundle_pid" 2>/dev/null;
           [ -n "$argv_pid" ] && kill "$argv_pid" 2>/dev/null; rm -rf "$tmp"' EXIT
 
     # Not every sleep(1) takes a fractional delay.
@@ -279,38 +318,52 @@ else
         poll_tries=10
     fi
 
-    # A busy port is an environment problem, not a regression, so try a few and
-    # poll GetCACert until the server has generated its CA and bound.
-    ready=0
-    for port in 18088 18188 18288 18388; do
-        "$SERVER" --proto scep --listen "127.0.0.1:$port" --scep-enable-next-ca \
-            >"$tmp/server.log" 2>&1 &
-        srv_pid=$!
-        PIN_URL="http://127.0.0.1:$port/scep"
-        i=0
-        while [ "$i" -lt "$poll_tries" ]; do
-            if "$CLI" getcacerts --proto scep --url "$PIN_URL" \
-                    --out-cert "$tmp/ca.pem" >"$tmp/getca.log" 2>&1; then
-                ready=1
-                break
-            fi
-            sleep "$poll_delay"
-            i=$((i + 1))
+    # start_scep_server <name> <first port> <server args...>: a busy port is an
+    # environment problem, so try four and poll GetCACert into $tmp/<name>-*.
+    start_scep_server() {
+        local name="$1" port="$2" n i
+        shift 2
+        ready=0
+        for n in 0 1 2 3; do
+            "$SERVER" --proto scep --listen "127.0.0.1:$port" "$@" \
+                >"$tmp/$name-server.log" 2>&1 &
+            started_pid=$!
+            url="http://127.0.0.1:$port/scep"
+            i=0
+            while [ "$i" -lt "$poll_tries" ] &&
+                    kill -0 "$started_pid" 2>/dev/null; do
+                if "$CLI" getcacerts --proto scep --url "$url" \
+                        --out-cert "$tmp/$name-ca.pem" \
+                        >"$tmp/$name-getca.log" 2>&1; then
+                    ready=1
+                    return
+                fi
+                sleep "$poll_delay"
+                i=$((i + 1))
+            done
+            kill "$started_pid" 2>/dev/null
+            wait "$started_pid" 2>/dev/null
+            port=$((port + 100))
         done
-        if [ "$ready" -eq 1 ]; then
-            break
-        fi
-        kill "$srv_pid" 2>/dev/null
-    done
+    }
+
+    # cert_fp <log> <index>: the pin getcacerts printed for that certificate.
+    cert_fp() {
+        sed -n "s/.*certificate $2 is \(sha256:[0-9A-Fa-f:]*\).*/\1/p" "$1"
+    }
+
+    start_scep_server pin 18088 --scep-enable-next-ca
+    srv_pid=$started_pid
+    PIN_URL="$url"
 
     # getcacerts reports the fingerprint an operator is meant to pin.
-    fp="$(sed -n 's/.*\(sha256:[0-9A-Fa-f:]\{32,\}\).*/\1/p' "$tmp/getca.log" | head -1)"
+    fp="$(cert_fp "$tmp/pin-getca.log" 0)"
     if [ "$ready" -ne 1 ]; then
-        echo "skip --ca-fingerprint pinning (no test server would start)"
-        cat "$tmp/server.log"
+        skip_group "--ca-fingerprint pinning (no test server would start)"
+        cat "$tmp/pin-server.log"
     elif [ -z "$fp" ]; then
         echo "FAIL: getcacerts printed no sha256 fingerprint to pin"
-        cat "$tmp/getca.log"
+        cat "$tmp/pin-getca.log"
         fails=$((fails + 1))
     else
         echo "ok   getcacerts reports a sha256 fingerprint"
@@ -346,6 +399,107 @@ else
             fails=$((fails + 1))
         fi
 
+        if "$CLI" reenroll --proto scep --url "$PIN_URL" \
+                --ca-fingerprint "$fp" --cert "$tmp/ok.crt" \
+                --key "$tmp/ok.key" --out-cert "$tmp/renewed.crt" \
+                >"$tmp/reenroll.log" 2>&1 &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/renewed.crt" &&
+                ! cmp -s "$tmp/ok.crt" "$tmp/renewed.crt"; then
+            echo "ok   SCEP reenroll renews the pinned enrollment"
+        else
+            echo "FAIL: SCEP reenroll did not renew the certificate"
+            cat "$tmp/reenroll.log"
+            fails=$((fails + 1))
+        fi
+
+        awk '/^-----BEGIN/ { f = 1; next } /^-----END/ { exit } f' \
+            "$tmp/renewed.crt" | base64 --decode >"$tmp/renewed.der"
+        if "$CLI" reenroll --proto scep --url "$PIN_URL" \
+                --ca-fingerprint "$fp" --cert "$tmp/renewed.der" \
+                --key "$tmp/ok.key" --out-cert "$tmp/renewed-der.crt" \
+                >"$tmp/reenroll-der.log" 2>&1 &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/renewed-der.crt"; then
+            echo "ok   SCEP reenroll takes a DER --cert"
+        else
+            echo "FAIL: SCEP reenroll with a DER --cert"
+            cat "$tmp/reenroll-der.log"
+            fails=$((fails + 1))
+        fi
+
+        { printf ' 0 s:CN=ok\n'; cat "$tmp/renewed.crt"; } \
+            >"$tmp/renewed-pre.crt"
+        { printf '\n '; cat "$tmp/renewed.der"; } >"$tmp/renewed-ws.der"
+        { cat "$tmp/renewed.der"; printf '\n'; } >"$tmp/renewed-nl.der"
+        for f in renewed-pre.crt renewed-ws.der renewed-nl.der; do
+            if "$CLI" reenroll --proto scep --url "$PIN_URL" \
+                    --ca-fingerprint "$fp" --cert "$tmp/$f" \
+                    --key "$tmp/ok.key" --out-cert "$tmp/$f.out" \
+                    >"$tmp/reenroll-$f.log" 2>&1 &&
+                    grep -q "BEGIN CERTIFICATE" "$tmp/$f.out"; then
+                echo "ok   SCEP reenroll takes --cert $f"
+            else
+                echo "FAIL: SCEP reenroll with --cert $f"
+                cat "$tmp/reenroll-$f.log"
+                fails=$((fails + 1))
+            fi
+        done
+
+        # EST reenroll presents --cert as the TLS client certificate too, so it
+        # renews against an mTLS server whose TLS identity this CA issued.
+        est_ready=0
+        if "$CLI" enroll --proto scep --url "$PIN_URL" --key-type rsa:2048 \
+                --subject "CN=localhost" --san-ip 127.0.0.1 \
+                --ca-fingerprint "$fp" --out-key "$tmp/tls.key" \
+                --out-cert "$tmp/tls.crt" >"$tmp/tls-enroll.log" 2>&1; then
+            port=18092
+            for n in 0 1 2 3; do
+                "$SERVER" --proto est --listen "127.0.0.1:$port" \
+                    --tls-cert "$tmp/tls.crt" --tls-key "$tmp/tls.key" \
+                    --tls-client-ca "$tmp/pin-ca.pem" \
+                    >"$tmp/est-server.log" 2>&1 &
+                est_pid=$!
+                est_url="https://127.0.0.1:$port/.well-known/est"
+                i=0
+                while [ "$i" -lt "$poll_tries" ] &&
+                        kill -0 "$est_pid" 2>/dev/null; do
+                    if "$CLI" getcacerts --proto est --url "$est_url" \
+                            --trust "$tmp/pin-ca.pem" \
+                            --client-cert "$tmp/ok.crt" \
+                            --client-key "$tmp/ok.key" \
+                            --out-cert "$tmp/est-ca.pem" \
+                            >"$tmp/est-getca.log" 2>&1; then
+                        est_ready=1
+                        break 2
+                    fi
+                    sleep "$poll_delay"
+                    i=$((i + 1))
+                done
+                kill "$est_pid" 2>/dev/null
+                wait "$est_pid" 2>/dev/null
+                port=$((port + 100))
+            done
+        fi
+        if [ "$est_ready" -ne 1 ]; then
+            skip_group "EST reenroll --cert forms (no mTLS server would start)"
+            cat "$tmp/tls-enroll.log" "$tmp/est-server.log" 2>/dev/null
+        else
+            for f in renewed.crt renewed-pre.crt renewed-ws.der renewed-nl.der; do
+                if "$CLI" reenroll --proto est --url "$est_url" \
+                        --trust "$tmp/pin-ca.pem" --cert "$tmp/$f" \
+                        --key "$tmp/ok.key" --out-cert "$tmp/est-$f.out" \
+                        >"$tmp/est-reenroll-$f.log" 2>&1 &&
+                        grep -q "BEGIN CERTIFICATE" "$tmp/est-$f.out"; then
+                    echo "ok   EST reenroll takes --cert $f"
+                else
+                    echo "FAIL: EST reenroll with --cert $f"
+                    cat "$tmp/est-reenroll-$f.log"
+                    fails=$((fails + 1))
+                fi
+            done
+        fi
+        kill "$est_pid" 2>/dev/null
+        est_pid=""
+
         # getnextca resolves the current CA through the same pin.
         expect_reject "getnextca with a mismatched --ca-fingerprint" \
             "does not match --ca-fingerprint" \
@@ -363,6 +517,407 @@ else
             fails=$((fails + 1))
         fi
     fi
+
+    # Against a split CA/RA server that defers issuance, the RA counts only once
+    # --ra-fingerprint names it; pinning the RA alone ignores the CA.
+    poll="--poll-attempts 5 --poll-interval-ms 100"
+    start_scep_server ra 18087 --scep-split-ra --scep-require-approval \
+        --scep-enable-next-ca --scep-enable-get-cert
+    ra_pid=$started_pid
+    RA_URL="$url"
+
+    ra_fp="$(cert_fp "$tmp/ra-getca.log" 0)"
+    ca_fp="$(cert_fp "$tmp/ra-getca.log" 1)"
+    if [ "$ready" -ne 1 ]; then
+        skip_group "split CA/RA pinning (no test server would start)"
+        cat "$tmp/ra-server.log"
+    elif [ -z "$ra_fp" ] || [ -z "$ca_fp" ]; then
+        echo "FAIL: getcacerts did not list the RA and the CA"
+        cat "$tmp/ra-getca.log"
+        fails=$((fails + 1))
+    else
+        if "$CLI" getcacerts --proto scep --url "$RA_URL" \
+                --ca-fingerprint "$ca_fp" --out-cert "$tmp/ra-pinned.pem" \
+                >"$tmp/ra-pinned.log" 2>&1 &&
+                grep -q "only --ra-fingerprint admits" "$tmp/ra-pinned.log" &&
+                [ "$(grep -c "BEGIN CERTIFICATE" "$tmp/ra-pinned.pem")" = "1" ]; then
+            echo "ok   CA-pinned getcacerts writes only the CA"
+        else
+            echo "FAIL: CA-pinned getcacerts did not write only the CA"
+            cat "$tmp/ra-pinned.log"
+            fails=$((fails + 1))
+        fi
+
+        expect_reject "enroll through the RA with only the CA pinned" \
+            "only --ra-fingerprint admits" \
+            enroll --proto scep --url "$RA_URL" --key-type rsa:2048 \
+            --subject "CN=ra-test" --ca-fingerprint "$ca_fp" $poll \
+            --out-key "$tmp/ra-ca.key" --out-cert "$tmp/ra-ca.crt"
+
+        if "$CLI" enroll --proto scep --url "$RA_URL" --key-type rsa:2048 \
+                --subject "CN=ra-test" --ca-fingerprint "$ca_fp" \
+                --ra-fingerprint "$ra_fp" $poll \
+                --out-key "$tmp/ra-ok.key" --out-cert "$tmp/ra-ok.crt" \
+                >"$tmp/ra-enroll.log" 2>&1 &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/ra-ok.crt"; then
+            echo "ok   enroll through the RA with the CA and RA pinned"
+        else
+            echo "FAIL: enroll with the CA and RA pinned"
+            cat "$tmp/ra-enroll.log"
+            fails=$((fails + 1))
+        fi
+
+        if "$CLI" reenroll --proto scep --url "$RA_URL" $poll \
+                --ca-fingerprint "$ca_fp" --ra-fingerprint "$ra_fp" \
+                --cert "$tmp/ra-ok.crt" --key "$tmp/ra-ok.key" \
+                --out-cert "$tmp/ra-renewed.crt" >"$tmp/ra-reenroll.log" 2>&1 &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/ra-renewed.crt"; then
+            echo "ok   SCEP reenroll through the RA with the CA and RA pinned"
+        else
+            echo "FAIL: SCEP reenroll through the RA"
+            cat "$tmp/ra-reenroll.log"
+            fails=$((fails + 1))
+        fi
+
+        if "$CLI" enroll --proto scep --url "$RA_URL" --key-type rsa:2048 \
+                --subject "CN=ra-test" --ca-fingerprint "$ra_fp" $poll \
+                --out-key "$tmp/ra-ra.key" --out-cert "$tmp/ra-ra.crt" \
+                >"$tmp/ra-ra.log" 2>&1 &&
+                grep -q "ignoring 1 of 2.*--ca-fingerprint does not name" \
+                    "$tmp/ra-ra.log" &&
+                grep -q "BEGIN CERTIFICATE" "$tmp/ra-ra.crt"; then
+            echo "ok   enroll with the RA pinned ignores the CA"
+        else
+            echo "FAIL: enroll with the RA pinned"
+            cat "$tmp/ra-ra.log"
+            fails=$((fails + 1))
+        fi
+
+        if "$CLI" getcacerts --proto scep --url "$RA_URL" \
+                --ca-fingerprint "$ca_fp" --ra-fingerprint "$ra_fp" \
+                --ra-fingerprint "$ra_fp" \
+                --out-cert "$tmp/ra-both.pem" >"$tmp/ra-both.log" 2>&1 &&
+                [ "$(grep -c "BEGIN CERTIFICATE" "$tmp/ra-both.pem")" = "2" ]; then
+            echo "ok   getcacerts with the CA and the RA pinned twice writes both"
+        else
+            echo "FAIL: getcacerts with the CA and RA pinned"
+            cat "$tmp/ra-both.log"
+            fails=$((fails + 1))
+        fi
+
+        if "$CLI" getcert --proto scep --url "$RA_URL" \
+                --ca-fingerprint "$ca_fp" --ra-fingerprint "$ra_fp" \
+                --cert "$tmp/ra-ok.crt" --key "$tmp/ra-ok.key" --serial 01 \
+                --out-cert "$tmp/ra-got.crt" >"$tmp/ra-getcert.log" 2>&1 ||
+                grep -q "no certificate with that serial" \
+                    "$tmp/ra-getcert.log"; then
+            echo "ok   getcert through the RA with the CA and RA pinned"
+        else
+            echo "FAIL: getcert through the RA with the CA and RA pinned"
+            cat "$tmp/ra-getcert.log"
+            fails=$((fails + 1))
+        fi
+
+        if "$CLI" getnextca --proto scep --url "$RA_URL" \
+                --ca-fingerprint "$ca_fp" --out-cert "$tmp/ra-next.pem" \
+                >"$tmp/ra-next.log" 2>&1 &&
+                ! grep -q "ignoring" "$tmp/ra-next.log"; then
+            echo "ok   CA-pinned getnextca leaves the RA out without a note"
+        else
+            echo "FAIL: CA-pinned getnextca against the split RA"
+            cat "$tmp/ra-next.log"
+            fails=$((fails + 1))
+        fi
+
+        expect_reject "enroll with a mismatched --ra-fingerprint" \
+            "matches --ra-fingerprint" \
+            enroll --proto scep --url "$RA_URL" --key-type rsa:2048 \
+            --subject "CN=ra-test" --ca-fingerprint "$ca_fp" \
+            --ra-fingerprint "sha256:$(rep 0 64)" \
+            --out-key "$tmp/ra-bad.key" --out-cert "$tmp/ra-bad.crt"
+
+        expect_reject "--ra-fingerprint on a certificate the pin did not sign" \
+            "was not signed by the pinned CA" \
+            getcacerts --proto scep --url "$RA_URL" \
+            --ca-fingerprint "$ra_fp" --ra-fingerprint "$ca_fp"
+
+        if "$CLI" getcacerts --proto scep --url "$RA_URL" \
+                --ca-fingerprint "$ca_fp" --ra-fingerprint "$ca_fp" \
+                --out-cert "$tmp/ra-same.pem" >"$tmp/ra-same.log" 2>&1 &&
+                [ "$(grep -c "BEGIN CERTIFICATE" "$tmp/ra-same.pem")" = "1" ]; then
+            echo "ok   --ra-fingerprint naming the pinned CA writes only the CA"
+        else
+            echo "FAIL: --ra-fingerprint naming the pinned CA"
+            cat "$tmp/ra-same.log"
+            fails=$((fails + 1))
+        fi
+    fi
+    kill "$ra_pid" 2>/dev/null
+    ra_pid=""
+
+    bundle_fp() {
+        cert_fp "$tmp/bundle-getca.log" "$1"
+    }
+
+    # Each layout's envelope reaches the certificate that decrypts: the RA,
+    # the issuing CA under its root, or the RSA CA past an ECC leaf.
+    for layout in ras chain ecc tie expired; do
+        split=""
+        case "$layout" in
+            ras|tie|expired) split="--scep-split-ra" ;;
+        esac
+        start_scep_server bundle 18091 $split --scep-ca-bundle "$layout"
+        bundle_pid=$started_pid
+        BUNDLE_URL="$url"
+
+        if [ "$ready" -ne 1 ]; then
+            if [ "$layout" = ecc ] &&
+                    grep -q "scep-ca-bundle failed (unsupported)" \
+                        "$tmp/bundle-server.log"; then
+                echo "skip GetCACert ecc bundle (wolfSSL lacks ECC)"
+            else
+                skip_group "GetCACert $layout bundle (no server would start)"
+                cat "$tmp/bundle-server.log"
+            fi
+            continue
+        fi
+
+        if [ "$layout" = ras ]; then
+            if "$CLI" enroll --proto scep --url "$BUNDLE_URL" \
+                    --key-type rsa:2048 --subject "CN=bundle-open" \
+                    --out-key "$tmp/bundle-open.key" \
+                    --out-cert "$tmp/bundle-open.crt" \
+                    >"$tmp/bundle-open.log" 2>&1; then
+                echo "ok   unpinned enroll envelopes to the keyEncipherment RA"
+            else
+                echo "FAIL: unpinned enroll missed the keyEncipherment RA"
+                cat "$tmp/bundle-open.log"
+                fails=$((fails + 1))
+            fi
+
+            if [ -n "$(bundle_fp 3)" ] && "$CLI" enroll --proto scep \
+                    --url "$BUNDLE_URL" --key-type rsa:2048 \
+                    --subject "CN=bundle-pinned" \
+                    --ca-fingerprint "$(bundle_fp 3)" \
+                    --ra-fingerprint "$(bundle_fp 0)" \
+                    --ra-fingerprint "$(bundle_fp 1)" \
+                    --ra-fingerprint "$(bundle_fp 2)" \
+                    --out-key "$tmp/bundle-pinned.key" \
+                    --out-cert "$tmp/bundle-pinned.crt" \
+                    >"$tmp/bundle-pinned.log" 2>&1; then
+                echo "ok   enroll with every RA pinned envelopes to the" \
+                     "keyEncipherment RA"
+            else
+                echo "FAIL: enroll with every RA pinned"
+                cat "$tmp/bundle-getca.log" "$tmp/bundle-pinned.log"
+                fails=$((fails + 1))
+            fi
+
+            expect_reject "enroll with only the signing-only RA pinned" \
+                "no certificate --ra-fingerprint names can receive" \
+                enroll --proto scep --url "$BUNDLE_URL" --key-type rsa:2048 \
+                --subject "CN=bundle-signer" \
+                --ca-fingerprint "$(bundle_fp 3)" \
+                --ra-fingerprint "$(bundle_fp 1)" \
+                --out-key "$tmp/bundle-signer.key" \
+                --out-cert "$tmp/bundle-signer.crt"
+        elif [ "$layout" = tie ]; then
+            expect_reject "unpinned enroll with two keyEncipherment RAs" \
+                "more than one served certificate could receive the request" \
+                enroll --proto scep --url "$BUNDLE_URL" --key-type rsa:2048 \
+                --subject "CN=bundle-tie" --out-key "$tmp/bundle-tie.key" \
+                --out-cert "$tmp/bundle-tie.crt"
+
+            if [ -n "$(bundle_fp 2)" ] && "$CLI" enroll --proto scep \
+                    --url "$BUNDLE_URL" --key-type rsa:2048 \
+                    --subject "CN=bundle-tie-pinned" \
+                    --ca-fingerprint "$(bundle_fp 2)" \
+                    --ra-fingerprint "$(bundle_fp 1)" \
+                    --out-key "$tmp/bundle-tie-pinned.key" \
+                    --out-cert "$tmp/bundle-tie-pinned.crt" \
+                    >"$tmp/bundle-tie-pinned.log" 2>&1; then
+                echo "ok   --ra-fingerprint settles a keyEncipherment tie"
+            else
+                echo "FAIL: enroll with one of two tied RAs pinned"
+                cat "$tmp/bundle-getca.log" "$tmp/bundle-tie-pinned.log"
+                fails=$((fails + 1))
+            fi
+        elif [ "$layout" = expired ]; then
+            expect_reject "--ra-fingerprint on an expired RA" \
+                "was not signed by the pinned CA or is not valid now" \
+                enroll --proto scep --url "$BUNDLE_URL" --key-type rsa:2048 \
+                --subject "CN=bundle-expired" \
+                --ca-fingerprint "$(bundle_fp 1)" \
+                --ra-fingerprint "$(bundle_fp 0)" \
+                --out-key "$tmp/bundle-expired.key" \
+                --out-cert "$tmp/bundle-expired.crt"
+        elif [ "$layout" = ecc ]; then
+            if "$CLI" enroll --proto scep --url "$BUNDLE_URL" \
+                    --key-type rsa:2048 --subject "CN=bundle-ecc" \
+                    --out-key "$tmp/bundle-ecc.key" \
+                    --out-cert "$tmp/bundle-ecc.crt" \
+                    >"$tmp/bundle-ecc.log" 2>&1; then
+                echo "ok   unpinned enroll skips an ECC leaf for the RSA CA"
+            else
+                echo "FAIL: unpinned enroll chose the ECC leaf"
+                cat "$tmp/bundle-ecc.log"
+                fails=$((fails + 1))
+            fi
+        else
+            if "$CLI" enroll --proto scep --url "$BUNDLE_URL" \
+                    --key-type rsa:2048 --subject "CN=bundle-chain" \
+                    --out-key "$tmp/bundle-chain.key" \
+                    --out-cert "$tmp/bundle-chain.crt" \
+                    >"$tmp/bundle-chain.log" 2>&1; then
+                echo "ok   unpinned enroll envelopes to the issuing CA, not" \
+                     "its root"
+            else
+                echo "FAIL: unpinned enroll chose the root"
+                cat "$tmp/bundle-chain.log"
+                fails=$((fails + 1))
+            fi
+
+            if [ -n "$(bundle_fp 1)" ] && "$CLI" getcacerts --proto scep \
+                    --url "$BUNDLE_URL" --ca-fingerprint "$(bundle_fp 1)" \
+                    --out-cert "$tmp/bundle-ca.pem" \
+                    >"$tmp/bundle-ca.log" 2>&1 &&
+                    grep -q "which --ca-fingerprint does not name" \
+                        "$tmp/bundle-ca.log"; then
+                echo "ok   a CA pin ignores a served root without naming" \
+                     "--ra-fingerprint"
+            else
+                echo "FAIL: a CA pin with a served root"
+                cat "$tmp/bundle-getca.log" "$tmp/bundle-ca.log"
+                fails=$((fails + 1))
+            fi
+        fi
+        kill "$bundle_pid" 2>/dev/null
+        wait "$bundle_pid" 2>/dev/null
+        bundle_pid=""
+    done
+
+    # A non-200 GetCACaps warns and carries on; a dropped one stops enroll and
+    # getcert with exit 2. AES is forced; NO_DES3 builds lack the 3DES default.
+    for caps in 404 close; do
+        start_scep_server caps 18086 --scep-enable-get-cert \
+            --scep-caps-status "$caps"
+        caps_pid=$started_pid
+        CAPS_URL="$url"
+
+        if [ "$ready" -ne 1 ]; then
+            skip_group "GetCACaps $caps (no test server would start)"
+            cat "$tmp/caps-server.log"
+            continue
+        fi
+
+        "$CLI" enroll --proto scep --url "$CAPS_URL" --key-type rsa:2048 \
+            --content-cipher aes128 \
+            --subject "CN=caps-test" --out-key "$tmp/caps-$caps.key" \
+            --out-cert "$tmp/caps-$caps.crt" >"$tmp/caps-enroll.log" 2>&1
+        rc=$?
+        if [ "$caps" = 404 ]; then
+            if [ "$rc" -eq 0 ] &&
+                    grep -q "enroll: GetCACaps failed, assuming" \
+                        "$tmp/caps-enroll.log"; then
+                echo "ok   enroll warns and carries on after a GetCACaps 404"
+            else
+                echo "FAIL: enroll after a GetCACaps 404 (exit $rc)"
+                cat "$tmp/caps-enroll.log"
+                fails=$((fails + 1))
+            fi
+        elif [ "$rc" -eq 2 ] &&
+                grep -q "enroll: GetCACaps: " "$tmp/caps-enroll.log"; then
+            echo "ok   enroll stops on a dropped GetCACaps"
+        else
+            echo "FAIL: enroll on a dropped GetCACaps (exit $rc)"
+            cat "$tmp/caps-enroll.log"
+            fails=$((fails + 1))
+        fi
+
+        if [ ! -s "$tmp/caps-404.crt" ]; then
+            skip_group "getcert GetCACaps $caps (no enrolled signer)"
+        else
+            "$CLI" getcert --proto scep --url "$CAPS_URL" \
+                --content-cipher aes128 \
+                --cert "$tmp/caps-404.crt" --key "$tmp/caps-404.key" \
+                --serial 01 --out-cert "$tmp/caps-got.crt" \
+                >"$tmp/caps-getcert.log" 2>&1
+            rc=$?
+            if [ "$caps" = 404 ]; then
+                if grep -q "getcert: GetCACaps failed, assuming" \
+                        "$tmp/caps-getcert.log" &&
+                        grep -q "no certificate with that serial" \
+                        "$tmp/caps-getcert.log"; then
+                    echo "ok   getcert reaches GetCert after a GetCACaps 404"
+                else
+                    echo "FAIL: getcert after a GetCACaps 404 (exit $rc)"
+                    cat "$tmp/caps-getcert.log"
+                    fails=$((fails + 1))
+                fi
+
+                awk '/^-----BEGIN/ { f = 1; next } /^-----END/ { exit } f' \
+                    "$tmp/caps-404.crt" | base64 --decode >"$tmp/caps-404.der"
+                printf '\n' >>"$tmp/caps-404.der"
+                if "$CLI" getcert --proto scep --url "$CAPS_URL" \
+                        --content-cipher aes128 \
+                        --cert "$tmp/caps-404.der" --key "$tmp/caps-404.key" \
+                        --serial 01 --out-cert "$tmp/caps-got-der.crt" \
+                        >"$tmp/caps-getcert-der.log" 2>&1 ||
+                        grep -q "no certificate with that serial" \
+                            "$tmp/caps-getcert-der.log"; then
+                    echo "ok   getcert takes a DER --cert with a trailing newline"
+                else
+                    echo "FAIL: getcert with a DER --cert"
+                    cat "$tmp/caps-getcert-der.log"
+                    fails=$((fails + 1))
+                fi
+
+                { printf ' 0 s:CN=caps\n'; cat "$tmp/caps-404.crt"; } \
+                    >"$tmp/caps-404-pre.crt"
+                if "$CLI" getcert --proto scep --url "$CAPS_URL" \
+                        --content-cipher aes128 \
+                        --cert "$tmp/caps-404-pre.crt" \
+                        --key "$tmp/caps-404.key" \
+                        --serial 01 --out-cert "$tmp/caps-got-pre.crt" \
+                        >"$tmp/caps-getcert-pre.log" 2>&1 ||
+                        grep -q "no certificate with that serial" \
+                            "$tmp/caps-getcert-pre.log"; then
+                    echo "ok   getcert takes a PEM --cert behind a '0' preamble"
+                else
+                    echo "FAIL: getcert with a PEM --cert behind a preamble"
+                    cat "$tmp/caps-getcert-pre.log"
+                    fails=$((fails + 1))
+                fi
+            elif [ "$rc" -eq 2 ] &&
+                    grep -q "getcert: GetCACaps: " "$tmp/caps-getcert.log"; then
+                echo "ok   getcert stops on a dropped GetCACaps"
+            else
+                echo "FAIL: getcert on a dropped GetCACaps (exit $rc)"
+                cat "$tmp/caps-getcert.log"
+                fails=$((fails + 1))
+            fi
+        fi
+
+        if [ "$caps" = 404 ] && [ -s "$tmp/caps-404.crt" ]; then
+            if "$CLI" reenroll --proto scep --url "$CAPS_URL" \
+                    --content-cipher aes128 \
+                    --cert "$tmp/caps-404.crt" --key "$tmp/caps-404.key" \
+                    --out-cert "$tmp/caps-renewed.crt" \
+                    >"$tmp/caps-reenroll.log" 2>&1 &&
+                    grep -q "does not advertise Renewal, sending a PKCSReq" \
+                        "$tmp/caps-reenroll.log" &&
+                    grep -q "BEGIN CERTIFICATE" "$tmp/caps-renewed.crt"; then
+                echo "ok   reenroll sends a PKCSReq after a GetCACaps 404"
+            else
+                echo "FAIL: reenroll after a GetCACaps 404"
+                cat "$tmp/caps-reenroll.log"
+                fails=$((fails + 1))
+            fi
+        fi
+        kill "$caps_pid" 2>/dev/null
+        wait "$caps_pid" 2>/dev/null
+        caps_pid=""
+    done
 
     # A hostname --listen is refused, and the reason reaches stderr.
     "$SERVER" --proto scep --listen localhost:18090 >"$tmp/listen.log" 2>&1 &
@@ -407,7 +962,7 @@ else
     done
 
     if [ "$listening" -ne 1 ]; then
-        echo "skip server argv scrubbing (no test server would start)"
+        skip_group "server argv scrubbing (no test server would start)"
         cat "$tmp/argv.log"
     else
         args="$(ps -ww -o args= -p "$argv_pid")"

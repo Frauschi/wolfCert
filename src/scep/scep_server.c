@@ -24,11 +24,13 @@
 
 #include <wolfcert/server.h>
 #include <wolfcert/errors.h>
+#include <wolfcert/csr.h>
 #include "../internal.h"
 
 #include <wolfssl/wolfcrypt/asn.h>
 #include <wolfssl/wolfcrypt/pkcs7.h>
 #include <wolfssl/wolfcrypt/random.h>
+#include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/memory.h>
 
 #include <arpa/inet.h>
@@ -86,6 +88,9 @@ typedef struct {
     /* Rolled-over CA for GetNextCACert; never the active issuing CA. */
     WolfCertCa   next_ca;
     int          next_ca_ready;
+    /* Split CA/RA identity and the GetCACert bundle naming it and the CA. */
+    WolfCertCa   ra;
+    WolfCertBuffer ca_ra_bundle;
 #if defined(WOLFCERT_BUILD_TESTING)
     /* Fault injection for the client tests. */
     int          fault_omit_recipient_nonce;
@@ -94,6 +99,7 @@ typedef struct {
     int          fault_getcert_wrong_cert;
     int          fault_getcert_no_signer;
     int          fault_oom;
+    int          fault_caps_status;
     WolfCertCa   wrong_ca;
     int          wrong_ca_ready;
 #endif
@@ -124,6 +130,12 @@ WOLFCERT_TEST_VIS void wolfcert_scep_server_set_oom_fault(WolfCertServer* s,
                                                           int when)
 {
     ((ScepPriv*)s->priv)->fault_oom = when;
+}
+
+WOLFCERT_TEST_VIS void wolfcert_scep_server_set_caps_fault(WolfCertServer* s,
+                                                           int status)
+{
+    ((ScepPriv*)s->priv)->fault_caps_status = status;
 }
 #endif
 
@@ -305,6 +317,18 @@ static void send_bin(WolfCertServer* s, int fd, const char* content_type,
 
 static void handle_get_ca_caps(WolfCertServer* s, int fd)
 {
+#if defined(WOLFCERT_BUILD_TESTING)
+    int fault = ((ScepPriv*)s->priv)->fault_caps_status;
+
+    if (fault < 0) {
+        s->keep_alive = 0;
+        return;
+    }
+    if (fault != 0) {
+        send_text(s, fd, fault, "Error", "text/plain", "");
+        return;
+    }
+#endif
     if (s->cfg.scep_enable_next_ca) {
         send_text(s, fd, 200, "OK", "text/plain",
                   "POSTPKIOperation\r\nSHA-256\r\n" SCEP_SRV_CIPHER_CAP
@@ -319,7 +343,30 @@ static void handle_get_ca_caps(WolfCertServer* s, int fd)
 
 static void handle_get_ca_cert(WolfCertServer* s, int fd)
 {
-    send_bin(s, fd, "application/x-x509-ca-cert", s->ca.cert_der, s->ca.cert_der_len);
+    ScepPriv* p = (ScepPriv*)s->priv;
+
+    if (p->ca_ra_bundle.data != NULL) {
+        send_bin(s, fd, "application/x-x509-ca-ra-cert", p->ca_ra_bundle.data,
+                 p->ca_ra_bundle.len);
+    }
+    else {
+        send_bin(s, fd, "application/x-x509-ca-cert", s->ca.cert_der,
+                 s->ca.cert_der_len);
+    }
+}
+
+/* The certificate and key that decrypt requests and sign CertReps. */
+static void rep_identity(const WolfCertServer* s, const uint8_t** cert,
+                         size_t* cert_len, const uint8_t** key, size_t* key_len)
+{
+    const ScepPriv* p = (const ScepPriv*)s->priv;
+
+    const WolfCertCa* id = p->ra.cert_der != NULL ? &p->ra : &s->ca;
+
+    *cert     = id->cert_der;
+    *cert_len = id->cert_der_len;
+    *key      = id->key_der;
+    *key_len  = id->key_der_len;
 }
 
 /* RFC 8894 section 4.7.1: the current CA signs the next CA certificate. */
@@ -601,10 +648,12 @@ static int send_cert_rep(WolfCertServer* s, int fd,
 #endif
 
     /* A test fault can swap in a throwaway signer. */
-    const uint8_t* sign_cert     = s->ca.cert_der;
-    size_t         sign_cert_len = s->ca.cert_der_len;
-    const uint8_t* sign_key      = s->ca.key_der;
-    size_t         sign_key_len  = s->ca.key_der_len;
+    const uint8_t* sign_cert;
+    size_t         sign_cert_len;
+    const uint8_t* sign_key;
+    size_t         sign_key_len;
+
+    rep_identity(s, &sign_cert, &sign_cert_len, &sign_key, &sign_key_len);
 #if defined(WOLFCERT_BUILD_TESTING)
     if (p->fault_sign_with_wrong_key) {
         if (!p->wrong_ca_ready) {
@@ -879,17 +928,65 @@ static int handle_enroll(WolfCertServer* s, int fd, const char* mt,
                            tid, tid_len, snonce, snonce_len, NULL);
 }
 
+/* 1 when `name` holds the contents of the CSR's subject Name, 0 when not, or
+ * WOLFCERT_ERR_MEMORY. */
+static int csr_subject_is(const uint8_t* csr_der, size_t csr_len,
+                          const uint8_t* name, size_t name_len, void* heap)
+{
+    DecodedCert dc;
+    int match = 0;
+    int wrc;
+
+    wc_InitDecodedCert(&dc, (byte*)csr_der, (word32)csr_len, heap);
+    wrc = wc_ParseCert(&dc, CERTREQ_TYPE, NO_VERIFY, NULL);
+    if (wrc == MEMORY_E) {
+        match = WOLFCERT_ERR_MEMORY;
+    }
+    else if (wrc == 0) {
+        match = dc.subjectRaw != NULL &&
+                (size_t)dc.subjectRawLen == name_len &&
+                memcmp(dc.subjectRaw, name, name_len) == 0;
+    }
+    wc_FreeDecodedCert(&dc);
+
+    return match;
+}
+
 /* GetCertInitial (20): the first accepted poll issues the cert; any other
  * poll fails and leaves the queue unchanged. */
 static int handle_get_cert_initial(WolfCertServer* s, int fd,
+                                   const WolfCertBuffer* ias,
                                    const uint8_t* signer_cert,
                                    size_t signer_cert_len,
                                    const uint8_t* tid, size_t tid_len,
                                    const uint8_t* snonce, size_t snonce_len)
 {
     ScepPriv* p = (ScepPriv*)s->priv;
+    const uint8_t* issuer = NULL;
+    size_t issuer_len = 0;
+    const uint8_t* subject = NULL;
+    size_t subject_len = 0;
     ScepPending* e = pending_find(p, tid, tid_len);
-    if (e == NULL) {
+    int named = 0;
+
+    if (e != NULL &&
+            wolfcert_scep_parse_issuer_and_subject(ias->data, ias->len,
+                &issuer, &issuer_len, &subject, &subject_len) == WOLFCERT_OK) {
+        named = wolfcert_scep_issuer_name_matches(s->ca.cert_der,
+                    s->ca.cert_der_len, issuer, issuer_len, s->heap);
+        if (named == 1)
+            named = csr_subject_is(e->csr_der, e->csr_len, subject,
+                                   subject_len, s->heap);
+    }
+#if defined(WOLFCERT_BUILD_TESTING)
+    if (named == 1 && p->fault_oom == 4)
+        named = WOLFCERT_ERR_MEMORY;
+#endif
+    if (named == WOLFCERT_ERR_MEMORY) {
+        send_text(s, fd, 500, "Server Error", "text/plain", "");
+        return named;
+    }
+    if (named != 1) {
         return send_pki_failure(s, fd, tid, tid_len, snonce, snonce_len,
                                 "4" /* badCertId */);
     }
@@ -938,6 +1035,7 @@ static int handle_get_cert(WolfCertServer* s, int fd, const WolfCertBuffer* ias,
     const uint8_t* serial = NULL;
     size_t serial_len = 0;
     const ScepIssued* hit = NULL;
+    int named = 0;
 
     /* No CA-cert fallback as in handle_enroll: the requester could not decrypt
      * a reply enveloped to the CA's own key. */
@@ -949,9 +1047,18 @@ static int handle_get_cert(WolfCertServer* s, int fd, const WolfCertBuffer* ias,
 
     if (wolfcert_scep_parse_issuer_and_serial(ias->data, ias->len,
                                               &issuer, &issuer_len,
-                                              &serial, &serial_len) == WOLFCERT_OK &&
-            wolfcert_scep_issuer_name_matches(s->ca.cert_der, s->ca.cert_der_len,
-                                              issuer, issuer_len, s->heap))
+                                              &serial, &serial_len) == WOLFCERT_OK)
+        named = wolfcert_scep_issuer_name_matches(s->ca.cert_der,
+                    s->ca.cert_der_len, issuer, issuer_len, s->heap);
+#if defined(WOLFCERT_BUILD_TESTING)
+    if (named == 1 && p->fault_oom == 4)
+        named = WOLFCERT_ERR_MEMORY;
+#endif
+    if (named == WOLFCERT_ERR_MEMORY) {
+        send_text(s, fd, 500, "Server Error", "text/plain", "");
+        return named;
+    }
+    if (named == 1)
         hit = issued_find(p, s->heap, serial, serial_len);
 
     if (hit == NULL) {
@@ -1014,9 +1121,15 @@ static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
         goto out;
     }
 
-    rc = wolfcert_scep_deenvelop(s->ca.cert_der, s->ca.cert_der_len,
-                                  s->ca.key_der,  s->ca.key_der_len,
-                                  env.data, env.len, &csr, s->heap);
+    const uint8_t* rcpt_cert;
+    size_t         rcpt_cert_len;
+    const uint8_t* rcpt_key;
+    size_t         rcpt_key_len;
+
+    rep_identity(s, &rcpt_cert, &rcpt_cert_len, &rcpt_key, &rcpt_key_len);
+    rc = wolfcert_scep_deenvelop(rcpt_cert, rcpt_cert_len, rcpt_key,
+                                 rcpt_key_len, env.data, env.len, &csr,
+                                 s->heap);
     if (rc != WOLFCERT_OK) {
         const char* fail_info = rc == WOLFCERT_ERR_UNSUPPORTED
                                     ? "0" /* badAlg */
@@ -1036,8 +1149,9 @@ static int handle_pki_op(WolfCertServer* s, int fd, const ScepRequest* req)
                            tid, tid_len, snonce, snonce_len);
     }
     else if (strcmp(mt, "20") == 0) {
-        rc = handle_get_cert_initial(s, fd, signer_cert, signer_cert_len,
-                                     tid, tid_len, snonce, snonce_len);
+        rc = handle_get_cert_initial(s, fd, &csr, signer_cert,
+                                     signer_cert_len, tid, tid_len,
+                                     snonce, snonce_len);
     }
     else if (strcmp(mt, "21") == 0 && s->cfg.scep_enable_get_cert) {
         const uint8_t* gc_signer     = signer_cert;
@@ -1200,17 +1314,277 @@ static int handle_request(WolfCertServer* s, int fd)
     return rc;
 }
 
+/* Issue the RA identity from the CA and bundle it ahead of the CA. */
+static int make_split_ra(WolfCertServer* s, ScepPriv* p)
+{
+    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE,
+                            .heap = s->heap };
+    WolfCertCertMeta meta = { .subject_dn = "CN=wolfCert Test RA,O=wolfCert" };
+    WolfCertKey* key = NULL;
+    WolfCertBuffer csr = { 0 };
+    WolfCertBuffer kder = { 0 };
+    const uint8_t* certs[2];
+    size_t lens[2];
+    int rc;
+
+    rc = wolfcert_key_generate(&kcfg, &key);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_csr_build(key, &meta, &csr);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_key_to_der(key, &kder);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_ca_issue(&s->ca, csr.data, csr.len, &p->ra.cert_der,
+                               &p->ra.cert_der_len);
+    if (rc == WOLFCERT_OK) {
+        p->ra.type        = WOLFCERT_KEY_RSA;
+        p->ra.heap        = s->heap;
+        p->ra.impl        = key->impl;
+        key->impl         = NULL;
+        p->ra.key_der     = kder.data;
+        p->ra.key_der_len = kder.len;
+        kder.data         = NULL;
+        certs[0] = p->ra.cert_der;
+        lens[0]  = p->ra.cert_der_len;
+        certs[1] = s->ca.cert_der;
+        lens[1]  = s->ca.cert_der_len;
+        rc = wolfcert_pkcs7_build_certs_only(certs, lens, 2, &p->ca_ra_bundle,
+                                             s->heap);
+    }
+
+    wolfcert_buffer_free_secure(&kder);
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(key);
+    return rc;
+}
+
+static void free_split_ra(ScepPriv* p)
+{
+    wolfcert_ca_free(&p->ra);
+    wolfcert_buffer_free(&p->ca_ra_bundle);
+}
+
+#if defined(WOLFCERT_BUILD_TESTING)
+#define BUNDLE_CERT_CAP 4096
+#define BUNDLE_CA       1
+#define BUNDLE_EXPIRED  2
+
+/* A certificate for `pub` under subject cn, or the CA's subject when cn is
+ * NULL, signed by signer for issuer (self-signed if NULL), else by the CA. */
+static int bundle_cert(WolfCertServer* s, int key_type, void* pub,
+                       const char* cn, const char* ku, int flags,
+                       RsaKey* signer, const uint8_t* issuer,
+                       size_t issuer_len, uint8_t** der, size_t* len)
+{
+    static const byte not_before[] = { ASN_UTC_TIME, 13, '0', '0', '0', '1',
+                                       '0', '1', '0', '0', '0', '0', '0', '0',
+                                       'Z' };
+    static const byte not_after[]  = { ASN_UTC_TIME, 13, '0', '1', '0', '1',
+                                       '0', '1', '0', '0', '0', '0', '0', '0',
+                                       'Z' };
+    Cert* c = wc_CertNew(s->heap);
+    WC_RNG rng;
+    int rng_ok = 0;
+    int sz = 0;
+    int rc = WOLFCERT_OK;
+
+    *der = NULL;
+    if (c == NULL)
+        return WOLFCERT_ERR_MEMORY;
+
+    if (signer == NULL) {
+        signer     = (RsaKey*)s->ca.impl;
+        issuer     = s->ca.cert_der;
+        issuer_len = s->ca.cert_der_len;
+    }
+    if (wc_InitCert_ex(c, s->heap, WOLFCERT_DEVID_SOFTWARE) != 0)
+        rc = WOLFCERT_ERR_CRYPTO;
+    if (rc == WOLFCERT_OK) {
+        c->sigType    = CTC_SHA256wRSA;
+        c->daysValid  = 30;
+        c->isCA       = (flags & BUNDLE_CA) != 0;
+        c->selfSigned = issuer == NULL;
+        if ((flags & BUNDLE_EXPIRED) != 0) {
+            memcpy(c->beforeDate, not_before, sizeof(not_before));
+            memcpy(c->afterDate, not_after, sizeof(not_after));
+            c->beforeDateSz = (int)sizeof(not_before);
+            c->afterDateSz  = (int)sizeof(not_after);
+        }
+        if (cn != NULL)
+            strncpy(c->subject.commonName, cn, CTC_NAME_SIZE - 1);
+        else if (wc_SetSubjectBuffer(c, s->ca.cert_der,
+                                     (int)s->ca.cert_der_len) != 0)
+            rc = WOLFCERT_ERR_CRYPTO;
+    }
+    if (rc == WOLFCERT_OK && issuer != NULL &&
+            wc_SetIssuerBuffer(c, issuer, (int)issuer_len) != 0)
+        rc = WOLFCERT_ERR_CRYPTO;
+    if (rc == WOLFCERT_OK && ku != NULL && wc_SetKeyUsage(c, ku) != 0)
+        rc = WOLFCERT_ERR_CRYPTO;
+    if (rc == WOLFCERT_OK) {
+        *der = (uint8_t*)WOLFCERT_XMALLOC(BUNDLE_CERT_CAP, s->heap);
+        if (*der == NULL)
+            rc = WOLFCERT_ERR_MEMORY;
+    }
+    if (rc == WOLFCERT_OK) {
+        if (wc_InitRng_ex(&rng, s->heap, WOLFCERT_DEVID_SOFTWARE) != 0)
+            rc = WOLFCERT_ERR_CRYPTO;
+        else
+            rng_ok = 1;
+    }
+    if (rc == WOLFCERT_OK) {
+        sz = wc_MakeCert_ex(c, *der, BUNDLE_CERT_CAP, key_type, pub, &rng);
+        if (sz > 0)
+            sz = wc_SignCert(c->bodySz, c->sigType, *der, BUNDLE_CERT_CAP,
+                             signer, NULL, &rng);
+        if (sz <= 0)
+            rc = WOLFCERT_ERR_CRYPTO;
+    }
+
+    if (rng_ok)
+        wc_FreeRng(&rng);
+    wc_CertFree(c);
+    if (rc == WOLFCERT_OK) {
+        *len = (size_t)sz;
+    }
+    else {
+        WOLFCERT_XFREE(*der, s->heap);
+        *der = NULL;
+    }
+    return rc;
+}
+
+/* A root with its own key and keyEncipherment, and the CA reissued under it. */
+static int bundle_root(WolfCertServer* s, uint8_t** root, size_t* root_len)
+{
+    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE,
+                            .heap = s->heap };
+    WolfCertKey* key = NULL;
+    uint8_t* ca = NULL;
+    size_t ca_len = 0;
+    int rc;
+
+    rc = wolfcert_key_generate(&kcfg, &key);
+    if (rc == WOLFCERT_OK)
+        rc = bundle_cert(s, RSA_TYPE, key->impl, "wolfCert Test Root",
+                         "keyCertSign,cRLSign,keyEncipherment", BUNDLE_CA,
+                         key->impl, NULL, 0, root, root_len);
+    if (rc == WOLFCERT_OK)
+        rc = bundle_cert(s, RSA_TYPE, s->ca.impl, NULL,
+                         "keyCertSign,cRLSign,digitalSignature,"
+                         "keyEncipherment", BUNDLE_CA, key->impl, *root,
+                         *root_len, &ca, &ca_len);
+    if (rc == WOLFCERT_OK) {
+        WOLFCERT_XFREE(s->ca.cert_der, s->ca.heap);
+        s->ca.cert_der     = ca;
+        s->ca.cert_der_len = ca_len;
+    }
+
+    wolfcert_key_free(key);
+    return rc;
+}
+
+WOLFCERT_TEST_VIS int wolfcert_scep_server_set_bundle_fault(WolfCertServer* s,
+                                                            int mode)
+{
+    ScepPriv* p = (ScepPriv*)s->priv;
+    RsaKey* ca_key = (RsaKey*)s->ca.impl;
+    WolfCertKeyCfg ecc = { .type = WOLFCERT_KEY_ECC, .param = 256,
+                           .dev_id = WOLFCERT_DEVID_SOFTWARE,
+                           .heap = s->heap };
+    WolfCertKey* ecc_key = NULL;
+    uint8_t* der[4] = { NULL, NULL, NULL, NULL };
+    size_t len[4] = { 0, 0, 0, 0 };
+    const uint8_t* certs[5];
+    size_t lens[5];
+    size_t n = 0;
+    size_t i;
+    WolfCertBuffer bundle = { 0 };
+    int rc = WOLFCERT_OK;
+
+    if (mode < 1 || mode > 5 || s->ca.type != WOLFCERT_KEY_RSA ||
+            (mode == 2 || mode >= 4) != (p->ra.cert_der != NULL))
+        return WOLFCERT_ERR_BAD_ARG;
+
+    if (mode == 2) {
+        rc = bundle_cert(s, RSA_TYPE, ca_key, "wolfCert Test Decoy", NULL, 0,
+                         NULL, NULL, 0, &der[0], &len[0]);
+        if (rc == WOLFCERT_OK)
+            rc = bundle_cert(s, RSA_TYPE, ca_key, "wolfCert Test RA Signer",
+                             "digitalSignature", 0, NULL, NULL, 0,
+                             &der[1], &len[1]);
+        if (rc == WOLFCERT_OK)
+            rc = bundle_cert(s, RSA_TYPE, p->ra.impl, "wolfCert Test RA",
+                             "digitalSignature,keyEncipherment", 0, NULL,
+                             NULL, 0, &der[2], &len[2]);
+    }
+    if (mode == 4) {
+        rc = bundle_cert(s, RSA_TYPE, ca_key, "wolfCert Test RA Twin",
+                         "keyEncipherment", 0, NULL, NULL, 0, &der[0], &len[0]);
+        if (rc == WOLFCERT_OK)
+            rc = bundle_cert(s, RSA_TYPE, p->ra.impl, "wolfCert Test RA",
+                             "keyEncipherment", 0, NULL, NULL, 0,
+                             &der[2], &len[2]);
+    }
+    if (mode == 5)
+        rc = bundle_cert(s, RSA_TYPE, p->ra.impl, "wolfCert Test RA",
+                         "digitalSignature,keyEncipherment", BUNDLE_EXPIRED,
+                         NULL, NULL, 0, &der[2], &len[2]);
+    if (rc == WOLFCERT_OK && mode == 1)
+        rc = bundle_root(s, &der[3], &len[3]);
+    if (rc == WOLFCERT_OK && mode == 3) {
+        rc = wolfcert_key_generate(&ecc, &ecc_key);
+        if (rc == WOLFCERT_OK)
+            rc = bundle_cert(s, ECC_TYPE, ecc_key->impl,
+                             "wolfCert Test ECC Leaf", NULL, 0, NULL, NULL, 0,
+                             &der[0], &len[0]);
+    }
+
+    if (rc == WOLFCERT_OK) {
+        for (i = 0; i < 4; i++) {
+            if (der[i] != NULL) {
+                certs[n] = der[i];
+                lens[n++] = len[i];
+            }
+        }
+        certs[n] = s->ca.cert_der;
+        lens[n++] = s->ca.cert_der_len;
+        rc = wolfcert_pkcs7_build_certs_only(certs, lens, n, &bundle, s->heap);
+    }
+    if (rc == WOLFCERT_OK) {
+        wolfcert_buffer_free(&p->ca_ra_bundle);
+        p->ca_ra_bundle = bundle;
+        if (der[2] != NULL) {
+            WOLFCERT_XFREE(p->ra.cert_der, p->ra.heap);
+            p->ra.cert_der     = der[2];
+            p->ra.cert_der_len = len[2];
+            der[2] = NULL;
+        }
+    }
+
+    for (i = 0; i < 4; i++)
+        WOLFCERT_XFREE(der[i], s->heap);
+    wolfcert_key_free(ecc_key);
+    return rc;
+}
+#endif
+
 static int scep_start(const WolfCertServerCfgSrv* cfg, WolfCertServer* base)
 {
-    (void)cfg;
     ScepPriv* p = (ScepPriv*)WOLFCERT_XMALLOC(sizeof(*p), base->heap);
+    int rc = WOLFCERT_OK;
+
     if (p == NULL)
         return WOLFCERT_ERR_MEMORY;
 
     memset(p, 0, sizeof(*p));
     base->priv = p;
 
-    return WOLFCERT_OK;
+    if (cfg->scep_split_ra)
+        rc = make_split_ra(base, p);
+
+    return rc;
 }
 
 static int scep_serve_fd(WolfCertServer* srv, int fd)
@@ -1236,6 +1610,7 @@ static void scep_free_priv(WolfCertServer* srv)
         WOLFCERT_XFREE(p->issued[i].cert_der, srv->heap);
 
     WOLFCERT_XFREE(p->issued, srv->heap);
+    free_split_ra(p);
     if (p->next_ca_ready)
         wolfcert_ca_free(&p->next_ca);
 #if defined(WOLFCERT_BUILD_TESTING)

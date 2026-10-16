@@ -28,6 +28,7 @@
 #include <wolfcert/types.h>
 #include <wolfcert/keygen.h>
 #include <wolfcert/server.h>
+#include <wolfcert/scep.h>
 #include <wolfcert/memory.h>
 #include <wolfcert/log.h>
 #include <wolfcert/status.h>
@@ -202,9 +203,19 @@ WOLFCERT_TEST_VIS void wolfcert_scep_server_set_faults(WolfCertServer* s,
     int omit_recipient_nonce, int sign_with_wrong_key, int rng_fail);
 
 /* Out of memory: 1 fails wolfcert_ca_issue, 2 the reply after issuing, 3 the
- * signer key check of a PKCSReq or GetCertInitial; 0 clears it. */
+ * PKCSReq/GetCertInitial signer key, 4 GetCertInitial and GetCert names; 0
+ * clears it. */
 WOLFCERT_TEST_VIS void wolfcert_scep_server_set_oom_fault(WolfCertServer* s,
                                                           int when);
+
+/* GetCACaps: answer with this HTTP status and no body, or close on -1. */
+WOLFCERT_TEST_VIS void wolfcert_scep_server_set_caps_fault(WolfCertServer* s,
+                                                           int status);
+
+/* RSA CA only. GetCACert: 1 adds a root over the CA, 3 an ECC leaf. With the
+ * split RA reissued, 2 adds decoys, 4 a keyEncipherment twin, 5 expires it. */
+WOLFCERT_TEST_VIS int wolfcert_scep_server_set_bundle_fault(WolfCertServer* s,
+                                                            int mode);
 #endif
 
 int  wolfcert_map_wc_err(int wc_rc);
@@ -323,14 +334,6 @@ int wolfcert_csr_meta_sets_identity(const WolfCertCertMeta* meta);
 WOLFCERT_TEST_VIS int wolfcert_find_san(const DecodedCert* dc,
                                         const byte** san, word32* san_len);
 
-/* wolfcert_csr_build() for a renewal: with renew_cert (PEM or DER) set, the
- * CSR carries that certificate's Subject and SAN, and meta may not set them. */
-WOLFCERT_TEST_VIS int wolfcert_csr_build_ex(const WolfCertKey* key,
-                                            const WolfCertCertMeta* meta,
-                                            const uint8_t* renew_cert,
-                                            size_t renew_cert_len,
-                                            WolfCertBuffer* out_der);
-
 /* 1 if the buffer starts with a SEQUENCE tag after whitespace, else 0. */
 WOLFCERT_TEST_VIS int wolfcert_buffer_is_der(const uint8_t* buf, size_t len);
 
@@ -393,6 +396,15 @@ WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_serial(
                                      const uint8_t** out_serial,
                                      size_t* out_serial_len);
 
+/* Split an IssuerAndSubject into the contents of its two Names; both point
+ * into `der`. */
+WOLFCERT_TEST_VIS int wolfcert_scep_parse_issuer_and_subject(
+                                     const uint8_t* der, size_t der_len,
+                                     const uint8_t** out_issuer,
+                                     size_t* out_issuer_len,
+                                     const uint8_t** out_subject,
+                                     size_t* out_subject_len);
+
 /* 1 if a certificate in `pem` has `issuer` and `serial`, 0 if not, or
  * WOLFCERT_ERR_MEMORY. Unparseable entries are skipped. */
 WOLFCERT_TEST_VIS int wolfcert_scep_pem_has_cert(const uint8_t* pem, size_t pem_len,
@@ -400,7 +412,8 @@ WOLFCERT_TEST_VIS int wolfcert_scep_pem_has_cert(const uint8_t* pem, size_t pem_
                                      const uint8_t* serial, size_t serial_len,
                                      void* heap);
 
-/* 1 if `name` is the Name the CA in `cert_der` issues under. */
+/* 1 if `name` is the Name the CA in `cert_der` issues under, 0 if not, or
+ * WOLFCERT_ERR_MEMORY. */
 WOLFCERT_TEST_VIS int wolfcert_scep_issuer_name_matches(
                                      const uint8_t* cert_der, size_t cert_len,
                                      const uint8_t* name, size_t name_len,
@@ -418,6 +431,13 @@ WOLFCERT_TEST_VIS int wolfcert_scep_build_pki_get_url(const char* base,
 /* base?operation=<op>[&message=<ca_id>], heap-allocated, or NULL. */
 WOLFCERT_TEST_VIS char* wolfcert_scep_build_getca_url(const char* base,
     const char* op, const char* ca_id, void* heap);
+
+/* 1 when b is a CMS ContentInfo of type signedData, not a bare cert. */
+WOLFCERT_TEST_VIS int wolfcert_scep_is_signed_data(const uint8_t* b, size_t len);
+
+/* The pkiMessage signature hash OID for want, or a negative error code. */
+WOLFCERT_TEST_VIS int wolfcert_scep_pick_hash_oid(const WolfCertScepCaps* caps,
+                                                  WolfCertScepSigningHash want);
 int wolfcert_scep_deenvelop(const uint8_t* recipient_cert_der, size_t recipient_cert_len,
                             const uint8_t* recipient_key_der,  size_t recipient_key_len,
                             const uint8_t* env_der, size_t env_len,

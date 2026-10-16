@@ -499,6 +499,35 @@ static int check_renewal_foreign_signer(const WolfCertServerCfg* cli,
     return rc;
 }
 
+/* Enroll with the given caps digests and signing_hash; a cert comes back. */
+static int check_signing_hash(const WolfCertServerCfg* cli,
+                              const WolfCertScepCaps* caps, int sha512,
+                              int sha384, WolfCertScepSigningHash hash,
+                              WolfCertKey* key, const WolfCertBuffer* csr,
+                              const uint8_t* ca_der_buf, size_t ca_der_len)
+{
+    WolfCertServerCfg c = *cli;
+    WolfCertScepCaps  hc = *caps;
+    WolfCertBuffer    issued = { 0 };
+    int rc;
+
+    hc.sha512 = sha512;
+    hc.sha384 = sha384;
+    c.proto_opts.scep.signing_hash = hash;
+
+    rc = wolfcert_scep_pkcs_req(&c, &hc, ca_der_buf, ca_der_len, key,
+                                csr->data, csr->len, &issued);
+    if (rc == WOLFCERT_OK &&
+            memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) == NULL)
+        rc = -1;
+    if (rc != WOLFCERT_OK)
+        fprintf(stderr, "signing hash %d (caps 512=%d 384=%d): rc=%d\n",
+                (int)hash, sha512, sha384, rc);
+
+    wolfcert_buffer_free(&issued);
+    return rc;
+}
+
 /* Enrollment with an explicit proto_opts.scep.content_cipher. */
 static int check_content_cipher(const WolfCertServerCfg* cli,
                                 const WolfCertScepCaps* caps,
@@ -601,6 +630,25 @@ static void* canned_srv_thread(void* arg)
     return NULL;
 }
 
+/* Start fn(ctx) on a loopback port stored in *listen_fd; the listener is
+ * closed if the thread cannot start. */
+static int start_canned(void* (*fn)(void*), void* ctx, int* listen_fd,
+                        pthread_t* tid, char* url, size_t url_sz)
+{
+    int port = 0;
+
+    *listen_fd = listen_loopback(&port);
+    if (*listen_fd < 0)
+        return -1;
+    if (pthread_create(tid, NULL, fn, ctx) != 0) {
+        close(*listen_fd);
+        return -1;
+    }
+
+    snprintf(url, url_sz, "http://127.0.0.1:%d/scep", port);
+    return 0;
+}
+
 /* A GetCACaps body of Renewal-Extra and AESGCM sets neither renewal nor aes. */
 static int test_caps_token_matching(void)
 {
@@ -612,17 +660,15 @@ static int test_caps_token_matching(void)
                              .body = (const uint8_t*)caps_body,
                              .body_len = strlen(caps_body) };
     pthread_t tid;
-    int port = 0;
-    cc.listen_fd = listen_loopback(&port);
-    REQUIRE(cc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, canned_srv_thread, &cc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(canned_srv_thread, &cc, &cc.listen_fd, &tid, url,
+                         sizeof(url)) == 0);
+
     WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
     WolfCertScepCaps caps = { 0 };
-    REQUIRE(wolfcert_scep_get_ca_caps(&cli, &caps) == WOLFCERT_OK);
+    int rc = wolfcert_scep_get_ca_caps(&cli, &caps);
     pthread_join(tid, NULL);
+    REQUIRE(rc == WOLFCERT_OK);
 
     /* Exact token still matches; substring-only lines do not. */
     REQUIRE(caps.post_pki_operation == 1);
@@ -638,13 +684,10 @@ static int test_caps_scep_standard(void)
                              .body = (const uint8_t*)caps_body,
                              .body_len = strlen(caps_body) };
     pthread_t tid;
-    int port = 0;
-    cc.listen_fd = listen_loopback(&port);
-    REQUIRE(cc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, canned_srv_thread, &cc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(canned_srv_thread, &cc, &cc.listen_fd, &tid, url,
+                         sizeof(url)) == 0);
+
     WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
     WolfCertScepCaps caps = { 0 };
     int rc = wolfcert_scep_get_ca_caps(&cli, &caps);
@@ -669,17 +712,52 @@ static int fetch_ca(const char* content_type, const uint8_t* body,
     struct canned_ctx cc = { .listen_fd = -1, .content_type = content_type,
                              .body = body, .body_len = body_len };
     pthread_t tid;
-    int port = 0;
-    cc.listen_fd = listen_loopback(&port);
-    REQUIRE(cc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, canned_srv_thread, &cc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(canned_srv_thread, &cc, &cc.listen_fd, &tid, url,
+                         sizeof(url)) == 0);
+
     WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
     int rc = wolfcert_scep_get_ca_cert_enc(&cli, enc, out);
     pthread_join(tid, NULL);
     return rc;
+}
+
+/* Fetch body under content_type and check that exactly the CA cert comes back
+ * in the requested encoding. */
+static int check_getca_one(const char* content_type, const uint8_t* body,
+                           size_t body_len, WolfCertEncoding enc,
+                           const uint8_t* ca_der, size_t ca_der_len)
+{
+    WolfCertBuffer out = { 0 };
+    DerBuffer* pem_der = NULL;
+    const uint8_t* got = NULL;
+    size_t got_len = 0;
+    int rc;
+
+    rc = fetch_ca(content_type, body, body_len, enc, &out);
+    if (rc == WOLFCERT_OK && enc == WOLFCERT_ENCODING_PEM) {
+        if (wc_PemToDer(out.data, (long)out.len, CERT_TYPE, &pem_der,
+                        NULL, NULL, NULL) == 0) {
+            got = pem_der->buffer;
+            got_len = pem_der->length;
+        }
+    }
+    else if (rc == WOLFCERT_OK) {
+        got = out.data;
+        got_len = out.len;
+    }
+
+    if (got == NULL || got_len != ca_der_len ||
+            memcmp(got, ca_der, ca_der_len) != 0) {
+        fprintf(stderr, "FAIL GetCACert as '%s' (enc %d): rc=%d len=%zu\n",
+                content_type, (int)enc, rc, got_len);
+        rc = -1;
+    }
+
+    if (pem_der != NULL)
+        wc_FreeDer(&pem_der);
+    wolfcert_buffer_free(&out);
+    return rc == WOLFCERT_OK ? 0 : 1;
 }
 
 /* The CA/RA media type (RFC 8894 section 4.2.1.2) matches case-insensitively
@@ -689,45 +767,33 @@ static int check_getca_media_type(const uint8_t* ca_der_buf, size_t ca_der_len)
     const uint8_t* certs[1] = { ca_der_buf };
     size_t lens[1] = { ca_der_len };
     WolfCertBuffer p7 = { 0 };
+    int fails = 0;
+
     REQUIRE(wolfcert_pkcs7_build_certs_only(certs, lens, 1, &p7, NULL)
             == WOLFCERT_OK);
 
-    /* Mixed case and whitespace before ';' still name the bundle type. */
-    WolfCertBuffer pem = { 0 };
-    REQUIRE(fetch_ca("Application/X-X509-CA-RA-Cert ; charset=binary",
-                     p7.data, p7.len, WOLFCERT_ENCODING_PEM, &pem)
-            == WOLFCERT_OK);
-    DerBuffer* pem_der = NULL;
-    REQUIRE(wc_PemToDer(pem.data, (long)pem.len, CERT_TYPE,
-                        &pem_der, NULL, NULL, NULL) == 0);
-    REQUIRE(pem_der->length == ca_der_len);
-    REQUIRE(memcmp(pem_der->buffer, ca_der_buf, ca_der_len) == 0);
-    wc_FreeDer(&pem_der);
-    wolfcert_buffer_free(&pem);
-
-    WolfCertBuffer der = { 0 };
-    REQUIRE(fetch_ca("application/x-x509-ca-ra-cert", p7.data, p7.len,
-                     WOLFCERT_ENCODING_DER, &der) == WOLFCERT_OK);
-    REQUIRE(der.len == ca_der_len);
-    REQUIRE(memcmp(der.data, ca_der_buf, ca_der_len) == 0);
-    wolfcert_buffer_free(&der);
-
-    /* A longer subtype is a different type: the bare cert comes back as is. */
-    REQUIRE(fetch_ca("application/x-x509-ca-ra-certs", ca_der_buf, ca_der_len,
-                     WOLFCERT_ENCODING_DER, &der) == WOLFCERT_OK);
-    REQUIRE(der.len == ca_der_len);
-    REQUIRE(memcmp(der.data, ca_der_buf, ca_der_len) == 0);
-    wolfcert_buffer_free(&der);
-
-    /* So is a different top-level type carrying the same subtype. */
-    REQUIRE(fetch_ca("text/x-x509-ca-ra-cert", ca_der_buf, ca_der_len,
-                     WOLFCERT_ENCODING_DER, &der) == WOLFCERT_OK);
-    REQUIRE(der.len == ca_der_len);
-    REQUIRE(memcmp(der.data, ca_der_buf, ca_der_len) == 0);
-    wolfcert_buffer_free(&der);
+    fails += check_getca_one("Application/X-X509-CA-RA-Cert ; charset=binary",
+                             p7.data, p7.len, WOLFCERT_ENCODING_PEM,
+                             ca_der_buf, ca_der_len);
+    fails += check_getca_one("application/x-x509-ca-ra-cert",
+                             p7.data, p7.len, WOLFCERT_ENCODING_DER,
+                             ca_der_buf, ca_der_len);
+    fails += check_getca_one("application/x-x509-ca-cert",
+                             p7.data, p7.len, WOLFCERT_ENCODING_DER,
+                             ca_der_buf, ca_der_len);
+    fails += check_getca_one("application/x-x509-ca-cert",
+                             p7.data, p7.len, WOLFCERT_ENCODING_PEM,
+                             ca_der_buf, ca_der_len);
+    /* A longer subtype or another top-level type is not the bundle type. */
+    fails += check_getca_one("application/x-x509-ca-ra-certs",
+                             ca_der_buf, ca_der_len, WOLFCERT_ENCODING_DER,
+                             ca_der_buf, ca_der_len);
+    fails += check_getca_one("text/x-x509-ca-ra-cert",
+                             ca_der_buf, ca_der_len, WOLFCERT_ENCODING_DER,
+                             ca_der_buf, ca_der_len);
 
     wolfcert_buffer_free(&p7);
-    return 0;
+    return fails;
 }
 
 static int get_ca_cert_empty(WolfCertEncoding enc)
@@ -759,6 +825,7 @@ struct msgtype_ctx {
     char   reqline[256]; /* the HTTP request line, for the GET operations */
     size_t tid_len;      /* transactionID length, 0 if not reached */
     char   cipher[8];    /* content-encryption OID seen in the EnvelopedData */
+    char   digest[8];    /* SignedData digest OID seen in the pkiMessage */
     /* When reply is set, answer with a CertRep signed by rep_cert/rep_key that
      * carries rep_status and rep_fail_info; NULL leaves that attribute out. */
     const uint8_t* rep_cert;
@@ -887,6 +954,19 @@ static void* msgtype_srv_thread(void* arg)
                     snprintf(mc->cipher, sizeof(mc->cipher), "des3");
             }
 
+            static const uint8_t OID_SHA256[] =
+                { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x01 };
+            static const uint8_t OID_SHA384[] =
+                { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x02 };
+            static const uint8_t OID_SHA512[] =
+                { 0x06,0x09,0x60,0x86,0x48,0x01,0x65,0x03,0x04,0x02,0x03 };
+            if (memmem(buf + hdr_end, want, OID_SHA512, sizeof(OID_SHA512)))
+                snprintf(mc->digest, sizeof(mc->digest), "sha512");
+            else if (memmem(buf + hdr_end, want, OID_SHA384, sizeof(OID_SHA384)))
+                snprintf(mc->digest, sizeof(mc->digest), "sha384");
+            else if (memmem(buf + hdr_end, want, OID_SHA256, sizeof(OID_SHA256)))
+                snprintf(mc->digest, sizeof(mc->digest), "sha256");
+
             if (mc->reply)
                 msgtype_send_cert_rep(mc, cs, tid, tid_len, sn, sn_len);
         }
@@ -910,13 +990,9 @@ static int check_content_cipher_wire(const WolfCertScepCaps* caps,
 {
     struct msgtype_ctx mc = { .listen_fd = -1 };
     pthread_t tid;
-    int port = 0;
-    mc.listen_fd = listen_loopback(&port);
-    REQUIRE(mc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, msgtype_srv_thread, &mc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(msgtype_srv_thread, &mc, &mc.listen_fd, &tid, url,
+                         sizeof(url)) == 0);
     WolfCertServerCfg cli = {
         .protocol   = WOLFCERT_PROTO_SCEP,
         .server_url = url,
@@ -941,6 +1017,41 @@ static int check_content_cipher_wire(const WolfCertScepCaps* caps,
     return 0;
 }
 
+/* The signing_hash and caps digests as seen in the request's SignedData. */
+static int check_signing_hash_wire(const WolfCertScepCaps* caps, int sha512,
+                                   int sha384, WolfCertScepSigningHash hash,
+                                   WolfCertKey* key, const WolfCertBuffer* csr,
+                                   const uint8_t* ca_der_buf, size_t ca_der_len,
+                                   const char* expect)
+{
+    struct msgtype_ctx mc = { .listen_fd = -1 };
+    WolfCertScepCaps hc = *caps;
+    pthread_t tid;
+    char url[128];
+    REQUIRE(start_canned(msgtype_srv_thread, &mc, &mc.listen_fd, &tid, url,
+                         sizeof(url)) == 0);
+    WolfCertServerCfg cli = {
+        .protocol   = WOLFCERT_PROTO_SCEP,
+        .server_url = url,
+        .proto_opts.scep = { .signing_hash = hash },
+    };
+    hc.sha512 = sha512;
+    hc.sha384 = sha384;
+
+    WolfCertBuffer issued = { 0 };
+    /* The listener never answers, so the call fails. */
+    (void)wolfcert_scep_pkcs_req(&cli, &hc, ca_der_buf, ca_der_len, key,
+                                 csr->data, csr->len, &issued);
+    wolfcert_buffer_free(&issued);
+    pthread_join(tid, NULL);
+
+    if (strcmp(mc.digest, expect) != 0)
+        fprintf(stderr, "signing hash %d (caps 512=%d 384=%d): saw \"%s\"\n",
+                (int)hash, sha512, sha384, mc.digest);
+    REQUIRE(strcmp(mc.digest, expect) == 0);
+    return 0;
+}
+
 /* A renewal under renewal_msg_type mode carries messageType expect. */
 static int check_renewal_msg_type(const WolfCertScepCaps* caps,
                                   const uint8_t* ca_der_buf, size_t ca_der_len,
@@ -952,13 +1063,9 @@ static int check_renewal_msg_type(const WolfCertScepCaps* caps,
 {
     struct msgtype_ctx mc = { .listen_fd = -1 };
     pthread_t tid;
-    int port = 0;
-    mc.listen_fd = listen_loopback(&port);
-    REQUIRE(mc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, msgtype_srv_thread, &mc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(msgtype_srv_thread, &mc, &mc.listen_fd, &tid, url,
+                         sizeof(url)) == 0);
     WolfCertServerCfg cli = {
         .protocol   = WOLFCERT_PROTO_SCEP,
         .server_url = url,
@@ -1001,13 +1108,9 @@ static int check_pki_status(const WolfCertScepCaps* caps,
         .reply        = 1,
     };
     pthread_t tid;
-    int port = 0;
-    mc.listen_fd = listen_loopback(&port);
-    REQUIRE(mc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, msgtype_srv_thread, &mc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(msgtype_srv_thread, &mc, &mc.listen_fd, &tid, url,
+                         sizeof(url)) == 0);
     WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
 
     WolfCertScepResult r = { 0 };
@@ -1042,28 +1145,27 @@ static int check_session_opts_capture(const WolfCertScepCaps* caps,
 {
     struct msgtype_ctx mc = { .listen_fd = -1 };
     pthread_t tid;
-    int port = 0;
-    mc.listen_fd = listen_loopback(&port);
-    REQUIRE(mc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, msgtype_srv_thread, &mc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(msgtype_srv_thread, &mc, &mc.listen_fd, &tid, url,
+                         sizeof(url)) == 0);
     WolfCertServerCfg cli = {
         .protocol   = WOLFCERT_PROTO_SCEP,
         .server_url = url,
         .proto_opts.scep = {
             .txid_mode        = WOLFCERT_SCEP_TXID_PUBKEY_HASH,
             .renewal_msg_type = WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ,
+            .signing_hash     = WOLFCERT_SCEP_HASH_SHA256,
         },
     };
+    WolfCertScepCaps hc = *caps;
+    hc.sha512 = 1;
 
     WolfCertScepSession* sess = NULL;
     REQUIRE(wolfcert_scep_session_open(&cli, &sess) == WOLFCERT_OK);
 
     WolfCertScepResult r = { 0 };
     /* The listener never answers, so this fails. */
-    (void)wolfcert_scep_session_renewal_req_ex(sess, caps, ca_der_buf, ca_der_len,
+    (void)wolfcert_scep_session_renewal_req_ex(sess, &hc, ca_der_buf, ca_der_len,
                                                ca_der_buf, ca_der_len,
                                                cur_cert, cur_cert_len, cur_key,
                                                csr, csr_len, &r);
@@ -1071,8 +1173,9 @@ static int check_session_opts_capture(const WolfCertScepCaps* caps,
     wolfcert_scep_session_close(sess);
     pthread_join(tid, NULL);
 
-    REQUIRE(strcmp(mc.seen, "19") == 0);   /* renewal_msg_type captured */
-    REQUIRE(mc.tid_len == 64);             /* txid_mode captured        */
+    REQUIRE(strcmp(mc.seen, "19") == 0);       /* renewal_msg_type captured */
+    REQUIRE(mc.tid_len == 64);                 /* txid_mode captured        */
+    REQUIRE(strcmp(mc.digest, "sha256") == 0); /* signing_hash captured     */
     return 0;
 }
 
@@ -1081,13 +1184,9 @@ static int check_getnextca_ca_id(const uint8_t* ca_der_buf, size_t ca_der_len)
 {
     struct msgtype_ctx mc = { .listen_fd = -1 };
     pthread_t tid;
-    int port = 0;
-    mc.listen_fd = listen_loopback(&port);
-    REQUIRE(mc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, msgtype_srv_thread, &mc) == 0);
-
     char url[128];
-    snprintf(url, sizeof(url), "http://127.0.0.1:%d/scep", port);
+    REQUIRE(start_canned(msgtype_srv_thread, &mc, &mc.listen_fd, &tid, url,
+                         sizeof(url)) == 0);
     WolfCertServerCfg cli = {
         .protocol   = WOLFCERT_PROTO_SCEP,
         .server_url = url,
@@ -1693,6 +1792,142 @@ static int check_malformed_dispatch(uint16_t port, const WolfCertKeyCfg* kcfg,
     return rc;
 }
 
+/* Enroll through a split CA/RA server; the issued cert chains to the CA. */
+static int test_split_ra(void)
+{
+    WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,
+                                 .bind_host = "127.0.0.1", .bind_port = 0,
+                                 .ca_store = test_ca_store(),
+                                 .scep_split_ra = 1 };
+    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertCertMeta meta = { .subject_dn = "CN=device-split-ra" };
+    WolfCertServer* s = NULL;
+    WolfCertScepCaps caps = { 0 };
+    WolfCertBuffer pem = { 0 };
+    WolfCertBuffer bundle = { 0 };
+    WolfCertBuffer csr = { 0 };
+    WolfCertKey* key = NULL;
+    WolfCertScepResult via_ra = { 0 };
+    WolfCertScepResult ca_trust = { 0 };
+    WolfCertScepResult to_ca = { 0 };
+    DerBuffer* ra = NULL;
+    DerBuffer* ca = NULL;
+    DerBuffer* issued = NULL;
+    WOLFSSL_CERT_MANAGER* cm = NULL;
+    const char* second = NULL;
+    pthread_t tid;
+    char url[128];
+    int via_ra_rc = -1, ca_trust_rc = -1, to_ca_rc = -1;
+    int chains = 0;
+    int rc;
+
+    REQUIRE(wolfcert_server_start(&cfg, &s) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_server_set_bundle_fault(s, 1)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_server_set_bundle_fault(s, 3)
+            == WOLFCERT_ERR_BAD_ARG);
+    if (pthread_create(&tid, NULL, server_thread, s) != 0) {
+        wolfcert_server_free(s);
+        return 1;
+    }
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/scep",
+             wolfcert_server_port(s));
+    WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP,
+                              .server_url = url };
+
+    rc = wolfcert_scep_get_ca_caps(&cli, &caps);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_scep_get_ca_cert(&cli, &pem);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_scep_get_ca_cert_enc(&cli, WOLFCERT_ENCODING_DER,
+                                           &bundle);
+    if (rc == WOLFCERT_OK) {
+        second = (const char*)memmem(pem.data + 1, pem.len - 1,
+                                     "-----BEGIN CERTIFICATE", 22);
+        if (second == NULL ||
+                wc_PemToDer(pem.data, (long)pem.len, CERT_TYPE, &ra,
+                            NULL, NULL, NULL) != 0 ||
+                wc_PemToDer((const unsigned char*)second,
+                            (long)((const char*)pem.data + pem.len - second),
+                            CERT_TYPE, &ca, NULL, NULL, NULL) != 0)
+            rc = -1;
+    }
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_key_generate(&kcfg, &key);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_csr_build(key, &meta, &csr);
+
+    if (rc == WOLFCERT_OK) {
+        via_ra_rc = wolfcert_scep_pkcs_req_ex(&cli, &caps, ra->buffer,
+                        ra->length, bundle.data, bundle.len, key, csr.data,
+                        csr.len, &via_ra);
+        ca_trust_rc = wolfcert_scep_pkcs_req_ex(&cli, &caps, ra->buffer,
+                        ra->length, ca->buffer, ca->length, key, csr.data,
+                        csr.len, &ca_trust);
+        to_ca_rc = wolfcert_scep_pkcs_req_ex(&cli, &caps, ca->buffer,
+                        ca->length, bundle.data, bundle.len, key, csr.data,
+                        csr.len, &to_ca);
+    }
+
+    if (via_ra_rc == WOLFCERT_OK &&
+            via_ra.status == WOLFCERT_SCEP_STATUS_SUCCESS &&
+            wc_PemToDer(via_ra.cert_pem.data, (long)via_ra.cert_pem.len,
+                        CERT_TYPE, &issued, NULL, NULL, NULL) == 0) {
+        cm = wolfSSL_CertManagerNew();
+        chains = cm != NULL &&
+            wolfSSL_CertManagerLoadCABuffer(cm, ca->buffer, (long)ca->length,
+                WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS &&
+            wolfSSL_CertManagerVerifyBuffer(cm, issued->buffer,
+                (long)issued->length, WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS;
+    }
+
+    wolfcert_server_stop(s);
+    pthread_join(tid, NULL);
+    wolfcert_server_free(s);
+    if (cm != NULL)
+        wolfSSL_CertManagerFree(cm);
+    if (issued != NULL)
+        wc_FreeDer(&issued);
+    if (ra != NULL)
+        wc_FreeDer(&ra);
+    if (ca != NULL)
+        wc_FreeDer(&ca);
+    int to_ca_refused = to_ca_rc == WOLFCERT_OK &&
+                        to_ca.status == WOLFCERT_SCEP_STATUS_FAILURE &&
+                        to_ca.fail_info == 2;
+    wolfcert_scep_result_free(&via_ra);
+    wolfcert_scep_result_free(&ca_trust);
+    wolfcert_scep_result_free(&to_ca);
+    wolfcert_buffer_free(&csr);
+    wolfcert_buffer_free(&bundle);
+    wolfcert_buffer_free(&pem);
+    wolfcert_key_free(key);
+
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(chains);
+    REQUIRE(ca_trust_rc != WOLFCERT_OK);
+    REQUIRE(to_ca_refused);
+    return 0;
+}
+
+#ifdef HAVE_ECC
+static int test_bundle_fault_ecc_ca(void)
+{
+    WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,
+                                 .bind_host = "127.0.0.1", .bind_port = 0,
+                                 .ca_key_type = WOLFCERT_KEY_ECC };
+    WolfCertServer* s = NULL;
+    int rc;
+
+    REQUIRE(wolfcert_server_start(&cfg, &s) == WOLFCERT_OK);
+    rc = wolfcert_scep_server_set_bundle_fault(s, 1);
+    wolfcert_server_free(s);
+    REQUIRE(rc == WOLFCERT_ERR_BAD_ARG);
+    return 0;
+}
+#endif
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
@@ -1703,12 +1938,24 @@ int main(void)
         return 1;
     if (test_get_ca_cert_empty_body())
         return 1;
+    if (test_split_ra())
+        return 1;
+#ifdef HAVE_ECC
+    if (test_bundle_fault_ecc_ca())
+        return 1;
+#endif
 
     WolfCertServerCfgSrv cfg = { .protocol = WOLFCERT_PROTO_SCEP,
                                  .bind_host = "127.0.0.1", .bind_port = 0,
                                  .ca_store = test_ca_store() };
     WolfCertServer* s = NULL;
     REQUIRE(wolfcert_server_start(&cfg, &s) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_server_set_bundle_fault(s, 2)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_server_set_bundle_fault(s, 4)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_server_set_bundle_fault(s, 5)
+            == WOLFCERT_ERR_BAD_ARG);
     pthread_t tid;
     REQUIRE(pthread_create(&tid, NULL, server_thread, s) == 0);
 
@@ -1781,22 +2028,42 @@ int main(void)
     REQUIRE(rc == WOLFCERT_OK);
 
     /* A CA advertising SHA-512 or SHA-384 still enrolls within the digests
-     * wolfSSL was built with. */
-    WolfCertScepCaps caps_hash = caps;
-    WolfCertBuffer   issued_hash = { 0 };
+     * wolfSSL was built with, and so does a forced SHA-256. */
+    REQUIRE(check_signing_hash(&cli, &caps, 1, 0, WOLFCERT_SCEP_HASH_AUTO,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+    REQUIRE(check_signing_hash(&cli, &caps, 0, 1, WOLFCERT_SCEP_HASH_AUTO,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+    REQUIRE(check_signing_hash(&cli, &caps, 1, 1, WOLFCERT_SCEP_HASH_SHA256,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+#ifdef WOLFSSL_SHA384
+    REQUIRE(check_signing_hash(&cli, &caps, 0, 0, WOLFCERT_SCEP_HASH_SHA384,
+                               dk, &csr, ca_der->buffer, ca_der->length)
+            == WOLFCERT_OK);
+#endif
 
-    caps_hash.sha512 = 1;
-    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps_hash, ca_der->buffer,
-                                   ca_der->length, dk, csr.data, csr.len,
-                                   &issued_hash) == WOLFCERT_OK);
-    wolfcert_buffer_free(&issued_hash);
-
-    caps_hash.sha512 = 0;
-    caps_hash.sha384 = 1;
-    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps_hash, ca_der->buffer,
-                                   ca_der->length, dk, csr.data, csr.len,
-                                   &issued_hash) == WOLFCERT_OK);
-    wolfcert_buffer_free(&issued_hash);
+    /* The pkiMessage carries the digest signing_hash or the caps chose. */
+    REQUIRE(check_signing_hash_wire(&caps, 1, 1, WOLFCERT_SCEP_HASH_SHA256,
+                                    dk, &csr, ca_der->buffer, ca_der->length,
+                                    "sha256") == 0);
+#ifdef WOLFSSL_SHA384
+    REQUIRE(check_signing_hash_wire(&caps, 0, 1, WOLFCERT_SCEP_HASH_AUTO,
+                                    dk, &csr, ca_der->buffer, ca_der->length,
+                                    "sha384") == 0);
+    REQUIRE(check_signing_hash_wire(&caps, 0, 0, WOLFCERT_SCEP_HASH_SHA384,
+                                    dk, &csr, ca_der->buffer, ca_der->length,
+                                    "sha384") == 0);
+#endif
+#ifdef WOLFSSL_SHA512
+    REQUIRE(check_signing_hash_wire(&caps, 1, 0, WOLFCERT_SCEP_HASH_AUTO,
+                                    dk, &csr, ca_der->buffer, ca_der->length,
+                                    "sha512") == 0);
+    REQUIRE(check_signing_hash_wire(&caps, 0, 0, WOLFCERT_SCEP_HASH_SHA512,
+                                    dk, &csr, ca_der->buffer, ca_der->length,
+                                    "sha512") == 0);
+#endif
 
     /* Explicit AES-256 and AES-128 content ciphers both enroll. */
 #if defined(WOLFSSL_AES_256)

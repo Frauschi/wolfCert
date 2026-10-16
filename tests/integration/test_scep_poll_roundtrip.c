@@ -111,6 +111,33 @@ static int post_signed(const char* url, WolfCertKey* dk,
     return 0;
 }
 
+/* Poll tid with `ias` enveloped to the CA; the server must answer badCertId. */
+static int poll_ias_refused(const char* url, WolfCertKey* dk,
+                            const WolfCertBuffer* csr,
+                            const uint8_t* ca_der, size_t ca_len,
+                            const uint8_t* tid, size_t tid_len,
+                            const uint8_t* ias, size_t ias_len)
+{
+    WolfCertBuffer env = { 0 };
+    char* status = NULL;
+    char* fail_info = NULL;
+    int refused = 0;
+
+    if (wolfcert_scep_envelop(ca_der, ca_len, ias, ias_len, AES128CBCb, &env,
+                              NULL) == WOLFCERT_OK &&
+            post_signed(url, dk, csr, "20", tid, tid_len, env.data, env.len,
+                        &status, &fail_info) == 0) {
+        refused = status != NULL && strcmp(status, "2") == 0 &&
+                  fail_info != NULL && strcmp(fail_info, "4") == 0;
+    }
+
+    WOLFCERT_XFREE(status, NULL);
+    WOLFCERT_XFREE(fail_info, NULL);
+    wolfcert_buffer_free(&env);
+    REQUIRE(refused);
+    return 0;
+}
+
 /* Sign with dk a CSR that verifies but carries a directoryName SAN, which the
  * CA refuses to issue. Returns the DER length, or <= 0 on error. */
 static int dir_san_csr(WolfCertKey* dk, uint8_t* der, int der_sz)
@@ -218,6 +245,38 @@ static int poll_path(WolfCertServer* s)
     REQUIRE(rx.fail_info == 4);
     wolfcert_scep_result_free(&rx);
 
+    /* Nor may the parking key with a malformed IssuerAndSubject, or one that
+     * names another issuer or another subject. */
+    static const uint8_t junk_ias[] = { 0xDE, 0xAD };
+    WolfCertCertMeta subj_meta = { .subject_dn = "CN=device-poll-2" };
+    WolfCertBuffer subj_csr = { 0 };
+    WolfCertBuffer ias = { 0 };
+    uint8_t* self = NULL;
+    size_t self_len = 0;
+    REQUIRE(poll_ias_refused(url, dk, &csr, ca_der->buffer, ca_der->length,
+                             r1.transaction_id, r1.transaction_id_len,
+                             junk_ias, sizeof(junk_ias)) == 0);
+    REQUIRE(wolfcert_scep_self_signed_rsa((RsaKey*)dk->impl, csr.data,
+                                          csr.len, &self, &self_len,
+                                          NULL) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_issuer_and_subject(self, self_len, csr.data,
+                                             csr.len, &ias, NULL)
+            == WOLFCERT_OK);
+    WOLFCERT_XFREE(self, NULL);
+    REQUIRE(poll_ias_refused(url, dk, &csr, ca_der->buffer, ca_der->length,
+                             r1.transaction_id, r1.transaction_id_len,
+                             ias.data, ias.len) == 0);
+    wolfcert_buffer_free(&ias);
+    REQUIRE(wolfcert_csr_build(dk, &subj_meta, &subj_csr) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_issuer_and_subject(ca_der->buffer, ca_der->length,
+                                             subj_csr.data, subj_csr.len,
+                                             &ias, NULL) == WOLFCERT_OK);
+    wolfcert_buffer_free(&subj_csr);
+    REQUIRE(poll_ias_refused(url, dk, &csr, ca_der->buffer, ca_der->length,
+                             r1.transaction_id, r1.transaction_id_len,
+                             ias.data, ias.len) == 0);
+    wolfcert_buffer_free(&ias);
+
     /* Nor may another key's PKCSReq take over the parked transactionID. */
     WolfCertBuffer other_env = { 0 };
     char* tk_status = NULL;
@@ -261,9 +320,10 @@ static int poll_path(WolfCertServer* s)
     wolfcert_buffer_free(&other_csr);
     wolfcert_key_free(other);
 
-    /* OOM in the signer check or the issuance answers 500, entry kept. */
-    static const int oom_at[2] = { 3 /* signer check */, 1 /* issuance */ };
-    for (int i = 0; i < 2; i++) {
+    /* OOM in the name or signer check or issuance answers 500, entry kept. */
+    static const int oom_at[3] = { 4 /* names */, 3 /* signer check */,
+                                   1 /* issuance */ };
+    for (int i = 0; i < 3; i++) {
         WolfCertScepResult rm = { 0 };
         wolfcert_scep_server_set_oom_fault(s, oom_at[i]);
         rc = wolfcert_scep_get_cert_initial(&cli, &caps,
@@ -450,6 +510,60 @@ static int poll_path(WolfCertServer* s)
     return 0;
 }
 
+/* A CSR with an empty subject Name is polled with an empty IssuerAndSubject
+ * subject and released. */
+static int empty_subject_path(WolfCertServer* s)
+{
+    char url[128];
+    snprintf(url, sizeof(url), "http://127.0.0.1:%u/scep", wolfcert_server_port(s));
+    WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
+
+    WolfCertScepCaps caps = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_caps(&cli, &caps) == WOLFCERT_OK);
+    WolfCertBuffer ca_pem = { 0 };
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli, &ca_pem) == WOLFCERT_OK);
+    DerBuffer* ca_der = NULL;
+    REQUIRE(wc_PemToDer(ca_pem.data, (long)ca_pem.len, CERT_TYPE,
+                        &ca_der, NULL, NULL, NULL) == 0);
+
+    WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_RSA, .param = 2048,
+                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
+    WolfCertKey* dk = NULL;
+    REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
+    static const char* const dns[] = { "empty-subject.example" };
+    WolfCertCertMeta meta = { .san_dns = dns, .san_dns_len = 1 };
+    WolfCertBuffer csr = { 0 };
+    REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
+
+    WolfCertScepResult r1 = { 0 };
+    REQUIRE(wolfcert_scep_pkcs_req_ex(&cli, &caps,
+                                      ca_der->buffer, ca_der->length,
+                                      ca_der->buffer, ca_der->length,
+                                      dk, csr.data, csr.len, &r1)
+            == WOLFCERT_OK);
+    REQUIRE(r1.status == WOLFCERT_SCEP_STATUS_PENDING);
+
+    WolfCertScepResult r2 = { 0 };
+    REQUIRE(wolfcert_scep_get_cert_initial(&cli, &caps,
+                                           ca_der->buffer, ca_der->length,
+                                           ca_der->buffer, ca_der->length,
+                                           NULL, 0,
+                                           dk, csr.data, csr.len,
+                                           r1.transaction_id,
+                                           r1.transaction_id_len, &r2)
+            == WOLFCERT_OK);
+    REQUIRE(r2.status == WOLFCERT_SCEP_STATUS_SUCCESS);
+    REQUIRE(r2.cert_pem.data != NULL);
+
+    wolfcert_scep_result_free(&r1);
+    wolfcert_scep_result_free(&r2);
+    wc_FreeDer(&ca_der);
+    wolfcert_buffer_free(&ca_pem);
+    wolfcert_buffer_free(&csr);
+    wolfcert_key_free(dk);
+    return 0;
+}
+
 static int next_ca_path(WolfCertServer* s)
 {
     char url[128];
@@ -556,6 +670,8 @@ int main(void)
     pthread_t t1;
     REQUIRE(pthread_create(&t1, NULL, server_thread, s1) == 0);
     int rc = poll_path(s1);
+    if (rc == 0)
+        rc = empty_subject_path(s1);
     wolfcert_server_stop(s1);
     pthread_join(t1, NULL);
     wolfcert_server_free(s1);

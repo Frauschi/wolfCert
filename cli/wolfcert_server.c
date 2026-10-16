@@ -30,6 +30,22 @@
 #ifdef WOLFCERT_HAVE_EST
 #  include <wolfcert/est.h>
 #endif
+#if defined(WOLFCERT_BUILD_TESTING) && defined(WOLFCERT_HAVE_SCEP)
+#  include "src/internal.h"
+#  define CLI_SCEP_FAULTS
+#  define SCEP_FAULT_USAGE \
+        "  --scep-caps-status CODE|close\n" \
+        "                           Answer GetCACaps with HTTP status CODE and no body,\n" \
+        "                           or close the connection unanswered (testing)\n" \
+        "  --scep-ca-bundle chain|ras|ecc|tie|expired\n" \
+        "                           Serve a root CA that issued the CA (chain),\n" \
+        "                           decoy RAs ahead of the --scep-split-ra RA (ras),\n" \
+        "                           an ECC leaf ahead of the CA (ecc), a second\n" \
+        "                           keyEncipherment RA (tie) or an expired split RA\n" \
+        "                           (expired) (testing)\n"
+#else
+#  define SCEP_FAULT_USAGE ""
+#endif
 
 #include <getopt.h>
 #include <signal.h>
@@ -62,7 +78,8 @@ static void print_usage(FILE* out)
         "                       [--basic USER:PASS] [--challenge PASS]\n"
         "                       [--tls-cert PEM --tls-key PEM [--tls-client-ca PEM]]\n"
         "                       [--scep-require-approval] [--scep-enable-next-ca]\n"
-        "                       [--scep-enable-get-cert] [--est-allow-anonymous]\n"
+        "                       [--scep-enable-get-cert] [--scep-split-ra]\n"
+        "                       [--est-allow-anonymous]\n"
         "\n"
         "Options:\n"
         "  --proto est|scep         Protocol to serve (required)\n"
@@ -84,6 +101,10 @@ static void print_usage(FILE* out)
         "  --scep-enable-get-cert   Answer GetCert (RFC 8894 section 3.3.4), returning a\n"
         "                           previously issued certificate by serial. Off by default;\n"
         "                           while off the request is refused as unimplemented.\n"
+        "  --scep-split-ra          Act as a split CA/RA: issue a new RSA RA certificate at\n"
+        "                           every start, serve it with the CA from GetCACert, and\n"
+        "                           decrypt requests and sign CertReps with it\n"
+        SCEP_FAULT_USAGE
         "  --est-require-approval   Defer EST /simpleenroll + /simplereenroll: first POST for\n"
         "                           a CSR returns 202 Accepted + Retry-After; next POST of\n"
         "                           the same CSR body issues the cert (RFC 7030 section 4.2.3)\n"
@@ -190,6 +211,11 @@ int main(int argc, char** argv)
         { "scep-require-approval",   no_argument,       NULL, 'R' },
         { "scep-enable-next-ca",     no_argument,       NULL, 'N' },
         { "scep-enable-get-cert",    no_argument,       NULL, 'G' },
+        { "scep-split-ra",           no_argument,       NULL, 'S' },
+#ifdef CLI_SCEP_FAULTS
+        { "scep-caps-status",        required_argument, NULL, 'P' },
+        { "scep-ca-bundle",          required_argument, NULL, 'B' },
+#endif
         { "est-require-approval",    no_argument,       NULL, 'E' },
         { "est-retry-after",         required_argument, NULL, 'T' },
         { "tls-post-handshake-auth", no_argument,       NULL, 'H' },
@@ -216,6 +242,11 @@ int main(int argc, char** argv)
     int scep_require_approval = 0;
     int scep_enable_next_ca   = 0;
     int scep_enable_get_cert  = 0;
+    int scep_split_ra         = 0;
+#ifdef CLI_SCEP_FAULTS
+    int scep_caps_status      = 0;
+    int scep_ca_bundle        = 0;
+#endif
     int est_require_approval  = 0;
     int est_retry_after_sec   = 0;
     int tls_post_handshake_auth = 0;
@@ -284,6 +315,46 @@ int main(int argc, char** argv)
             case 'G':
                 scep_enable_get_cert  = 1;
                 break;
+            case 'S':
+                scep_split_ra         = 1;
+                break;
+#ifdef CLI_SCEP_FAULTS
+            case 'P':
+                if (strcmp(optarg, "close") == 0) {
+                    scep_caps_status  = -1;
+                }
+                else {
+                    scep_caps_status  = atoi(optarg);
+                    if (scep_caps_status < 200 || scep_caps_status > 599) {
+                        fprintf(stderr, "invalid --scep-caps-status (expected "
+                                        "200-599 or close)\n");
+                        return 1;
+                    }
+                }
+                break;
+            case 'B':
+                if (strcmp(optarg, "chain") == 0) {
+                    scep_ca_bundle = 1;
+                }
+                else if (strcmp(optarg, "ras") == 0) {
+                    scep_ca_bundle = 2;
+                }
+                else if (strcmp(optarg, "ecc") == 0) {
+                    scep_ca_bundle = 3;
+                }
+                else if (strcmp(optarg, "tie") == 0) {
+                    scep_ca_bundle = 4;
+                }
+                else if (strcmp(optarg, "expired") == 0) {
+                    scep_ca_bundle = 5;
+                }
+                else {
+                    fprintf(stderr, "invalid --scep-ca-bundle (expected "
+                                    "chain, ras, ecc, tie or expired)\n");
+                    return 1;
+                }
+                break;
+#endif
             case 'N':
                 scep_enable_next_ca   = 1;
                 break;
@@ -405,6 +476,7 @@ int main(int argc, char** argv)
         .scep_require_approval      = scep_require_approval,
         .scep_enable_next_ca        = scep_enable_next_ca,
         .scep_enable_get_cert       = scep_enable_get_cert,
+        .scep_split_ra              = scep_split_ra,
         .est_require_approval       = est_require_approval,
         .est_retry_after_sec        = est_retry_after_sec,
         .tls_post_handshake_auth    = tls_post_handshake_auth,
@@ -422,6 +494,18 @@ int main(int argc, char** argv)
             fprintf(stderr, "wolfcert-server: %s\n", m);
         goto out;
     }
+#ifdef CLI_SCEP_FAULTS
+    if (sel == WOLFCERT_PROTO_SCEP)
+        wolfcert_scep_server_set_caps_fault(g_server, scep_caps_status);
+    if (sel == WOLFCERT_PROTO_SCEP && scep_ca_bundle != 0) {
+        rc = wolfcert_scep_server_set_bundle_fault(g_server, scep_ca_bundle);
+        if (rc != WOLFCERT_OK) {
+            fprintf(stderr, "wolfcert-server: --scep-ca-bundle failed (%s)\n",
+                    wolfcert_strerror(rc));
+            goto out;
+        }
+    }
+#endif
 
     fprintf(stderr, "wolfcert-server: %s listening on %s:%u\n",
             sel == WOLFCERT_PROTO_EST ? "EST" : "SCEP",
