@@ -142,6 +142,27 @@ jobs:
             "$HOME/twister-mcxn/twister.json" \
             --built-only sample.wolfcert.est_client.frdm_mcxn947
 
+      - name: SBOM
+        env:
+          SRC: ${{ github.workspace }}
+          OUT: ${{ runner.temp }}/sbom-mcxn
+        run: |
+          set -euo pipefail
+          cd "$HOME/zephyrproject"
+          "$HOME/zephyr-venv/bin/pip" install -q spdx-tools==0.8.5
+          "$HOME/zephyr-venv/bin/west" build -p -b frdm_mcxn947/mcxn947/cpu0 \
+            -d "$OUT" "$SRC/zephyr/samples/wolfcert_est_client" \
+            -t wolfcert-sbom -- -DEXTRA_ZEPHYR_MODULES="$SRC"
+          v="$(sed -n 's/.*LIBWOLFSSL_VERSION_STRING[[:space:]]*"\(.*\)".*/\1/p' \
+            modules/crypto/wolfssl/wolfssl/version.h)"
+          cd "$OUT/modules/wolfcert"
+          "$SRC/tools/sbom/validate_sbom.py" --name-prefix wolfcert \
+            --require-dep-version wolfssl wolfcert-*.cdx.json wolfcert-*.spdx.json
+          "$HOME/zephyr-venv/bin/pyspdxtools" --infile wolfcert-*.spdx.json
+          "$SRC/scripts/ci/check-sbom.py" wolfcert-*.cdx.json wolfcert-*.spdx.json \
+            --sources --wolfssl-version "$v" \
+            --options-h "$OUT/zephyr/include/generated/wolfcert_gen/wolfcert/options.h"
+
       - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v6

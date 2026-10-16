@@ -15,6 +15,7 @@ AM_SILENT_RULES([yes])
 : ${CFLAGS=""}
 
 AC_PROG_CC
+AC_PROG_CPP
 AM_PROG_CC_C_O
 AM_PROG_AR
 LT_INIT
@@ -285,6 +286,16 @@ AC_CHECK_DECL([WOLFSSL_HAVE_MLDSA], [have_mldsa=yes],
       mldsa:44/65/87 will return WOLFCERT_ERR_UNSUPPORTED. Rebuild with
       --enable-mldsa.])],
     WOLFCERT_WOLFSSL_PROLOGUE)
+
+# The SBOM records the wolfSSL version of the headers compiled against.
+AC_MSG_CHECKING([wolfSSL version])
+AC_LANG_CONFTEST([AC_LANG_SOURCE([[#include <wolfssl/version.h>
+wolfcert_wolfssl_version LIBWOLFSSL_VERSION_STRING]])])
+WOLFCERT_WOLFSSL_VERSION=`$CPP $CFLAGS $CPPFLAGS conftest.$ac_ext \
+    2>/dev/null | sed -n 's/^wolfcert_wolfssl_version "\(.*\)" *$/\1/p'`
+rm -f conftest.$ac_ext
+AC_MSG_RESULT([${WOLFCERT_WOLFSSL_VERSION:-unknown}])
+AC_SUBST([WOLFCERT_WOLFSSL_VERSION])
 CPPFLAGS="$save_CPPFLAGS"
 
 AS_IF([test "x$have_rsa" = "xno" && test "x$have_ecc" = "xno" \
@@ -305,6 +316,11 @@ WOLFCERT_OPT([WOLFCERT_OPT_ECC],     [$have_ecc],      [WOLFCERT_HAVE_ECC])
 WOLFCERT_OPT([WOLFCERT_OPT_ED25519], [$have_ed25519],  [WOLFCERT_HAVE_ED25519])
 WOLFCERT_OPT([WOLFCERT_OPT_ED448],   [$have_ed448],    [WOLFCERT_HAVE_ED448])
 WOLFCERT_OPT([WOLFCERT_OPT_MLDSA],   [$have_mldsa],    [WOLFCERT_HAVE_MLDSA])
+
+# make sbom
+AC_PATH_PROG([PYTHON3], [python3])
+AC_PATH_PROG([PYSPDXTOOLS], [pyspdxtools])
+AC_PATH_PROG([GIT], [git])
 
 # The CMake targets file needs absolute paths; $prefix is NONE until evaluated.
 WOLFCERT_PREFIX_ABS=$prefix

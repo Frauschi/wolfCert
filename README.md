@@ -84,6 +84,12 @@ build with `-DWOLFCERT_USER_SETTINGS` and put a `user_settings.h`
 (copied from [`examples/user_settings.h.example`](examples/user_settings.h.example))
 on the include path. See [`docs/EMBEDDED.md`](docs/EMBEDDED.md#configuring-wolfcert-without-its-build-system-user_settingsh).
 
+### SBOM
+
+`make sbom` and `cmake --build build --target sbom` write a CycloneDX and an
+SPDX SBOM for the built library, and `west build -t wolfcert-sbom` does the
+same for a Zephyr application. See [`docs/SBOM.md`](docs/SBOM.md).
+
 ## Quick start
 
 Start the bundled test server (issues from an auto-generated local CA):

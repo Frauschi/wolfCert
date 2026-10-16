@@ -1,0 +1,183 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+name: SBOM
+
+# SBOM generation through autoconf and CMake, and the tools/sbom pin check.
+# The Zephyr module's SBOM is checked in zephyr.yml.
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - master
+
+concurrency:
+  group: sbom-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  WOLFSSL_REF: master
+  SPDX_TOOLS: spdx-tools==0.8.5
+
+jobs:
+  host:
+    name: autoconf + CMake
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential autoconf automake libtool \
+            pkg-config python3 python3-venv
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install -q "$SPDX_TOOLS"
+          echo "$RUNNER_TEMP/venv/bin" >> "$GITHUB_PATH"
+
+      - name: Build/restore wolfSSL (full)
+        uses: ./.github/actions/build-wolfssl
+        with:
+          config: full
+          ref: ${{ env.WOLFSSL_REF }}
+          save: "false"   # PR is restore-only; the nightly reseeds the cache
+
+      - name: wolfSSL version
+        run: |
+          v="$(sed -n 's/.*LIBWOLFSSL_VERSION_STRING[[:space:]]*"\(.*\)".*/\1/p' \
+            "$WOLFSSL_PREFIX/include/wolfssl/version.h")"
+          test -n "$v"
+          echo "WOLFSSL_VERSION=$v" >> "$GITHUB_ENV"
+
+      - name: make sbom
+        run: |
+          set -euo pipefail
+          ./autogen.sh
+          mkdir build-am
+          cd build-am
+          ../configure --with-wolfssl="$WOLFSSL_PREFIX"
+          make -j "$(nproc)"
+          make sbom
+          make install DESTDIR="$RUNNER_TEMP/am-inst"
+          ../tools/sbom/validate_sbom.py --name-prefix wolfcert \
+            --require-dep-version wolfssl wolfcert-*.cdx.json wolfcert-*.spdx.json
+          ../scripts/ci/check-sbom.py wolfcert-*.cdx.json wolfcert-*.spdx.json \
+            --options-h wolfcert/options.h --wolfssl-version "$WOLFSSL_VERSION" \
+            --lib "$RUNNER_TEMP/am-inst/usr/local/lib/libwolfcert.so"
+
+      - name: make sbom is reproducible
+        working-directory: build-am
+        run: |
+          set -euo pipefail
+          sha256sum wolfcert-*.json > "$RUNNER_TEMP/am.sums"
+          make sbom
+          sha256sum -c "$RUNNER_TEMP/am.sums"
+
+      - name: cmake --target sbom
+        run: |
+          set -euo pipefail
+          cmake -S . -B build -DWITH_WOLFSSL="$WOLFSSL_PREFIX" \
+            -DWOLFCERT_WERROR=ON
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+            cmake --build build --target sbom -j "$(nproc)"
+          DESTDIR="$RUNNER_TEMP/cmake-inst" cmake --install build
+          cd build
+          ../tools/sbom/validate_sbom.py --name-prefix wolfcert \
+            --require-dep-version wolfssl wolfcert-*.cdx.json wolfcert-*.spdx.json
+          ../scripts/ci/check-sbom.py wolfcert-*.cdx.json wolfcert-*.spdx.json \
+            --options-h wolfcert/options.h --wolfssl-version "$WOLFSSL_VERSION" \
+            --lib "$RUNNER_TEMP/cmake-inst/usr/local/lib/libwolfcert.so"
+
+      - name: cmake --target sbom is reproducible
+        run: |
+          set -euo pipefail
+          (cd build && sha256sum wolfcert-*.json) > "$RUNNER_TEMP/cmake.sums"
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+            cmake --build build --target sbom
+          (cd build && sha256sum -c "$RUNNER_TEMP/cmake.sums")
+
+      - name: autoconf and CMake record the same configuration
+        run: |
+          scripts/ci/check-sbom.py --compare \
+            build-am/wolfcert-*.cdx.json build/wolfcert-*.cdx.json
+
+      - name: make sbom with user_settings.h
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/us" build-am-us
+          cp examples/user_settings.h.example "$RUNNER_TEMP/us/user_settings.h"
+          cd build-am-us
+          ../configure --with-wolfssl="$WOLFSSL_PREFIX" \
+            --with-user-settings="$RUNNER_TEMP/us"
+          make -j "$(nproc)"
+          make sbom
+          ../tools/sbom/validate_sbom.py --name-prefix wolfcert \
+            --require-dep-version wolfssl wolfcert-*.cdx.json wolfcert-*.spdx.json
+          ../scripts/ci/check-sbom.py wolfcert-*.cdx.json wolfcert-*.spdx.json \
+            --options-h sbom-options.h --wolfssl-version "$WOLFSSL_VERSION"
+
+      - name: cmake --target sbom with user_settings.h
+        run: |
+          set -euo pipefail
+          cmake -S . -B build-us -DWITH_WOLFSSL="$WOLFSSL_PREFIX" \
+            -DWOLFCERT_USER_SETTINGS=ON \
+            -DWOLFCERT_USER_SETTINGS_DIR="$RUNNER_TEMP/us"
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" \
+            cmake --build build-us --target sbom -j "$(nproc)"
+          cd build-us
+          ../tools/sbom/validate_sbom.py --name-prefix wolfcert \
+            --require-dep-version wolfssl wolfcert-*.cdx.json wolfcert-*.spdx.json
+          ../scripts/ci/check-sbom.py wolfcert-*.cdx.json wolfcert-*.spdx.json \
+            --options-h sbom-options.h --wolfssl-version "$WOLFSSL_VERSION"
+
+      # The example enables everything, as the default options.h does.
+      - name: user_settings.h records the same configuration as options.h
+        run: |
+          scripts/ci/check-sbom.py --compare \
+            build-am/wolfcert-*.cdx.json build-am-us/wolfcert-*.cdx.json
+          scripts/ci/check-sbom.py --compare \
+            build/wolfcert-*.cdx.json build-us/wolfcert-*.cdx.json
+
+      - name: Upload the SBOMs
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: wolfcert-sbom
+          path: |
+            build-am/wolfcert-*.cdx.json
+            build-am/wolfcert-*.spdx.json
+            build-am/wolfcert-*.spdx
+            build/wolfcert-*.cdx.json
+            build/wolfcert-*.spdx.json
+            build/wolfcert-*.spdx
+          if-no-files-found: warn
+          retention-days: 30
+
+  drift:
+    name: tools/sbom matches its pin
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the pinned toolkit commit
+        id: pin
+        run: |
+          rev="$(tr -d '[:space:]' < tools/sbom/.wolfssl-compliance-tooling-rev)"
+          test -n "$rev"
+          echo "rev=$rev" >> "$GITHUB_OUTPUT"
+
+      - name: Check out wolfssl-compliance-tooling at the pin
+        uses: actions/checkout@v4
+        with:
+          repository: wolfSSL/wolfssl-compliance-tooling
+          ref: ${{ steps.pin.outputs.rev }}
+          path: .compliance-tooling
+
+      - name: Compare tools/sbom with the toolkit's share/
+        run: |
+          python3 .compliance-tooling/tools/wolfssl-compliance-tooling-sync \
+            --check --src .compliance-tooling --dest .

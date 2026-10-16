@@ -72,6 +72,13 @@ cmake/wolfCertTargets.cmake
 /wolfcert-client
 /wolfcert-server
 
+# make sbom in the source tree
+/wolfcert-*.cdx.json
+/wolfcert-*.spdx.json
+/wolfcert-*.spdx
+/_sbom_staging/
+/sbom-options.h
+
 # CI scratch: wolfSSL sources/installs and compiler caches produced by
 # scripts/ci/build-wolfssl.sh and the workflows (never committed).
 .wolfssl-src/
