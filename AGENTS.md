@@ -28,7 +28,7 @@ file. Changes to wolfCert itself follow `CONTRIBUTING.md`.
 Most integration failures are a wolfSSL built without what wolfCert needs.
 wolfCert requires **wolfSSL >= 5.9.4** and **hard-fails at configure time**
 if the wolfSSL it finds lacks any of `HAVE_PKCS7`, `WOLFSSL_CERT_GEN`,
-`WOLFSSL_CERT_REQ`, `WOLFSSL_CERT_EXT`, `WOLFSSL_KEY_GEN`, `WOLF_CRYPTO_CB`,
+`WOLFSSL_CERT_REQ`, `WOLFSSL_CERT_EXT`, `WOLFSSL_KEY_GEN`,
 `WOLFSSL_BASE64_ENCODE`, `WOLFSSL_ALT_NAMES` or `WOLFSSL_CERT_NAME_ALL`, was
 built with `NO_AES` / `NO_SHA256`, or provides neither TLS 1.2 nor TLS 1.3.
 
@@ -41,6 +41,8 @@ built with `NO_AES` / `NO_SHA256`, or provides neither TLS 1.2 nor TLS 1.3.
   `OPENSSL_EXTRA`, `OPENSSL_EXTRA_X509_SMALL` or `WOLFSSL_TEST_CERT`. A static
   libwolfssl links them regardless. The OpenSSL compatibility layer itself is
   not required.
+- **Hardware keys** need `WOLF_CRYPTO_CB` (`--enable-cryptocb`). Without it
+  wolfCert builds, but keys always run in software.
 - **ML-DSA** additionally needs `WOLFSSL_MLDSA_CHECK_KEY`, which
   `--enable-mldsa` gives by default; it is lost with
   `WOLFSSL_DILITHIUM_NO_CHECK_KEY` or `WOLFSSL_MLDSA_VERIFY_ONLY`.
@@ -205,7 +207,7 @@ contract, alone or in a group comment.
 | Static memory / custom heap | `wolfcert_init(heap)` sets the default heap hint; per-call `heap` fields override it, and the hint reaches every wolfSSL call | `wolfcert/memory.h`, README "Integrating with a wolfSSL static-memory pool" |
 | Network stack without BSD sockets (lwIP, NetX, FreeRTOS+TCP, wolfIP) | Fill `WolfCertServerCfg.transport` (`WolfCertTransport`); TLS records go through it too | `wolfcert/types.h`, `docs/EMBEDDED.md` section 7 |
 | Persistence in flash / NVM | Implement `WolfCertStoreOps` (`read` / `write` / `remove`) | `wolfcert/store.h` |
-| Keys in a TPM, HSM, PKCS#11 token or secure element | Register a backend with `wc_CryptoCb_RegisterDevice`, pass its id as `WolfCertKeyCfg.dev_id` | `docs/ARCHITECTURE.md` section 4.2, `examples/enroll_cryptocb.c` |
+| Keys in a TPM, HSM, PKCS#11 token or secure element | Register a backend with `wc_CryptoCb_RegisterDevice`, pass its id as `WolfCertKeyCfg.dev_id`, and the key's backend id as `key_id`; `WolfCertServerCfg.client_key_src` selects such a key for mTLS | `docs/ARCHITECTURE.md` section 4.2, `examples/enroll_cryptocb.c` |
 | Event loop / no blocking | `wolfcert_est_session_open_async` / `wolfcert_scep_session_open_async`, then the `_nb` calls until they stop returning `WOLFCERT_ERR_WANT_READ` / `_WANT_WRITE`; `*_session_fd` gives the descriptor to poll | `wolfcert/est.h`, `wolfcert/scep.h` |
 | Logging | `wolfcert_set_log_cb` (e.g. to a UART) | `wolfcert/log.h` |
 | RAM budget | `max_response_bytes`, HTTP stack buffers, wolfSSL `Cert` / `CertName` sizing | `docs/EMBEDDED.md` |

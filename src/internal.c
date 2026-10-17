@@ -374,7 +374,42 @@ int wolfcert_ecc_curve_from_param(int param, int* out_curve_id, int* out_key_siz
             return WOLFCERT_ERR_UNSUPPORTED;
     }
 }
+
+int wolfcert_ecc_param_from_curve(int curve_id, int* out_param)
+{
+    switch (curve_id) {
+        case ECC_SECP256R1:
+            *out_param = 256;
+            return WOLFCERT_OK;
+        case ECC_SECP384R1:
+            *out_param = 384;
+            return WOLFCERT_OK;
+        case ECC_SECP521R1:
+            *out_param = 521;
+            return WOLFCERT_OK;
+        default:
+            return WOLFCERT_ERR_UNSUPPORTED;
+    }
+}
 #endif /* WOLFCERT_HAVE_ECC */
+
+int wolfcert_key_id_check(const uint8_t* id, size_t id_len, int dev_id,
+                          const char* module)
+{
+    if (id == NULL || id_len == 0 || id_len > WOLFCERT_KEY_ID_MAX_LEN)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, module,
+                            "key id must be 1..%d bytes",
+                            WOLFCERT_KEY_ID_MAX_LEN);
+    if (!wolfcert_devid_is_cb(dev_id))
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, module,
+                            "key id needs a CryptoCb device id");
+#ifndef WOLFCERT_USE_KEY_ID
+    return WOLFCERT_ERR(WOLFCERT_ERR_UNSUPPORTED, module,
+                        "wolfSSL lacks WOLF_CRYPTO_CB or WOLF_PRIVATE_KEY_ID");
+#else
+    return WOLFCERT_OK;
+#endif
+}
 
 WOLFCERT_TEST_VIS int wolfcert_base64_encode(const uint8_t* in, size_t in_len,
                                              WolfCertBuffer* out, void* heap)
