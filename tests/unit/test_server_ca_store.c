@@ -846,8 +846,10 @@ static int test_corrupt_ca_cert_rejected(void)
 }
 
 #ifdef WOLFCERT_HAVE_ECC
-/* A self-signed non-CA certificate and its key. */
-static int make_leaf_pair(WolfCertBuffer* cert_out, WolfCertBuffer* key_out)
+/* A self-signed certificate with a skid_len-byte subject key id, or none, and
+ * its key. */
+static int make_self_pair(int is_ca, int skid_len, WolfCertBuffer* cert_out,
+                          WolfCertBuffer* key_out)
 {
     WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
@@ -870,8 +872,10 @@ static int make_leaf_pair(WolfCertBuffer* cert_out, WolfCertBuffer* key_out)
     wc_InitCert(&cert);
     snprintf(cert.subject.commonName, sizeof(cert.subject.commonName),
              "%s", "wolfCert Leaf");
-    cert.isCA       = 0;
+    cert.isCA       = is_ca;
     cert.selfSigned = 1;
+    memset(cert.skid, 0x5a, (size_t)skid_len);
+    cert.skidSz     = skid_len;
     cert.daysValid  = 30;
     cert.sigType    = CTC_SHA256wECDSA;
 
@@ -900,7 +904,7 @@ static int test_leaf_ca_rejected(void)
     WolfCertServer* srv = NULL;
 
     REQUIRE(store != NULL);
-    if (make_leaf_pair(&cert, &key))
+    if (make_self_pair(0, 0, &cert, &key))
         return 1;
 
     REQUIRE(store->write(store->ctx, "ca.cert.der", cert.data, cert.len, 0)
@@ -915,6 +919,71 @@ static int test_leaf_ca_rejected(void)
     wolfcert_buffer_free(&cert);
     wolfcert_buffer_free(&key);
     wolfcert_store_memory_close(store);
+    return 0;
+}
+
+/* A stored CA without a subject key id, or with one wolfSSL would hash,
+ * issues without an authority key id; a generated CA's leaves carry it. */
+static int test_issued_key_ids(void)
+{
+    static const uint8_t san[] = {
+        0x30, 0x0b, 0x82, 0x09, 'k', '.', 'e', 'x', 'a', 'm', 'p', 'l', 'e'
+    };
+    WolfCertStoreOps* old = NULL;
+    WolfCertStoreOps* gen = wolfcert_store_memory_open(NULL);
+    WolfCertBuffer cert = { 0 };
+    WolfCertBuffer key  = { 0 };
+    uint8_t* issued = NULL;
+    size_t issued_len = 0;
+    DecodedCert ca_dc;
+    DecodedCert leaf_dc;
+    int skid_len;
+    int rc = -1;
+    int ok;
+
+    REQUIRE(gen != NULL);
+    for (skid_len = 0; skid_len <= 8; skid_len += 8) {
+        old = wolfcert_store_memory_open(NULL);
+        REQUIRE(old != NULL);
+        if (make_self_pair(1, skid_len, &cert, &key))
+            return 1;
+        REQUIRE(old->write(old->ctx, "ca.cert.der", cert.data, cert.len, 0)
+                == WOLFCERT_OK);
+        REQUIRE(old->write(old->ctx, "ca.key.der", key.data, key.len, 1)
+                == WOLFCERT_OK);
+        wolfcert_buffer_free(&cert);
+        wolfcert_buffer_free(&key);
+        REQUIRE(issue_with_san(old, san, sizeof(san), &rc, &issued,
+                               &issued_len) == 0);
+        wolfcert_store_memory_close(old);
+        REQUIRE(rc == WOLFCERT_OK);
+        wc_InitDecodedCert(&leaf_dc, issued, (word32)issued_len, NULL);
+        ok = wc_ParseCert(&leaf_dc, CERT_TYPE, NO_VERIFY, NULL) == 0 &&
+             !leaf_dc.extAuthKeyIdSet;
+        wc_FreeDecodedCert(&leaf_dc);
+        WOLFCERT_XFREE(issued, NULL);
+        issued = NULL;
+        REQUIRE(ok);
+    }
+
+    REQUIRE(generate_ca_into(gen, WOLFCERT_KEY_ECC, &cert, &key) == 0);
+    REQUIRE(issue_with_san(gen, san, sizeof(san), &rc, &issued,
+                           &issued_len) == 0);
+    wolfcert_store_memory_close(gen);
+    REQUIRE(rc == WOLFCERT_OK);
+    wc_InitDecodedCert(&ca_dc, cert.data, (word32)cert.len, NULL);
+    wc_InitDecodedCert(&leaf_dc, issued, (word32)issued_len, NULL);
+    ok = wc_ParseCert(&ca_dc, CERT_TYPE, NO_VERIFY, NULL) == 0 &&
+         wc_ParseCert(&leaf_dc, CERT_TYPE, NO_VERIFY, NULL) == 0 &&
+         ca_dc.extSubjKeyIdSet && leaf_dc.extAuthKeyIdSet &&
+         memcmp(ca_dc.extSubjKeyId, leaf_dc.extAuthKeyId,
+                sizeof(ca_dc.extSubjKeyId)) == 0;
+    wc_FreeDecodedCert(&leaf_dc);
+    wc_FreeDecodedCert(&ca_dc);
+    WOLFCERT_XFREE(issued, NULL);
+    wolfcert_buffer_free(&cert);
+    wolfcert_buffer_free(&key);
+    REQUIRE(ok);
     return 0;
 }
 #endif /* WOLFCERT_HAVE_ECC */
@@ -994,6 +1063,8 @@ int main(void)
     if (test_issued_san_verbatim())
         return 1;
 #ifdef WOLFCERT_HAVE_ECC
+    if (test_issued_key_ids())
+        return 1;
     if (test_leaf_ca_rejected())
         return 1;
 #endif

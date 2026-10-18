@@ -50,9 +50,10 @@ typedef struct {
 
     /* TLS identity, required for EST (wolfcert_server_start() returns
      * WOLFCERT_ERR_TLS without it) and optional for SCEP. tls_client_ca_pem
-     * enables mutual TLS; EST /simplereenroll needs it (else 403) and a
-     * wolfSSL built with KEEP_PEER_CERT (else 500). All three PEM buffers
-     * are copied by wolfcert_server_start(). */
+     * enables mutual TLS; EST /simplereenroll needs it or
+     * tls_client_trust_issued (else 403) and a wolfSSL built with
+     * KEEP_PEER_CERT (else 500). All three PEM buffers are copied by
+     * wolfcert_server_start(). */
     const uint8_t*   tls_cert_pem;
     size_t           tls_cert_pem_len;
     const uint8_t*   tls_key_pem;
@@ -107,6 +108,10 @@ typedef struct {
     /* SCEP split CA/RA: the CA issues a new RA certificate at every start and
      * ca_store does not keep it; the RA decrypts and signs SCEP messages. */
     int              scep_split_ra;
+
+    /* EST: accept client certificates this CA issued, for /simplereenroll
+     * only. Needs KEEP_PEER_CERT, else start returns UNSUPPORTED. */
+    int              tls_client_trust_issued;
 } WolfCertServerCfgSrv;
 
 WOLFCERT_API int  wolfcert_server_start(const WolfCertServerCfgSrv* cfg, WolfCertServer** out);
