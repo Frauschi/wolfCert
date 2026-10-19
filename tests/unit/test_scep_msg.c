@@ -997,6 +997,7 @@ static int test_zero_length_args_rejected(void)
     WolfCertServerCfg  srv  = { .protocol = WOLFCERT_PROTO_SCEP,
                                 .server_url = "http://127.0.0.1:1/scep" };
     uint8_t            blob[4] = { 1, 2, 3, 4 };
+    uint8_t            txid[4] = { 'T', 'X', 'I', 'D' };
     WolfCertKey*       key = NULL;
 
     REQUIRE(wolfcert_key_from_pem(client_key_der_2048,
@@ -1044,21 +1045,27 @@ static int test_zero_length_args_rejected(void)
         wolfcert_scep_get_cert_initial(&srv, &caps, blob, 0,
                                        blob, sizeof(blob), blob, sizeof(blob),
                                        key, blob, sizeof(blob),
-                                       blob, sizeof(blob), &r));
+                                       txid, sizeof(txid), &r));
     REJECTS("get_cert_initial ca_bundle_len",
         wolfcert_scep_get_cert_initial(&srv, &caps, blob, sizeof(blob),
                                        blob, 0, blob, sizeof(blob),
                                        key, blob, sizeof(blob),
-                                       blob, sizeof(blob), &r));
+                                       txid, sizeof(txid), &r));
     REJECTS("get_cert_initial csr_der_len",
         wolfcert_scep_get_cert_initial(&srv, &caps, blob, sizeof(blob),
                                        blob, sizeof(blob), blob, sizeof(blob),
                                        key, blob, 0,
-                                       blob, sizeof(blob), &r));
+                                       txid, sizeof(txid), &r));
     /* signer_cert stays optional, but a non-NULL one must carry bytes. */
     REJECTS("get_cert_initial signer_cert_len",
         wolfcert_scep_get_cert_initial(&srv, &caps, blob, sizeof(blob),
                                        blob, sizeof(blob), blob, 0,
+                                       key, blob, sizeof(blob),
+                                       txid, sizeof(txid), &r));
+    /* A transactionID outside PrintableString is refused before the dial. */
+    REJECTS("get_cert_initial transaction_id",
+        wolfcert_scep_get_cert_initial(&srv, &caps, blob, sizeof(blob),
+                                       blob, sizeof(blob), NULL, 0,
                                        key, blob, sizeof(blob),
                                        blob, sizeof(blob), &r));
 #undef REJECTS
@@ -2009,8 +2016,30 @@ static int test_getca_url(void)
     return 0;
 }
 
+/* A PKIOperation one-shot builds its request before it dials, so a request
+ * that cannot be built fails locally rather than as an I/O error. */
+static int test_scep_builds_before_dial(void)
+{
+    WolfCertServerCfg srv = { .protocol = WOLFCERT_PROTO_SCEP,
+                              .server_url = "http://127.0.0.1:1/scep" };
+    uint8_t blob[4] = { 1, 2, 3, 4 };
+    WolfCertScepResult r;
+    WolfCertKey* key = NULL;
+    int rc;
+
+    REQUIRE(wolfcert_key_from_pem(client_key_der_2048,
+                                  sizeof(client_key_der_2048), NULL, &key)
+            == WOLFCERT_OK);
+    rc = wolfcert_scep_pkcs_req(&srv, NULL, blob, sizeof(blob),
+                                blob, sizeof(blob), key, blob, sizeof(blob), &r);
+    wolfcert_key_free(key);
+    REQUIRE(rc != WOLFCERT_OK && rc != WOLFCERT_ERR_IO);
+    wolfcert_scep_result_free(&r);
+    return 0;
+}
+
 /* An EST config with Basic credentials gets BAD_ARG from the SCEP GetCA*
- * calls and both session opens. */
+ * calls and the session open. */
 static int test_scep_rejects_est_cfg(void)
 {
     static const uint8_t dummy_ca[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
@@ -2032,8 +2061,6 @@ static int test_scep_rejects_est_cfg(void)
                                            &out) == WOLFCERT_ERR_BAD_ARG);
 
     REQUIRE(wolfcert_scep_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
-    REQUIRE(sess == NULL);
-    REQUIRE(wolfcert_scep_session_open_async(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(sess == NULL);
 
     /* protocol = 0 is refused too. */
@@ -2858,6 +2885,8 @@ int main(void)
     REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(test_heap_hint()) == WOLFCERT_OK);
     if (run_test(test_getca_url))
+        return 1;
+    if (run_test(test_scep_builds_before_dial))
         return 1;
     if (run_test(test_scep_rejects_est_cfg))
         return 1;

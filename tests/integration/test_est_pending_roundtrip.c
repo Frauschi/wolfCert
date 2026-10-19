@@ -360,6 +360,14 @@ static int pending_path(WolfCertServer* s)
             == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(other_ca.data == NULL);
 
+    /* A blocking call with the in-flight output is refused too, and keeps
+     * the request: another operation still gets BAD_ARG. */
+    REQUIRE(wolfcert_est_session_get_cacerts(msess, &mix_ca)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_session_simple_enroll_nb(msess, csr_mix.data,
+                                                  csr_mix.len, &mr)
+            == WOLFCERT_ERR_BAD_ARG);
+
     /* The refused calls left the /cacerts request in flight. */
     rc = wolfcert_est_session_get_cacerts_nb(msess, &mix_ca);
     REQUIRE(rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);

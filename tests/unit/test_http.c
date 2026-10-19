@@ -120,62 +120,6 @@ static int test_url_parser(void)
     return 0;
 }
 
-static int test_url_origin(void)
-{
-    WolfCertUrl u;
-    char* origin = NULL;
-
-    /* Default ports (https:443, http:80) are omitted. */
-    REQUIRE(wolfcert_http_url_parse("https://ca.example.com/scep", &u, NULL) == WOLFCERT_OK);
-    REQUIRE(wolfcert_http_url_origin(&u, NULL, &origin) == WOLFCERT_OK);
-    REQUIRE(strcmp(origin, "https://ca.example.com") == 0);
-    WOLFCERT_XFREE(origin, NULL); origin = NULL;
-    wolfcert_http_url_free(&u);
-
-    REQUIRE(wolfcert_http_url_parse("http://host.example/x", &u, NULL) == WOLFCERT_OK);
-    REQUIRE(wolfcert_http_url_origin(&u, NULL, &origin) == WOLFCERT_OK);
-    REQUIRE(strcmp(origin, "http://host.example") == 0);
-    WOLFCERT_XFREE(origin, NULL); origin = NULL;
-    wolfcert_http_url_free(&u);
-
-    /* A non-default port is included. */
-    REQUIRE(wolfcert_http_url_parse("http://host.example:8080/x", &u, NULL) == WOLFCERT_OK);
-    REQUIRE(wolfcert_http_url_origin(&u, NULL, &origin) == WOLFCERT_OK);
-    REQUIRE(strcmp(origin, "http://host.example:8080") == 0);
-    WOLFCERT_XFREE(origin, NULL); origin = NULL;
-    wolfcert_http_url_free(&u);
-
-    /* An IPv6 literal is re-bracketed so the origin parses again. */
-    REQUIRE(wolfcert_http_url_parse("https://[::1]:8443/p", &u, NULL) == WOLFCERT_OK);
-    REQUIRE(wolfcert_http_url_origin(&u, NULL, &origin) == WOLFCERT_OK);
-    REQUIRE(strcmp(origin, "https://[::1]:8443") == 0);
-    wolfcert_http_url_free(&u);
-    REQUIRE(wolfcert_http_url_parse(origin, &u, NULL) == WOLFCERT_OK);
-    REQUIRE(strcmp(u.host, "::1") == 0);
-    REQUIRE(u.port == 8443);
-    WOLFCERT_XFREE(origin, NULL); origin = NULL;
-    wolfcert_http_url_free(&u);
-
-    /* Same for the default port, where no ":port" suffix follows the host. */
-    REQUIRE(wolfcert_http_url_parse("https://[2001:db8::1]/p", &u, NULL) == WOLFCERT_OK);
-    REQUIRE(wolfcert_http_url_origin(&u, NULL, &origin) == WOLFCERT_OK);
-    REQUIRE(strcmp(origin, "https://[2001:db8::1]") == 0);
-    wolfcert_http_url_free(&u);
-    REQUIRE(wolfcert_http_url_parse(origin, &u, NULL) == WOLFCERT_OK);
-    REQUIRE(strcmp(u.host, "2001:db8::1") == 0);
-    REQUIRE(u.port == 443);
-    WOLFCERT_XFREE(origin, NULL); origin = NULL;
-    wolfcert_http_url_free(&u);
-
-    /* NULL url and NULL out are rejected. */
-    REQUIRE(wolfcert_http_url_origin(NULL, NULL, &origin) == WOLFCERT_ERR_BAD_ARG);
-    REQUIRE(wolfcert_http_url_parse("https://h/x", &u, NULL) == WOLFCERT_OK);
-    REQUIRE(wolfcert_http_url_origin(&u, NULL, NULL) == WOLFCERT_ERR_BAD_ARG);
-    wolfcert_http_url_free(&u);
-
-    return 0;
-}
-
 struct srv_ctx { int listen_fd; };
 
 /* Returns a bound loopback listener and its ephemeral port. */
@@ -1273,8 +1217,6 @@ int main(void)
     if (test_server_read_chunked_caps())
         return 1;
 #endif
-    if (test_url_origin())
-        return 1;
     if (test_chunked_complete_resume())
         return 1;
     if (test_loopback_http())

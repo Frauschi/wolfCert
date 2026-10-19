@@ -273,8 +273,6 @@ typedef struct {
 
 WOLFCERT_TEST_VIS int  wolfcert_http_url_parse(const char* url, WolfCertUrl* out, void* heap);
 WOLFCERT_TEST_VIS void wolfcert_http_url_free (WolfCertUrl* u);
-WOLFCERT_TEST_VIS int  wolfcert_http_url_origin(const WolfCertUrl* u, void* heap,
-                                                char** out_origin);
 
 /* Resume point for wolfcert_http_chunked_complete(); zero it before the first
  * call, setting max to cap the decoded body (0 for no cap). */

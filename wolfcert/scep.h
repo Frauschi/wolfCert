@@ -203,25 +203,40 @@ WOLFCERT_API int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
 
 /* Keep-alive SCEP session carrying several PKIOperation round trips; GetCACaps
  * and GetCACert stay one-shot calls. Plain http:// is accepted and https://
- * needs srv->verify_server. The blocking calls need wolfcert_scep_session_open
- * and the _nb calls wolfcert_scep_session_open_async; a mismatch returns
- * WOLFCERT_ERR_BAD_ARG. A _nb call returning WANT_READ / WANT_WRITE is repeated
- * with the same arguments; a call with a different out pointer returns
- * WOLFCERT_ERR_BAD_ARG. DNS and the initial connect stay synchronous. Over
- * https:// open does not verify the server: the first request runs the TLS
- * handshake and returns WOLFCERT_ERR_TLS if it fails, or WOLFCERT_ERR_MEMORY
- * if wolfSSL runs out of memory. */
+ * needs srv->verify_server. A _nb call returning WANT_READ / WANT_WRITE is
+ * repeated with the same arguments; a call with a different out pointer
+ * returns WOLFCERT_ERR_BAD_ARG. DNS and the initial connect stay synchronous.
+ * Over https:// open does not verify the server: the first request runs the
+ * TLS handshake and returns WOLFCERT_ERR_TLS if it fails, or
+ * WOLFCERT_ERR_MEMORY if wolfSSL runs out of memory. */
 typedef struct WolfCertScepSession WolfCertScepSession;
 
 WOLFCERT_API int  wolfcert_scep_session_open(const WolfCertServerCfg* srv,
                                              WolfCertScepSession** out);
-WOLFCERT_API int  wolfcert_scep_session_open_async(const WolfCertServerCfg* srv,
-                                                   WolfCertScepSession** out);
 WOLFCERT_API void wolfcert_scep_session_close(WolfCertScepSession* s);
 
 /* Socket fd of the backing HTTP session - hand to poll/epoll/kqueue;
  * -1 when a caller-supplied WolfCertTransport backs it (no descriptor). */
 WOLFCERT_API int  wolfcert_scep_session_fd(const WolfCertScepSession* s);
+
+WOLFCERT_API int wolfcert_scep_session_get_ca_caps(WolfCertScepSession* s,
+                                                   WolfCertScepCaps* out_caps);
+WOLFCERT_API int wolfcert_scep_session_get_ca_caps_nb(WolfCertScepSession* s,
+                                                      WolfCertScepCaps* out_caps);
+WOLFCERT_API int wolfcert_scep_session_get_ca_cert_enc(WolfCertScepSession* s,
+                                                       WolfCertEncoding enc,
+                                                       WolfCertBuffer* out_ca);
+WOLFCERT_API int wolfcert_scep_session_get_ca_cert_enc_nb(WolfCertScepSession* s,
+                                                          WolfCertEncoding enc,
+                                                          WolfCertBuffer* out_ca);
+WOLFCERT_API int wolfcert_scep_session_get_next_ca_cert(WolfCertScepSession* s,
+                                                        const uint8_t* current_ca_der,
+                                                        size_t current_ca_len,
+                                                        WolfCertBuffer* out_next_ca_pem);
+WOLFCERT_API int wolfcert_scep_session_get_next_ca_cert_nb(WolfCertScepSession* s,
+                                                           const uint8_t* current_ca_der,
+                                                           size_t current_ca_len,
+                                                           WolfCertBuffer* out_next_ca_pem);
 
 /* PKCSReq over the session; arguments and result as for
  * wolfcert_scep_pkcs_req. */
@@ -273,6 +288,23 @@ WOLFCERT_API int wolfcert_scep_session_get_cert_initial_nb(WolfCertScepSession* 
     const uint8_t* csr_der, size_t csr_der_len,
     const uint8_t* transaction_id, size_t transaction_id_len,
     WolfCertScepResult* out);
+
+WOLFCERT_API int wolfcert_scep_session_get_cert(WolfCertScepSession* s,
+                                                const WolfCertScepCaps* caps,
+                                                const uint8_t* ra_cert, size_t ra_cert_len,
+                                                const uint8_t* ca_bundle, size_t ca_bundle_len,
+                                                const uint8_t* signer_cert, size_t signer_cert_len,
+                                                const WolfCertKey* signer_key,
+                                                const uint8_t* serial, size_t serial_len,
+                                                WolfCertScepResult* out);
+WOLFCERT_API int wolfcert_scep_session_get_cert_nb(WolfCertScepSession* s,
+                                                   const WolfCertScepCaps* caps,
+                                                   const uint8_t* ra_cert, size_t ra_cert_len,
+                                                   const uint8_t* ca_bundle, size_t ca_bundle_len,
+                                                   const uint8_t* signer_cert, size_t signer_cert_len,
+                                                   const WolfCertKey* signer_key,
+                                                   const uint8_t* serial, size_t serial_len,
+                                                   WolfCertScepResult* out);
 
 #ifdef __cplusplus
 }

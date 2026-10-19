@@ -581,6 +581,7 @@ struct canned_ctx {
     const char*    content_type;
     const uint8_t* body;
     size_t         body_len;
+    int            saw_close;  /* the request sent Connection: close */
 };
 
 /* Bind a loopback listener and report its ephemeral port. */
@@ -630,6 +631,8 @@ static void* canned_srv_thread(void* arg)
         if (strstr(buf, "\r\n\r\n") != NULL)
             break;
     }
+    buf[n] = '\0';
+    cc->saw_close = strstr(buf, "Connection: close\r\n") != NULL;
 
     char head[256];
     int hn = snprintf(head, sizeof(head),
@@ -709,6 +712,7 @@ static int test_caps_scep_standard(void)
     int rc = wolfcert_scep_get_ca_caps(&cli, &caps);
     pthread_join(tid, NULL);
     REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(cc.saw_close == 1);
 
     REQUIRE(caps.scep_standard == 1);
     REQUIRE(caps.post_pki_operation == 1);
