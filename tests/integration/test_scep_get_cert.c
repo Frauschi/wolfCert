@@ -78,10 +78,10 @@ static int get_cert_path(WolfCertServer* s)
 
     /* Step 1: enroll, so the CA has a certificate to hand back. */
     WolfCertScepResult r1 = { 0 };
-    REQUIRE(wolfcert_scep_pkcs_req_ex(&cli, &caps,
-                                      ca_der->buffer, ca_der->length,
-                                      ca_der->buffer, ca_der->length,
-                                      dk, csr.data, csr.len, &r1) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   dk, csr.data, csr.len, &r1) == WOLFCERT_OK);
     REQUIRE(r1.status == WOLFCERT_SCEP_STATUS_SUCCESS);
     REQUIRE(r1.cert_pem.data != NULL);
 
@@ -166,11 +166,11 @@ static int get_cert_path(WolfCertServer* s)
     REQUIRE(wolfcert_csr_build(other, &other_meta, &other_csr) == WOLFCERT_OK);
 
     WolfCertScepResult ro = { 0 };
-    REQUIRE(wolfcert_scep_pkcs_req_ex(&cli, &caps,
-                                      ca_der->buffer, ca_der->length,
-                                      ca_der->buffer, ca_der->length,
-                                      other, other_csr.data, other_csr.len,
-                                      &ro) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   other, other_csr.data, other_csr.len,
+                                   &ro) == WOLFCERT_OK);
     REQUIRE(ro.status == WOLFCERT_SCEP_STATUS_SUCCESS);
 
     DerBuffer* other_der = NULL;
@@ -211,10 +211,10 @@ static int get_cert_path(WolfCertServer* s)
     size_t  last_serial_len = 0;
     for (int i = 0; i < 17; i++) {
         WolfCertScepResult rn = { 0 };
-        REQUIRE(wolfcert_scep_pkcs_req_ex(&cli, &caps,
-                                          ca_der->buffer, ca_der->length,
-                                          ca_der->buffer, ca_der->length,
-                                          dk, csr.data, csr.len, &rn) == WOLFCERT_OK);
+        REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps,
+                                       ca_der->buffer, ca_der->length,
+                                       ca_der->buffer, ca_der->length,
+                                       dk, csr.data, csr.len, &rn) == WOLFCERT_OK);
         REQUIRE(rn.status == WOLFCERT_SCEP_STATUS_SUCCESS);
 
         DerBuffer* nd = NULL;
@@ -331,10 +331,10 @@ static int disabled_path(WolfCertServer* s)
     REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
 
     WolfCertScepResult r1 = { 0 };
-    REQUIRE(wolfcert_scep_pkcs_req_ex(&cli, &caps,
-                                      ca_der->buffer, ca_der->length,
-                                      ca_der->buffer, ca_der->length,
-                                      dk, csr.data, csr.len, &r1) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   dk, csr.data, csr.len, &r1) == WOLFCERT_OK);
     REQUIRE(r1.status == WOLFCERT_SCEP_STATUS_SUCCESS);
 
     DerBuffer* issued_der = NULL;

@@ -192,23 +192,15 @@ static int poll_path(WolfCertServer* s)
 
     /* Step 1: PKCSReq - must return PENDING with a transactionID. */
     WolfCertScepResult r1 = { 0 };
-    int rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
-                                       ca_der->buffer, ca_der->length,
-                                       ca_der->buffer, ca_der->length,
-                                       dk, csr.data, csr.len, &r1);
+    int rc = wolfcert_scep_pkcs_req(&cli, &caps,
+                                    ca_der->buffer, ca_der->length,
+                                    ca_der->buffer, ca_der->length,
+                                    dk, csr.data, csr.len, &r1);
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(r1.status == WOLFCERT_SCEP_STATUS_PENDING);
     REQUIRE(r1.transaction_id != NULL);
     REQUIRE(r1.transaction_id_len > 0);
     REQUIRE(r1.cert_pem.data == NULL);
-
-    /* The legacy API maps PENDING -> WOLFCERT_ERR_PENDING. */
-    WolfCertBuffer legacy_out = { 0 };
-    int legacy_rc = wolfcert_scep_pkcs_req(&cli, &caps,
-                                           ca_der->buffer, ca_der->length,
-                                           dk, csr.data, csr.len, &legacy_out);
-    REQUIRE(legacy_rc == WOLFCERT_ERR_PENDING);
-    wolfcert_buffer_free(&legacy_out);
 
     /* A poll with absent or non-envelope content is refused, entry kept. */
     static const uint8_t not_env[] = { 0x04, 0x03, 'a', 'b', 'c' };
@@ -296,10 +288,10 @@ static int poll_path(WolfCertServer* s)
 
     /* A CSR with a broken signature is refused at PKCSReq and never parked. */
     other_csr.data[other_csr.len - 1] ^= 0x01;
-    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
-                                   ca_der->buffer, ca_der->length,
-                                   ca_der->buffer, ca_der->length,
-                                   other, other_csr.data, other_csr.len, &rx);
+    rc = wolfcert_scep_pkcs_req(&cli, &caps,
+                                ca_der->buffer, ca_der->length,
+                                ca_der->buffer, ca_der->length,
+                                other, other_csr.data, other_csr.len, &rx);
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(rx.status == WOLFCERT_SCEP_STATUS_FAILURE);
     REQUIRE(rx.fail_info == 2);
@@ -371,17 +363,17 @@ static int poll_path(WolfCertServer* s)
     WolfCertScepResult r8 = { 0 };
     WolfCertScepResult r9 = { 0 };
     wolfcert_scep_server_set_oom_fault(s, 3);
-    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
-                                   ca_der->buffer, ca_der->length,
-                                   ca_der->buffer, ca_der->length,
-                                   dk, csr.data, csr.len, &r7);
+    rc = wolfcert_scep_pkcs_req(&cli, &caps,
+                                ca_der->buffer, ca_der->length,
+                                ca_der->buffer, ca_der->length,
+                                dk, csr.data, csr.len, &r7);
     wolfcert_scep_server_set_oom_fault(s, 0);
     REQUIRE(rc != WOLFCERT_OK);
     wolfcert_scep_result_free(&r7);
-    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
-                                   ca_der->buffer, ca_der->length,
-                                   ca_der->buffer, ca_der->length,
-                                   dk, csr.data, csr.len, &r7);
+    rc = wolfcert_scep_pkcs_req(&cli, &caps,
+                                ca_der->buffer, ca_der->length,
+                                ca_der->buffer, ca_der->length,
+                                dk, csr.data, csr.len, &r7);
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(r7.status == WOLFCERT_SCEP_STATUS_PENDING);
     wolfcert_scep_server_set_oom_fault(s, 2);
@@ -414,10 +406,10 @@ static int poll_path(WolfCertServer* s)
     int dir_csr_len = dir_san_csr(dk, dir_csr, (int)sizeof(dir_csr));
     WolfCertScepResult rd = { 0 };
     REQUIRE(dir_csr_len > 0);
-    rc = wolfcert_scep_pkcs_req_ex(&cli, &caps,
-                                   ca_der->buffer, ca_der->length,
-                                   ca_der->buffer, ca_der->length,
-                                   dk, dir_csr, (size_t)dir_csr_len, &rd);
+    rc = wolfcert_scep_pkcs_req(&cli, &caps,
+                                ca_der->buffer, ca_der->length,
+                                ca_der->buffer, ca_der->length,
+                                dk, dir_csr, (size_t)dir_csr_len, &rd);
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(rd.status == WOLFCERT_SCEP_STATUS_PENDING);
     for (int i = 0; i < 2; i++) {
@@ -536,10 +528,10 @@ static int empty_subject_path(WolfCertServer* s)
     REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
 
     WolfCertScepResult r1 = { 0 };
-    REQUIRE(wolfcert_scep_pkcs_req_ex(&cli, &caps,
-                                      ca_der->buffer, ca_der->length,
-                                      ca_der->buffer, ca_der->length,
-                                      dk, csr.data, csr.len, &r1)
+    REQUIRE(wolfcert_scep_pkcs_req(&cli, &caps,
+                                   ca_der->buffer, ca_der->length,
+                                   ca_der->buffer, ca_der->length,
+                                   dk, csr.data, csr.len, &r1)
             == WOLFCERT_OK);
     REQUIRE(r1.status == WOLFCERT_SCEP_STATUS_PENDING);
 

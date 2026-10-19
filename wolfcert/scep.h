@@ -137,42 +137,24 @@ WOLFCERT_API void wolfcert_scep_result_free(WolfCertScepResult* r);
  * for a single-cert CA is ra_cert itself. Returns WOLFCERT_OK once a CertRep
  * verifies, with SUCCESS / PENDING / FAILURE in out->status; TLS, HTTP and
  * parse failures return their error code. */
-WOLFCERT_API int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
-                                           const WolfCertScepCaps* caps,
-                                           const uint8_t* ra_cert, size_t ra_cert_len,
-                                           const uint8_t* ca_bundle, size_t ca_bundle_len,
-                                           const WolfCertKey* new_key,
-                                           const uint8_t* csr_der, size_t csr_der_len,
-                                           WolfCertScepResult* out);
-
-/* PKCSReq, simple-result form. Returns WOLFCERT_ERR_PENDING when the server
- * replies pkiStatus=3 and WOLFCERT_ERR_PROTOCOL on pkiStatus=2. PENDING
- * carries no transactionID to poll with; the _ex form returns one. */
 WOLFCERT_API int wolfcert_scep_pkcs_req(const WolfCertServerCfg* srv,
                                         const WolfCertScepCaps* caps,
                                         const uint8_t* ra_cert, size_t ra_cert_len,
+                                        const uint8_t* ca_bundle, size_t ca_bundle_len,
                                         const WolfCertKey* new_key,
                                         const uint8_t* csr_der, size_t csr_der_len,
-                                        WolfCertBuffer* out_cert_pem);
+                                        WolfCertScepResult* out);
 
 /* RenewalReq: current_key signs the pkiMessage and csr_der carries the new
- * public key. ra_cert and ca_bundle are as for wolfcert_scep_pkcs_req_ex. */
-WOLFCERT_API int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
-                                              const WolfCertScepCaps* caps,
-                                              const uint8_t* ra_cert, size_t ra_cert_len,
-                                              const uint8_t* ca_bundle, size_t ca_bundle_len,
-                                              const uint8_t* current_cert, size_t current_cert_len,
-                                              const WolfCertKey* current_key,
-                                              const uint8_t* csr_der, size_t csr_der_len,
-                                              WolfCertScepResult* out);
-
+ * public key. ra_cert and ca_bundle are as for wolfcert_scep_pkcs_req. */
 WOLFCERT_API int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
                                            const WolfCertScepCaps* caps,
                                            const uint8_t* ra_cert, size_t ra_cert_len,
+                                           const uint8_t* ca_bundle, size_t ca_bundle_len,
                                            const uint8_t* current_cert, size_t current_cert_len,
                                            const WolfCertKey* current_key,
                                            const uint8_t* csr_der, size_t csr_der_len,
-                                           WolfCertBuffer* out_cert_pem);
+                                           WolfCertScepResult* out);
 
 /* GetCertInitial (RFC 8894 section 3.3.3): poll a PKCSReq or RenewalReq that
  * returned PENDING. signer_cert is NULL for a PKCSReq (the transient
@@ -180,7 +162,7 @@ WOLFCERT_API int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
  * a RenewalReq.
  * transaction_id is the prior request's, echoed verbatim; a value outside
  * PrintableString returns WOLFCERT_ERR_BAD_ARG. ra_cert and ca_bundle are as
- * for wolfcert_scep_pkcs_req_ex. */
+ * for wolfcert_scep_pkcs_req. */
 WOLFCERT_API int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
                                                 const WolfCertScepCaps*  caps,
                                                 const uint8_t* ra_cert, size_t ra_cert_len,
@@ -197,7 +179,7 @@ WOLFCERT_API int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
  * FAILURE/badCertId or not at all. signer_cert / signer_key sign the
  * pkiMessage, with no self-signed fallback. serial is the INTEGER content
  * (DecodedCert.serial / serialSz). ra_cert and ca_bundle are as for
- * wolfcert_scep_pkcs_req_ex. On a hit out->status is SUCCESS; a verified reply
+ * wolfcert_scep_pkcs_req. On a hit out->status is SUCCESS; a verified reply
  * without the requested issuer and serial returns WOLFCERT_ERR_PROTOCOL with
  * out->status UNSET, and running out of memory searching it returns
  * WOLFCERT_ERR_MEMORY. */
@@ -221,8 +203,8 @@ WOLFCERT_API int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
 
 /* Keep-alive SCEP session carrying several PKIOperation round trips; GetCACaps
  * and GetCACert stay one-shot calls. Plain http:// is accepted and https://
- * needs srv->verify_server. The _ex calls need wolfcert_scep_session_open and
- * the _nb calls wolfcert_scep_session_open_async; a mismatch returns
+ * needs srv->verify_server. The blocking calls need wolfcert_scep_session_open
+ * and the _nb calls wolfcert_scep_session_open_async; a mismatch returns
  * WOLFCERT_ERR_BAD_ARG. A _nb call returning WANT_READ / WANT_WRITE is repeated
  * with the same arguments; a call with a different out pointer returns
  * WOLFCERT_ERR_BAD_ARG. DNS and the initial connect stay synchronous. Over
@@ -242,13 +224,13 @@ WOLFCERT_API void wolfcert_scep_session_close(WolfCertScepSession* s);
 WOLFCERT_API int  wolfcert_scep_session_fd(const WolfCertScepSession* s);
 
 /* PKCSReq over the session; arguments and result as for
- * wolfcert_scep_pkcs_req_ex. */
-WOLFCERT_API int wolfcert_scep_session_pkcs_req_ex(WolfCertScepSession* s,
-    const WolfCertScepCaps* caps,
-    const uint8_t* ra_cert, size_t ra_cert_len,
-    const uint8_t* ca_bundle, size_t ca_bundle_len,
-    const WolfCertKey* new_key, const uint8_t* csr_der, size_t csr_der_len,
-    WolfCertScepResult* out);
+ * wolfcert_scep_pkcs_req. */
+WOLFCERT_API int wolfcert_scep_session_pkcs_req(WolfCertScepSession* s,
+                                                const WolfCertScepCaps* caps,
+                                                const uint8_t* ra_cert, size_t ra_cert_len,
+                                                const uint8_t* ca_bundle, size_t ca_bundle_len,
+                                                const WolfCertKey* new_key, const uint8_t* csr_der, size_t csr_der_len,
+                                                WolfCertScepResult* out);
 WOLFCERT_API int wolfcert_scep_session_pkcs_req_nb(WolfCertScepSession* s,
     const WolfCertScepCaps* caps,
     const uint8_t* ra_cert, size_t ra_cert_len,
@@ -256,14 +238,14 @@ WOLFCERT_API int wolfcert_scep_session_pkcs_req_nb(WolfCertScepSession* s,
     const WolfCertKey* new_key, const uint8_t* csr_der, size_t csr_der_len,
     WolfCertScepResult* out);
 
-/* RenewalReq over the session; see wolfcert_scep_renewal_req_ex. */
-WOLFCERT_API int wolfcert_scep_session_renewal_req_ex(WolfCertScepSession* s,
-    const WolfCertScepCaps* caps,
-    const uint8_t* ra_cert, size_t ra_cert_len,
-    const uint8_t* ca_bundle, size_t ca_bundle_len,
-    const uint8_t* current_cert, size_t current_cert_len,
-    const WolfCertKey* current_key, const uint8_t* csr_der, size_t csr_der_len,
-    WolfCertScepResult* out);
+/* RenewalReq over the session; see wolfcert_scep_renewal_req. */
+WOLFCERT_API int wolfcert_scep_session_renewal_req(WolfCertScepSession* s,
+                                                   const WolfCertScepCaps* caps,
+                                                   const uint8_t* ra_cert, size_t ra_cert_len,
+                                                   const uint8_t* ca_bundle, size_t ca_bundle_len,
+                                                   const uint8_t* current_cert, size_t current_cert_len,
+                                                   const WolfCertKey* current_key, const uint8_t* csr_der, size_t csr_der_len,
+                                                   WolfCertScepResult* out);
 WOLFCERT_API int wolfcert_scep_session_renewal_req_nb(WolfCertScepSession* s,
     const WolfCertScepCaps* caps,
     const uint8_t* ra_cert, size_t ra_cert_len,
@@ -273,15 +255,15 @@ WOLFCERT_API int wolfcert_scep_session_renewal_req_nb(WolfCertScepSession* s,
     WolfCertScepResult* out);
 
 /* GetCertInitial over the session; see wolfcert_scep_get_cert_initial. */
-WOLFCERT_API int wolfcert_scep_session_get_cert_initial_ex(WolfCertScepSession* s,
-    const WolfCertScepCaps* caps,
-    const uint8_t* ra_cert, size_t ra_cert_len,
-    const uint8_t* ca_bundle, size_t ca_bundle_len,
-    const uint8_t* signer_cert, size_t signer_cert_len,
-    const WolfCertKey* signer_key,
-    const uint8_t* csr_der, size_t csr_der_len,
-    const uint8_t* transaction_id, size_t transaction_id_len,
-    WolfCertScepResult* out);
+WOLFCERT_API int wolfcert_scep_session_get_cert_initial(WolfCertScepSession* s,
+                                                        const WolfCertScepCaps* caps,
+                                                        const uint8_t* ra_cert, size_t ra_cert_len,
+                                                        const uint8_t* ca_bundle, size_t ca_bundle_len,
+                                                        const uint8_t* signer_cert, size_t signer_cert_len,
+                                                        const WolfCertKey* signer_key,
+                                                        const uint8_t* csr_der, size_t csr_der_len,
+                                                        const uint8_t* transaction_id, size_t transaction_id_len,
+                                                        WolfCertScepResult* out);
 WOLFCERT_API int wolfcert_scep_session_get_cert_initial_nb(WolfCertScepSession* s,
     const WolfCertScepCaps* caps,
     const uint8_t* ra_cert, size_t ra_cert_len,

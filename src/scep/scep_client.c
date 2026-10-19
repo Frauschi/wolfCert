@@ -964,13 +964,13 @@ static int rsa_key_to_der(const WolfCertKey* key, void* heap,
     return WOLFCERT_OK;
 }
 
-int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
-                              const WolfCertScepCaps*  caps,
-                              const uint8_t* ra_cert, size_t ra_cert_len,
-                              const uint8_t* ca_bundle, size_t ca_bundle_len,
-                              const WolfCertKey*       new_key,
-                              const uint8_t* csr_der, size_t csr_der_len,
-                              WolfCertScepResult*      out)
+int wolfcert_scep_pkcs_req(const WolfCertServerCfg* srv,
+                           const WolfCertScepCaps*  caps,
+                           const uint8_t* ra_cert, size_t ra_cert_len,
+                           const uint8_t* ca_bundle, size_t ca_bundle_len,
+                           const WolfCertKey*       new_key,
+                           const uint8_t* csr_der, size_t csr_der_len,
+                           WolfCertScepResult*      out)
 {
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -1020,49 +1020,14 @@ int wolfcert_scep_pkcs_req_ex(const WolfCertServerCfg* srv,
     return rc;
 }
 
-int wolfcert_scep_pkcs_req(const WolfCertServerCfg* srv,
-                           const WolfCertScepCaps*  caps,
-                           const uint8_t* ra_cert, size_t ra_cert_len,
-                           const WolfCertKey*       new_key,
-                           const uint8_t* csr_der, size_t csr_der_len,
-                           WolfCertBuffer*          out_cert_pem)
-{
-    if (out_cert_pem == NULL)
-        return WOLFCERT_ERR_BAD_ARG;
-
-    /* ra_cert doubles as the one-cert trust bundle. */
-    WolfCertScepResult r = { 0 };
-    int rc = wolfcert_scep_pkcs_req_ex(srv, caps, ra_cert, ra_cert_len,
-                                       ra_cert, ra_cert_len,
-                                       new_key, csr_der, csr_der_len, &r);
-    if (rc != WOLFCERT_OK) {
-        wolfcert_scep_result_free(&r);
-        return rc;
-    }
-
-    if (r.status == WOLFCERT_SCEP_STATUS_SUCCESS) {
-        *out_cert_pem = r.cert_pem;
-        r.cert_pem.data = NULL;
-        r.cert_pem.len = 0;
-        wolfcert_scep_result_free(&r);
-        return WOLFCERT_OK;
-    }
-
-    int err = r.status == WOLFCERT_SCEP_STATUS_PENDING
-              ? WOLFCERT_ERR_PENDING : WOLFCERT_ERR_PROTOCOL;
-
-    wolfcert_scep_result_free(&r);
-    return err;
-}
-
-int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
-                                 const WolfCertScepCaps*  caps,
-                                 const uint8_t* ra_cert, size_t ra_cert_len,
-                                 const uint8_t* ca_bundle, size_t ca_bundle_len,
-                                 const uint8_t* current_cert, size_t current_cert_len,
-                                 const WolfCertKey* current_key,
-                                 const uint8_t* csr_der, size_t csr_der_len,
-                                 WolfCertScepResult* out)
+int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
+                              const WolfCertScepCaps*  caps,
+                              const uint8_t* ra_cert, size_t ra_cert_len,
+                              const uint8_t* ca_bundle, size_t ca_bundle_len,
+                              const uint8_t* current_cert, size_t current_cert_len,
+                              const WolfCertKey* current_key,
+                              const uint8_t* csr_der, size_t csr_der_len,
+                              WolfCertScepResult* out)
 {
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -1103,45 +1068,6 @@ int wolfcert_scep_renewal_req_ex(const WolfCertServerCfg* srv,
     wc_ForceZero(key_der, (word32)key_der_len);
     WOLFCERT_XFREE(key_der, heap);
     return rc;
-}
-
-int wolfcert_scep_renewal_req(const WolfCertServerCfg* srv,
-                              const WolfCertScepCaps*  caps,
-                              const uint8_t* ra_cert, size_t ra_cert_len,
-                              const uint8_t* current_cert, size_t current_cert_len,
-                              const WolfCertKey* current_key,
-                              const uint8_t* csr_der, size_t csr_der_len,
-                              WolfCertBuffer* out_cert_pem)
-{
-    if (out_cert_pem == NULL)
-        return WOLFCERT_ERR_BAD_ARG;
-
-    /* ra_cert doubles as the one-cert trust bundle. */
-    WolfCertScepResult r = { 0 };
-    int rc = wolfcert_scep_renewal_req_ex(srv, caps, ra_cert, ra_cert_len,
-                                          ra_cert, ra_cert_len,
-                                          current_cert, current_cert_len,
-                                          current_key,
-                                          csr_der, csr_der_len, &r);
-
-    if (rc != WOLFCERT_OK) {
-        wolfcert_scep_result_free(&r);
-        return rc;
-    }
-
-    if (r.status == WOLFCERT_SCEP_STATUS_SUCCESS) {
-        *out_cert_pem = r.cert_pem;
-        r.cert_pem.data = NULL;
-        r.cert_pem.len = 0;
-        wolfcert_scep_result_free(&r);
-        return WOLFCERT_OK;
-    }
-
-    int err = r.status == WOLFCERT_SCEP_STATUS_PENDING
-              ? WOLFCERT_ERR_PENDING : WOLFCERT_ERR_PROTOCOL;
-
-    wolfcert_scep_result_free(&r);
-    return err;
 }
 
 int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
@@ -1191,8 +1117,8 @@ int wolfcert_scep_get_cert_initial(const WolfCertServerCfg* srv,
     if (rc == WOLFCERT_OK)
         rc = rsa_key_to_der(signer_key, heap, &key_der, &key_der_len);
 
-    /* A pending PKCSReq has no signer cert; regenerate the transient
-     * self-signed one that pkcs_req_ex used. */
+    /* A pending PKCSReq has no signer cert; rebuild the transient
+     * self-signed one from signer_key. */
     if (rc == WOLFCERT_OK && signer_cert == NULL) {
         rc = wolfcert_scep_self_signed_rsa((RsaKey*)signer_key->impl,
                                             csr_der, csr_der_len,
@@ -1848,12 +1774,12 @@ static int scep_session_begin_get_cert_initial(WolfCertScepSession* s,
     return rc;
 }
 
-int wolfcert_scep_session_pkcs_req_ex(WolfCertScepSession* s,
-    const WolfCertScepCaps* caps,
-    const uint8_t* ra_cert, size_t ra_cert_len,
-    const uint8_t* ca_bundle, size_t ca_bundle_len,
-    const WolfCertKey* new_key, const uint8_t* csr_der, size_t csr_der_len,
-    WolfCertScepResult* out)
+int wolfcert_scep_session_pkcs_req(WolfCertScepSession* s,
+                                   const WolfCertScepCaps* caps,
+                                   const uint8_t* ra_cert, size_t ra_cert_len,
+                                   const uint8_t* ca_bundle, size_t ca_bundle_len,
+                                   const WolfCertKey* new_key, const uint8_t* csr_der, size_t csr_der_len,
+                                   WolfCertScepResult* out)
 {
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -1871,7 +1797,7 @@ int wolfcert_scep_session_pkcs_req_ex(WolfCertScepSession* s,
 
     if (s->nonblocking)
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
-            "blocking _ex call on an async session; use the _nb variant");
+            "blocking call on an async session; use the _nb variant");
 
     int rc = scep_session_begin_pkcs_req(s, caps, ra_cert, ra_cert_len,
                                          ca_bundle, ca_bundle_len,
@@ -1901,7 +1827,7 @@ int wolfcert_scep_session_pkcs_req_nb(WolfCertScepSession* s,
 
     if (!s->nonblocking)
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
-            "non-blocking _nb call on a blocking session; use the _ex variant");
+            "non-blocking _nb call on a blocking session; use the blocking variant");
 
     if (!s->in_active) {
         if (caps == NULL || ra_cert == NULL || ra_cert_len == 0 ||
@@ -1922,13 +1848,13 @@ int wolfcert_scep_session_pkcs_req_nb(WolfCertScepSession* s,
     return scep_session_drive_nb(s);
 }
 
-int wolfcert_scep_session_renewal_req_ex(WolfCertScepSession* s,
-    const WolfCertScepCaps* caps,
-    const uint8_t* ra_cert, size_t ra_cert_len,
-    const uint8_t* ca_bundle, size_t ca_bundle_len,
-    const uint8_t* current_cert, size_t current_cert_len,
-    const WolfCertKey* current_key, const uint8_t* csr_der, size_t csr_der_len,
-    WolfCertScepResult* out)
+int wolfcert_scep_session_renewal_req(WolfCertScepSession* s,
+                                      const WolfCertScepCaps* caps,
+                                      const uint8_t* ra_cert, size_t ra_cert_len,
+                                      const uint8_t* ca_bundle, size_t ca_bundle_len,
+                                      const uint8_t* current_cert, size_t current_cert_len,
+                                      const WolfCertKey* current_key, const uint8_t* csr_der, size_t csr_der_len,
+                                      WolfCertScepResult* out)
 {
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -1946,7 +1872,7 @@ int wolfcert_scep_session_renewal_req_ex(WolfCertScepSession* s,
 
     if (s->nonblocking)
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
-            "blocking _ex call on an async session; use the _nb variant");
+            "blocking call on an async session; use the _nb variant");
 
     int rc = scep_session_begin_renewal(s, caps, ra_cert, ra_cert_len,
                                         ca_bundle, ca_bundle_len,
@@ -1978,7 +1904,7 @@ int wolfcert_scep_session_renewal_req_nb(WolfCertScepSession* s,
 
     if (!s->nonblocking)
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
-            "non-blocking _nb call on a blocking session; use the _ex variant");
+            "non-blocking _nb call on a blocking session; use the blocking variant");
 
     if (!s->in_active) {
         if (caps == NULL || ra_cert == NULL || ra_cert_len == 0 || ca_bundle == NULL ||
@@ -2000,15 +1926,15 @@ int wolfcert_scep_session_renewal_req_nb(WolfCertScepSession* s,
     return scep_session_drive_nb(s);
 }
 
-int wolfcert_scep_session_get_cert_initial_ex(WolfCertScepSession* s,
-    const WolfCertScepCaps* caps,
-    const uint8_t* ra_cert, size_t ra_cert_len,
-    const uint8_t* ca_bundle, size_t ca_bundle_len,
-    const uint8_t* signer_cert, size_t signer_cert_len,
-    const WolfCertKey* signer_key,
-    const uint8_t* csr_der, size_t csr_der_len,
-    const uint8_t* transaction_id, size_t transaction_id_len,
-    WolfCertScepResult* out)
+int wolfcert_scep_session_get_cert_initial(WolfCertScepSession* s,
+                                           const WolfCertScepCaps* caps,
+                                           const uint8_t* ra_cert, size_t ra_cert_len,
+                                           const uint8_t* ca_bundle, size_t ca_bundle_len,
+                                           const uint8_t* signer_cert, size_t signer_cert_len,
+                                           const WolfCertKey* signer_key,
+                                           const uint8_t* csr_der, size_t csr_der_len,
+                                           const uint8_t* transaction_id, size_t transaction_id_len,
+                                           WolfCertScepResult* out)
 {
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -2026,7 +1952,7 @@ int wolfcert_scep_session_get_cert_initial_ex(WolfCertScepSession* s,
 
     if (s->nonblocking)
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
-            "blocking _ex call on an async session; use the _nb variant");
+            "blocking call on an async session; use the _nb variant");
 
     int rc = scep_session_begin_get_cert_initial(s, caps, ra_cert, ra_cert_len,
                 ca_bundle, ca_bundle_len, signer_cert, signer_cert_len, signer_key,
@@ -2059,7 +1985,7 @@ int wolfcert_scep_session_get_cert_initial_nb(WolfCertScepSession* s,
 
     if (!s->nonblocking)
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
-            "non-blocking _nb call on a blocking session; use the _ex variant");
+            "non-blocking _nb call on a blocking session; use the blocking variant");
 
     if (!s->in_active) {
         if (caps == NULL || ra_cert == NULL || ra_cert_len == 0 || ca_bundle == NULL ||

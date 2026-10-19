@@ -57,7 +57,7 @@ static inline int enroll_one(const WolfCertServerCfg* client_cfg,
                               .san_dns = dns, .san_dns_len = 1 };
     WolfCertKey* dk = NULL;
     WolfCertBuffer csr = { 0 };
-    WolfCertBuffer issued = { 0 };
+    WolfCertEstResult issued = { 0 };
     DerBuffer* issued_der = NULL;
     WOLFSSL_CERT_MANAGER* cm = NULL;
     int rc = WOLFCERT_OK;
@@ -74,8 +74,8 @@ static inline int enroll_one(const WolfCertServerCfg* client_cfg,
         }
     }
     EST_CHECK(rc == WOLFCERT_OK);
-    EST_CHECK(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE,
-                          &issued_der, NULL, NULL, NULL) == 0);
+    EST_CHECK(wc_PemToDer(issued.cert_pem.data, (long)issued.cert_pem.len,
+                          CERT_TYPE, &issued_der, NULL, NULL, NULL) == 0);
     if (ret == 0)
         cm = wolfSSL_CertManagerNew();
     EST_CHECK(cm != NULL);
@@ -90,7 +90,7 @@ static inline int enroll_one(const WolfCertServerCfg* client_cfg,
 
     wolfSSL_CertManagerFree(cm);
     wc_FreeDer(&issued_der);
-    wolfcert_buffer_free(&issued);
+    wolfcert_est_result_free(&issued);
     wolfcert_buffer_free(&csr);
     wolfcert_key_free(dk);
     return ret;
@@ -125,7 +125,7 @@ static inline int enroll_check_san(const WolfCertServerCfg* client_cfg)
     const byte ip[] = { 10, 20, 30, 40 };
     WolfCertKey* dk = NULL;
     WolfCertBuffer csr = { 0 };
-    WolfCertBuffer issued = { 0 };
+    WolfCertEstResult issued = { 0 };
     DerBuffer* der = NULL;
     DecodedCert dc;
     int dc_init = 0;
@@ -145,8 +145,8 @@ static inline int enroll_check_san(const WolfCertServerCfg* client_cfg)
         }
     }
     EST_CHECK(rc == WOLFCERT_OK);
-    EST_CHECK(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE, &der,
-                          NULL, NULL, NULL) == 0);
+    EST_CHECK(wc_PemToDer(issued.cert_pem.data, (long)issued.cert_pem.len,
+                          CERT_TYPE, &der, NULL, NULL, NULL) == 0);
     if (ret == 0) {
         wc_InitDecodedCert(&dc, der->buffer, der->length, NULL);
         dc_init = 1;
@@ -163,14 +163,14 @@ static inline int enroll_check_san(const WolfCertServerCfg* client_cfg)
     if (dc_init)
         wc_FreeDecodedCert(&dc);
     wc_FreeDer(&der);
-    wolfcert_buffer_free(&issued);
+    wolfcert_est_result_free(&issued);
     wolfcert_buffer_free(&csr);
     wolfcert_key_free(dk);
     return ret;
 }
 
 /* HTTP Basic (RFC 7030 section 3.2.3) on a keep-alive session; a wrong
- * password fails both the plain and _ex enroll. */
+ * password fails the enroll. */
 static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
 {
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
@@ -180,8 +180,7 @@ static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
     WolfCertKey* dk = NULL;
     WolfCertBuffer csr = { 0 };
     WolfCertBuffer ca_pem = { 0 };
-    WolfCertBuffer issued = { 0 };
-    WolfCertBuffer bad_out = { 0 };
+    WolfCertEstResult issued = { 0 };
     WolfCertEstResult bad_res = { 0 };
     WolfCertEstSession* s = NULL;
     WolfCertEstSession* bs = NULL;
@@ -215,20 +214,20 @@ static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
     EST_CHECK(ca_pem.len > 0);
     EST_CHECK(wolfcert_est_session_simple_enroll(s, csr.data, csr.len, &issued)
               == WOLFCERT_OK);
-    EST_CHECK(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE,
-                          &issued_der, NULL, NULL, NULL) == 0);
+    EST_CHECK(wc_PemToDer(issued.cert_pem.data, (long)issued.cert_pem.len,
+                          CERT_TYPE, &issued_der, NULL, NULL, NULL) == 0);
 
     /* The target heap is too small for two open sessions. */
     wc_FreeDer(&issued_der);
     wolfcert_buffer_free(&ca_pem);
-    wolfcert_buffer_free(&issued);
+    wolfcert_est_result_free(&issued);
     wolfcert_est_session_close(s);
     s = NULL;
 
     EST_CHECK(wolfcert_est_session_open(&bad_cfg, &bs) == WOLFCERT_OK);
     if (ret == 0) {
         brc = wolfcert_est_session_simple_enroll(bs, csr.data, csr.len,
-                                                 &bad_out);
+                                                 &bad_res);
         if (brc != WOLFCERT_ERR_AUTH) {
             fprintf(stderr, "bad-password enroll: rc=%d (%s) wolfssl=%d %s\n",
                     brc, wolfcert_strerror(brc), wolfcert_last_wolfssl_err(),
@@ -236,22 +235,11 @@ static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
         }
     }
     EST_CHECK(brc == WOLFCERT_ERR_AUTH);
-    EST_CHECK(bad_out.data == NULL);
-    wolfcert_est_session_close(bs);
-    bs = NULL;
-
-    brc = WOLFCERT_OK;
-    EST_CHECK(wolfcert_est_session_open(&bad_cfg, &bs) == WOLFCERT_OK);
-    if (ret == 0)
-        brc = wolfcert_est_session_simple_enroll_ex(bs, csr.data, csr.len,
-                                                    &bad_res);
-    EST_CHECK(brc == WOLFCERT_ERR_AUTH);
     EST_CHECK(bad_res.status == WOLFCERT_EST_STATUS_FAILURE);
     EST_CHECK(bad_res.cert_pem.data == NULL);
 
     wolfcert_est_session_close(bs);
     wolfcert_est_result_free(&bad_res);
-    wolfcert_buffer_free(&bad_out);
     wolfcert_buffer_free(&csr);
     wolfcert_key_free(dk);
     return ret;

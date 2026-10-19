@@ -395,13 +395,14 @@ int main(void)
     WolfCertBuffer csr = { 0 };
     REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
 
-    WolfCertBuffer issued = { 0 };
+    WolfCertEstResult issued = { 0 };
     int rc = wolfcert_est_simple_enroll(&cli, csr.data, csr.len, &issued);
     if (rc != WOLFCERT_OK)
         fprintf(stderr, "enroll rc=%d (%s)\n", rc, wolfcert_strerror(rc));
     REQUIRE(rc == WOLFCERT_OK);
-    REQUIRE(memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) != NULL);
-    REQUIRE(check_subject_cn(&issued, "tls-est-client") == 0);
+    REQUIRE(memmem(issued.cert_pem.data, issued.cert_pem.len,
+                   "BEGIN CERTIFICATE", 17) != NULL);
+    REQUIRE(check_subject_cn(&issued.cert_pem, "tls-est-client") == 0);
 
     /* The same trust anchor in DER form. */
     DerBuffer* ta_der = NULL;
@@ -449,7 +450,7 @@ int main(void)
 
     wolfcert_buffer_free(&ca_pem);
     wolfcert_buffer_free(&csr);
-    wolfcert_buffer_free(&issued);
+    wolfcert_est_result_free(&issued);
     wolfcert_key_free(dk);
     free(tls_cert);
     free(tls_key);

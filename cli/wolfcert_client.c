@@ -1275,14 +1275,14 @@ static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
             renew_srv.proto_opts.scep.renewal_msg_type =
                 WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ;
         }
-        rc = wolfcert_scep_renewal_req_ex(&renew_srv, &caps, cas.ra,
+        rc = wolfcert_scep_renewal_req(&renew_srv, &caps, cas.ra,
                  cas.ra_len, cas.bundle, cas.bundle_len, renew_cert->buffer,
                  renew_cert->length, key, csr->data, csr->len, &scep_result);
     }
     else if (rc == WOLFCERT_OK) {
-        rc = wolfcert_scep_pkcs_req_ex(srv, &caps, cas.ra, cas.ra_len,
-                                       cas.bundle, cas.bundle_len, key,
-                                       csr->data, csr->len, &scep_result);
+        rc = wolfcert_scep_pkcs_req(srv, &caps, cas.ra, cas.ra_len,
+                                    cas.bundle, cas.bundle_len, key,
+                                    csr->data, csr->len, &scep_result);
     }
 
     /* GetCertInitial polling while PENDING (RFC 8894 section 3.3.3). */
@@ -1566,6 +1566,7 @@ static int cmd_enroll(int argc, char** argv)
 
     if (ret == 0 && p == WOLFCERT_PROTO_EST) {
 #ifdef WOLFCERT_HAVE_EST
+        WolfCertEstResult est_result = { 0 };
         if (opts.pha) {
             /* TLS 1.3 post-handshake auth on one kept-alive session. */
             srv.proto_opts.est.allow_post_handshake_auth = 1;
@@ -1576,14 +1577,14 @@ static int cmd_enroll(int argc, char** argv)
                 rc = wolfcert_est_session_get_cacerts(es, &ca_pem);
                 wolfcert_buffer_free(&ca_pem);
                 if (rc == WOLFCERT_OK)
-                    rc = wolfcert_est_session_simple_enroll(es, csr.data, csr.len, &issued);
+                    rc = wolfcert_est_session_simple_enroll(es, csr.data, csr.len,
+                                                            &est_result);
                 wolfcert_est_session_close(es);
             }
         }
         else {
-            /* _ex reports 202 Accepted (RFC 7030 section 4.2.3) as PENDING. */
-            WolfCertEstResult est_result = { 0 };
-            rc = wolfcert_est_simple_enroll_ex(&srv, csr.data, csr.len, &est_result);
+            /* 202 Accepted (RFC 7030 section 4.2.3) comes back as PENDING. */
+            rc = wolfcert_est_simple_enroll(&srv, csr.data, csr.len, &est_result);
             int attempts = 0;
             while (rc == WOLFCERT_OK &&
                     est_result.status == WOLFCERT_EST_STATUS_PENDING &&
@@ -1599,26 +1600,26 @@ static int cmd_enroll(int argc, char** argv)
 
                 nanosleep(&ts, NULL);
                 wolfcert_est_result_free(&est_result);
-                rc = wolfcert_est_simple_enroll_ex(&srv, csr.data, csr.len, &est_result);
+                rc = wolfcert_est_simple_enroll(&srv, csr.data, csr.len, &est_result);
                 attempts++;
             }
-
-            if (rc == WOLFCERT_OK) {
-                if (est_result.status == WOLFCERT_EST_STATUS_SUCCESS) {
-                    issued = est_result.cert_pem;
-                    est_result.cert_pem.data = NULL;
-                    est_result.cert_pem.len = 0;
-                }
-                else if (est_result.status == WOLFCERT_EST_STATUS_PENDING) {
-                    rc = WOLFCERT_ERR_PENDING;
-                }
-                else {
-                    rc = WOLFCERT_ERR_PROTOCOL;
-                }
-            }
-
-            wolfcert_est_result_free(&est_result);
         }
+
+        if (rc == WOLFCERT_OK) {
+            if (est_result.status == WOLFCERT_EST_STATUS_SUCCESS) {
+                issued = est_result.cert_pem;
+                est_result.cert_pem.data = NULL;
+                est_result.cert_pem.len = 0;
+            }
+            else if (est_result.status == WOLFCERT_EST_STATUS_PENDING) {
+                rc = WOLFCERT_ERR_PENDING;
+            }
+            else {
+                rc = WOLFCERT_ERR_PROTOCOL;
+            }
+        }
+
+        wolfcert_est_result_free(&est_result);
 #endif
     }
     else if (ret == 0) {

@@ -80,31 +80,12 @@ static int pump_get_cacerts(WolfCertEstSession* s, WolfCertBuffer* out)
     }
 }
 
-/* Returns the terminal rc. */
 static int pump_simple_enroll(WolfCertEstSession* s,
                               const uint8_t* csr, size_t csr_len,
-                              WolfCertBuffer* out)
+                              WolfCertEstResult* out)
 {
     for (;;) {
         int rc = wolfcert_est_session_simple_enroll_nb(s, csr, csr_len, out);
-        if (rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE) {
-            if (wait_io(s, rc) != 0)
-                return WOLFCERT_ERR_IO;
-            continue;
-        }
-        if (rc != WOLFCERT_OK)
-            fprintf(stderr, "enroll rc=%d (%s) last=%s\n",
-                    rc, wolfcert_strerror(rc), wolfcert_last_error_message());
-        return rc;
-    }
-}
-
-static int pump_simple_enroll_ex(WolfCertEstSession* s,
-                                 const uint8_t* csr, size_t csr_len,
-                                 WolfCertEstResult* out)
-{
-    for (;;) {
-        int rc = wolfcert_est_session_simple_enroll_nb_ex(s, csr, csr_len, out);
         if (rc != WOLFCERT_ERR_WANT_READ && rc != WOLFCERT_ERR_WANT_WRITE)
             return rc;
         if (wait_io(s, rc) != 0)
@@ -183,12 +164,14 @@ int main(void)
         REQUIRE(ca_pem.len > 0);
 
         /* The server sends a PHA CertificateRequest mid-call. */
-        WolfCertBuffer issued = { 0 };
+        WolfCertEstResult issued = { 0 };
         REQUIRE(pump_simple_enroll(es, csr.data, csr.len, &issued) == 0);
-        REQUIRE(memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) != NULL);
+        REQUIRE(issued.status == WOLFCERT_EST_STATUS_SUCCESS);
+        REQUIRE(memmem(issued.cert_pem.data, issued.cert_pem.len,
+                       "BEGIN CERTIFICATE", 17) != NULL);
 
         wolfcert_buffer_free(&ca_pem);
-        wolfcert_buffer_free(&issued);
+        wolfcert_est_result_free(&issued);
         wolfcert_est_session_close(es);
 
         wolfcert_server_stop(srv);
@@ -227,24 +210,27 @@ int main(void)
     WolfCertEstSession* bes = NULL;
     REQUIRE(wolfcert_est_session_open_async(&bcli, &bes) == WOLFCERT_OK);
 
-    WolfCertBuffer bca = { 0 }, bissued = { 0 };
+    WolfCertBuffer bca = { 0 };
+    WolfCertEstResult bissued = { 0 };
     REQUIRE(pump_get_cacerts(bes, &bca) == 0);
     REQUIRE(bca.len > 0);
     REQUIRE(pump_simple_enroll(bes, csr.data, csr.len, &bissued) == 0);
-    REQUIRE(memmem(bissued.data, bissued.len, "BEGIN CERTIFICATE", 17) != NULL);
+    REQUIRE(bissued.status == WOLFCERT_EST_STATUS_SUCCESS);
+    REQUIRE(memmem(bissued.cert_pem.data, bissued.cert_pem.len,
+                   "BEGIN CERTIFICATE", 17) != NULL);
 
     wolfcert_buffer_free(&bca);
-    wolfcert_buffer_free(&bissued);
+    wolfcert_est_result_free(&bissued);
     wolfcert_est_session_close(bes);
 
-    /* A wrong password fails both enroll forms, one session each. */
+    /* A wrong password fails the enroll. */
     WolfCertServerCfg wcli = bcli;
     wcli.proto_opts.est.password = "wrong";
     bes = NULL;
     REQUIRE(wolfcert_est_session_open_async(&wcli, &bes) == WOLFCERT_OK);
 
     WolfCertEstResult wr = { 0 };
-    REQUIRE(pump_simple_enroll_ex(bes, csr.data, csr.len, &wr)
+    REQUIRE(pump_simple_enroll(bes, csr.data, csr.len, &wr)
             == WOLFCERT_ERR_AUTH);
     REQUIRE(wr.status == WOLFCERT_EST_STATUS_FAILURE);
     REQUIRE(wr.cert_pem.data == NULL);
@@ -254,13 +240,6 @@ int main(void)
     REQUIRE(wolfcert_est_session_get_cacerts_nb(bes, &bca)
             != WOLFCERT_ERR_BAD_ARG);
     wolfcert_buffer_free(&bca);
-    wolfcert_est_session_close(bes);
-
-    bes = NULL;
-    REQUIRE(wolfcert_est_session_open_async(&wcli, &bes) == WOLFCERT_OK);
-    REQUIRE(pump_simple_enroll(bes, csr.data, csr.len, &bissued)
-            == WOLFCERT_ERR_AUTH);
-    REQUIRE(bissued.data == NULL);
     wolfcert_est_session_close(bes);
 
     wolfcert_server_stop(bsrv);

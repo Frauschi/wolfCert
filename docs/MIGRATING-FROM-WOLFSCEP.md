@@ -38,7 +38,7 @@ If you must keep your own transport, for example on an RTOS with a proprietary s
 | `wolfSCEP_set_bundle` (the pkiMessage your application built) | nothing to pass: wolfCert builds the pkiMessage. You supply `csr_der`, `ra_cert` and `ca_bundle` and it does the rest |
 | `wolfSCEP_request(WS_REQUEST_CACAPS)` then `wolfSCEP_response` | `wolfcert_scep_get_ca_caps` |
 | `wolfSCEP_request(WS_REQUEST_CA)` then `wolfSCEP_response` | `wolfcert_scep_get_ca_cert` or `wolfcert_scep_get_ca_cert_enc` |
-| `wolfSCEP_request(WS_REQUEST_ENROLL)` then `wolfSCEP_response` | `wolfcert_scep_pkcs_req` or `wolfcert_scep_pkcs_req_ex` |
+| `wolfSCEP_request(WS_REQUEST_ENROLL)` then `wolfSCEP_response` | `wolfcert_scep_pkcs_req` |
 | `WS_POST_FLAG` | automatic: POST, or the RFC 8894 section 4.1 GET form, chosen from `GetCACaps` (see [`ARCHITECTURE.md`](ARCHITECTURE.md)) |
 | `wolfSCEP_reply_status` (the HTTP status code) | checked internally; a non-200 surfaces as `WOLFCERT_ERR_HTTP` |
 | your own pkiStatus parse against `WS_PKI_SUCCESS` / `WS_PKI_FAILURE` / `WS_PKI_PENDING` | `WolfCertScepResult.status`, `WOLFCERT_SCEP_STATUS_SUCCESS` / `_FAILURE` / `_PENDING` |
@@ -109,10 +109,10 @@ wolfcert_csr_build(key, &meta, &csr);
 
 /* 4) PKCSReq. One call: envelope, sign, POST, verify, de-envelope. */
 WolfCertScepResult res = { 0 };
-int rc = wolfcert_scep_pkcs_req_ex(&srv, &caps,
-                                   ca_der.data, ca_der.len,   /* envelope target */
-                                   ca_der.data, ca_der.len,   /* trusted bundle  */
-                                   key, csr.data, csr.len, &res);
+int rc = wolfcert_scep_pkcs_req(&srv, &caps,
+                                ca_der.data, ca_der.len,   /* envelope target */
+                                ca_der.data, ca_der.len,   /* trusted bundle  */
+                                key, csr.data, csr.len, &res);
 ```
 
 `res.status` is then `SUCCESS` with the certificate in `res.cert_pem`, `PENDING` with the transactionID in `res.transaction_id` to poll with `wolfcert_scep_get_cert_initial`, or `FAILURE` with `res.fail_info` carrying the RFC 8894 failInfo.
@@ -168,7 +168,7 @@ CAs that predate `RenewalReq` expect a renewal as messageType 19 signed by the o
 srv.proto_opts.scep.renewal_msg_type = WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ;
 ```
 
-The default, `WOLFCERT_SCEP_RENEWAL_MSG_RENEWAL_REQ`, sends 17. The option is read by `wolfcert_scep_renewal_req_ex` and by the session renewals; initial enrollment is always messageType 19 with the self-signed signer and is unaffected.
+The default, `WOLFCERT_SCEP_RENEWAL_MSG_RENEWAL_REQ`, sends 17. The option is read by `wolfcert_scep_renewal_req` and by the session renewals; initial enrollment is always messageType 19 with the self-signed signer and is unaffected.
 
 To decide which your CA wants, read `WolfCertScepCaps.renewal`, which `wolfcert_scep_get_ca_caps` fills from the GetCACaps `Renewal` keyword. A CA that advertises it accepts `RenewalReq`, so the default is right. If it does not advertise `Renewal` and your existing integration renews successfully anyway, you are relying on the older shape and want `PKCS_REQ`. wolfCert does not test the field for you.
 

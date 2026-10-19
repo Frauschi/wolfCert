@@ -170,10 +170,10 @@ wolfcert_cleanup();
   `examples/enroll_scep.c` is the full flow.
 - **Step by step:** `wolfcert_key_generate`, `wolfcert_csr_build`, then
   `wolfcert_est_simple_enroll` (`examples/enroll_est.c`).
-- **Pending approval:** the `_ex` variants report a status of PENDING; poll
-  again later (EST: re-POST after `retry_after_sec`; SCEP:
-  `wolfcert_scep_get_cert_initial`). The plain variants return
-  `WOLFCERT_ERR_PENDING`.
+- **Pending approval:** the enroll calls report PENDING in their result's
+  status; poll again later (EST: re-POST after `retry_after_sec`; SCEP:
+  `wolfcert_scep_get_cert_initial`). `wolfcert_client_enroll` and
+  `wolfcert_client_reenroll` return `WOLFCERT_ERR_PENDING`.
 - **Renewal:** `wolfcert_client_reenroll` (EST, authenticates with the
   certificate being renewed) or `wolfcert_scep_renewal_req`.
 - **Hardware keys:** `examples/enroll_cryptocb.c`.
@@ -184,7 +184,7 @@ wolfcert_cleanup();
 |---|---|
 | `wolfcert/wolfcert.h` | Umbrella header, `wolfcert_init` / `wolfcert_cleanup` |
 | `wolfcert/client.h` | High-level `wolfcert_client_*` API |
-| `wolfcert/est.h`, `wolfcert/scep.h` | Protocol one-shots, `_ex` PENDING variants, sessions, non-blocking `_nb` sessions |
+| `wolfcert/est.h`, `wolfcert/scep.h` | Protocol one-shots, sessions, non-blocking `_nb` sessions |
 | `wolfcert/types.h` | `WolfCertServerCfg`, `WolfCertKeyCfg`, `WolfCertCertMeta`, `WolfCertTransport`, `wolfcert_buffer_free` |
 | `wolfcert/keygen.h`, `wolfcert/csr.h` | Key generation, import / export, CSR building |
 | `wolfcert/store.h` | `WolfCertStoreOps` storage vtable, POSIX and in-memory backends |

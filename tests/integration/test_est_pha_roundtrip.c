@@ -80,11 +80,11 @@ static int expect_enroll_refused(const WolfCertServerCfg* cli, const char* cn)
     WolfCertBuffer csr = { 0 };
     REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
 
-    WolfCertBuffer issued = { 0 };
+    WolfCertEstResult issued = { 0 };
     int rc = wolfcert_est_session_simple_enroll(s, csr.data, csr.len, &issued);
     REQUIRE(rc == WOLFCERT_ERR_AUTH);
     wolfcert_buffer_free(&csr);
-    wolfcert_buffer_free(&issued);
+    wolfcert_est_result_free(&issued);
     wolfcert_key_free(dk);
     wolfcert_est_session_close(s);
     return 0;
@@ -187,23 +187,27 @@ int main(void)
         WolfCertBuffer csr = { 0 };
         REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
 
-        WolfCertBuffer issued = { 0 };
+        WolfCertEstResult issued = { 0 };
         int rc = wolfcert_est_session_simple_enroll(s, csr.data, csr.len, &issued);
         if (rc != WOLFCERT_OK)
             fprintf(stderr, "pha enroll rc=%d (%s) last=%s\n",
                     rc, wolfcert_strerror(rc), wolfcert_last_error_message());
         REQUIRE(rc == WOLFCERT_OK);
-        REQUIRE(memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) != NULL);
-        wolfcert_buffer_free(&issued);
+        REQUIRE(issued.status == WOLFCERT_EST_STATUS_SUCCESS);
+        REQUIRE(memmem(issued.cert_pem.data, issued.cert_pem.len,
+                       "BEGIN CERTIFICATE", 17) != NULL);
+        wolfcert_est_result_free(&issued);
 
         /* A second enroll reuses the cert the connection already holds. */
         REQUIRE(wolfcert_est_session_simple_enroll(s, csr.data, csr.len,
                                                    &issued) == WOLFCERT_OK);
-        REQUIRE(memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) != NULL);
+        REQUIRE(issued.status == WOLFCERT_EST_STATUS_SUCCESS);
+        REQUIRE(memmem(issued.cert_pem.data, issued.cert_pem.len,
+                       "BEGIN CERTIFICATE", 17) != NULL);
 
         wolfcert_buffer_free(&ca_pem);
         wolfcert_buffer_free(&csr);
-        wolfcert_buffer_free(&issued);
+        wolfcert_est_result_free(&issued);
         wolfcert_key_free(dk);
         wolfcert_est_session_close(s);
     }
@@ -262,8 +266,8 @@ int main(void)
         REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
         REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
         REQUIRE(wolfcert_est_session_open(&cli, &s) == WOLFCERT_OK);
-        REQUIRE(wolfcert_est_session_simple_reenroll_ex(s, csr.data, csr.len,
-                                                        &issued) == WOLFCERT_OK);
+        REQUIRE(wolfcert_est_session_simple_reenroll(s, csr.data, csr.len,
+                                                     &issued) == WOLFCERT_OK);
         REQUIRE(issued.status == WOLFCERT_EST_STATUS_SUCCESS);
         REQUIRE(memmem(issued.cert_pem.data, issued.cert_pem.len,
                        "BEGIN CERTIFICATE", 17) != NULL);

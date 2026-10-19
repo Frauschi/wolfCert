@@ -49,7 +49,7 @@ const char* wolfcert_strerror(int err)
         case WOLFCERT_ERR_UNSUPPORTED:
             return "unsupported";
         case WOLFCERT_ERR_PENDING:
-            return "pending (SCEP pkiStatus=3)";
+            return "pending approval";
         case WOLFCERT_ERR_WANT_READ:
             return "would block (want read)";
         case WOLFCERT_ERR_WANT_WRITE:

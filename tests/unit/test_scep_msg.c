@@ -1013,32 +1013,32 @@ static int test_zero_length_args_rejected(void)
         wolfcert_scep_result_free(&r);                     \
     } while (0)
 
-    REJECTS("pkcs_req_ex ra_cert_len",
-        wolfcert_scep_pkcs_req_ex(&srv, &caps, blob, 0,
-                                  blob, sizeof(blob), key, blob, sizeof(blob), &r));
-    REJECTS("pkcs_req_ex ca_bundle_len",
-        wolfcert_scep_pkcs_req_ex(&srv, &caps, blob, sizeof(blob),
-                                  blob, 0, key, blob, sizeof(blob), &r));
-    REJECTS("pkcs_req_ex csr_der_len",
-        wolfcert_scep_pkcs_req_ex(&srv, &caps, blob, sizeof(blob),
-                                  blob, sizeof(blob), key, blob, 0, &r));
+    REJECTS("pkcs_req ra_cert_len",
+        wolfcert_scep_pkcs_req(&srv, &caps, blob, 0,
+                               blob, sizeof(blob), key, blob, sizeof(blob), &r));
+    REJECTS("pkcs_req ca_bundle_len",
+        wolfcert_scep_pkcs_req(&srv, &caps, blob, sizeof(blob),
+                               blob, 0, key, blob, sizeof(blob), &r));
+    REJECTS("pkcs_req csr_der_len",
+        wolfcert_scep_pkcs_req(&srv, &caps, blob, sizeof(blob),
+                               blob, sizeof(blob), key, blob, 0, &r));
 
-    REJECTS("renewal_req_ex ra_cert_len",
-        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, 0,
-                                     blob, sizeof(blob), blob, sizeof(blob),
-                                     key, blob, sizeof(blob), &r));
-    REJECTS("renewal_req_ex ca_bundle_len",
-        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, sizeof(blob),
-                                     blob, 0, blob, sizeof(blob),
-                                     key, blob, sizeof(blob), &r));
-    REJECTS("renewal_req_ex current_cert_len",
-        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, sizeof(blob),
-                                     blob, sizeof(blob), blob, 0,
-                                     key, blob, sizeof(blob), &r));
-    REJECTS("renewal_req_ex csr_der_len",
-        wolfcert_scep_renewal_req_ex(&srv, &caps, blob, sizeof(blob),
-                                     blob, sizeof(blob), blob, sizeof(blob),
-                                     key, blob, 0, &r));
+    REJECTS("renewal_req ra_cert_len",
+        wolfcert_scep_renewal_req(&srv, &caps, blob, 0,
+                                  blob, sizeof(blob), blob, sizeof(blob),
+                                  key, blob, sizeof(blob), &r));
+    REJECTS("renewal_req ca_bundle_len",
+        wolfcert_scep_renewal_req(&srv, &caps, blob, sizeof(blob),
+                                  blob, 0, blob, sizeof(blob),
+                                  key, blob, sizeof(blob), &r));
+    REJECTS("renewal_req current_cert_len",
+        wolfcert_scep_renewal_req(&srv, &caps, blob, sizeof(blob),
+                                  blob, sizeof(blob), blob, 0,
+                                  key, blob, sizeof(blob), &r));
+    REJECTS("renewal_req csr_der_len",
+        wolfcert_scep_renewal_req(&srv, &caps, blob, sizeof(blob),
+                                  blob, sizeof(blob), blob, sizeof(blob),
+                                  key, blob, 0, &r));
 
     REJECTS("get_cert_initial ra_cert_len",
         wolfcert_scep_get_cert_initial(&srv, &caps, blob, 0,
@@ -1089,13 +1089,13 @@ static int test_result_defined_on_early_return(void)
     } while (0)
 
     /* One-shot entry points with a NULL srv. */
-    POISON_AND_CALL("pkcs_req_ex",
-        wolfcert_scep_pkcs_req_ex(NULL, &caps, blob, sizeof(blob),
-                                  blob, sizeof(blob), key, blob, sizeof(blob), &r));
-    POISON_AND_CALL("renewal_req_ex",
-        wolfcert_scep_renewal_req_ex(NULL, &caps, blob, sizeof(blob),
-                                     blob, sizeof(blob), blob, sizeof(blob),
-                                     key, blob, sizeof(blob), &r));
+    POISON_AND_CALL("pkcs_req",
+        wolfcert_scep_pkcs_req(NULL, &caps, blob, sizeof(blob),
+                               blob, sizeof(blob), key, blob, sizeof(blob), &r));
+    POISON_AND_CALL("renewal_req",
+        wolfcert_scep_renewal_req(NULL, &caps, blob, sizeof(blob),
+                                  blob, sizeof(blob), blob, sizeof(blob),
+                                  key, blob, sizeof(blob), &r));
     POISON_AND_CALL("get_cert_initial",
         wolfcert_scep_get_cert_initial(NULL, &caps, blob, sizeof(blob),
                                        blob, sizeof(blob), blob, sizeof(blob),
@@ -1107,27 +1107,27 @@ static int test_result_defined_on_early_return(void)
                                key, blob, sizeof(blob), &r));
 
     /* Session entry points with a NULL session. */
-    POISON_AND_CALL("session_pkcs_req_ex",
-        wolfcert_scep_session_pkcs_req_ex(NULL, &caps, blob, sizeof(blob),
-                                          blob, sizeof(blob), key,
-                                          blob, sizeof(blob), &r));
+    POISON_AND_CALL("session_pkcs_req",
+        wolfcert_scep_session_pkcs_req(NULL, &caps, blob, sizeof(blob),
+                                       blob, sizeof(blob), key,
+                                       blob, sizeof(blob), &r));
     POISON_AND_CALL("session_pkcs_req_nb",
         wolfcert_scep_session_pkcs_req_nb(NULL, &caps, blob, sizeof(blob),
                                           blob, sizeof(blob), key,
                                           blob, sizeof(blob), &r));
-    POISON_AND_CALL("session_renewal_req_ex",
-        wolfcert_scep_session_renewal_req_ex(NULL, &caps, blob, sizeof(blob),
-                                             blob, sizeof(blob), blob, sizeof(blob),
-                                             key, blob, sizeof(blob), &r));
+    POISON_AND_CALL("session_renewal_req",
+        wolfcert_scep_session_renewal_req(NULL, &caps, blob, sizeof(blob),
+                                          blob, sizeof(blob), blob, sizeof(blob),
+                                          key, blob, sizeof(blob), &r));
     POISON_AND_CALL("session_renewal_req_nb",
         wolfcert_scep_session_renewal_req_nb(NULL, &caps, blob, sizeof(blob),
                                              blob, sizeof(blob), blob, sizeof(blob),
                                              key, blob, sizeof(blob), &r));
-    POISON_AND_CALL("session_get_cert_initial_ex",
-        wolfcert_scep_session_get_cert_initial_ex(NULL, &caps, blob, sizeof(blob),
-                                                  blob, sizeof(blob), blob, sizeof(blob),
-                                                  key, blob, sizeof(blob),
-                                                  blob, sizeof(blob), &r));
+    POISON_AND_CALL("session_get_cert_initial",
+        wolfcert_scep_session_get_cert_initial(NULL, &caps, blob, sizeof(blob),
+                                               blob, sizeof(blob), blob, sizeof(blob),
+                                               key, blob, sizeof(blob),
+                                               blob, sizeof(blob), &r));
     POISON_AND_CALL("session_get_cert_initial_nb",
         wolfcert_scep_session_get_cert_initial_nb(NULL, &caps, blob, sizeof(blob),
                                                   blob, sizeof(blob), blob, sizeof(blob),

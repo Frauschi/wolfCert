@@ -29,6 +29,7 @@
 #include "internal.h"
 
 #include <stdlib.h>
+#include <string.h>
 
 struct WolfCertClient { void* heap; };
 
@@ -137,6 +138,21 @@ static int wolfcert_client_auto_csrattrs(const WolfCertServerCfg* srv,
     wolfcert_csr_attrs_free(&attrs);
     return rc;
 }
+
+static int wolfcert_client_take_cert(int rc, WolfCertEstResult* r,
+                                     WolfCertBuffer* out_cert_pem)
+{
+    if (rc == WOLFCERT_OK && r->status == WOLFCERT_EST_STATUS_PENDING) {
+        rc = WOLFCERT_ERR_PENDING;
+    }
+    else if (rc == WOLFCERT_OK) {
+        *out_cert_pem = r->cert_pem;
+        memset(&r->cert_pem, 0, sizeof(r->cert_pem));
+    }
+
+    wolfcert_est_result_free(r);
+    return rc;
+}
 #endif
 
 int wolfcert_client_enroll(WolfCertClient* client, const WolfCertServerCfg* srv,
@@ -176,7 +192,10 @@ int wolfcert_client_enroll(WolfCertClient* client, const WolfCertServerCfg* srv,
 
 #ifdef WOLFCERT_HAVE_EST
     if (srv->protocol == WOLFCERT_PROTO_EST) {
-        rc = wolfcert_est_simple_enroll(srv, csr.data, csr.len, out_cert_pem);
+        WolfCertEstResult r;
+
+        rc = wolfcert_est_simple_enroll(srv, csr.data, csr.len, &r);
+        rc = wolfcert_client_take_cert(rc, &r, out_cert_pem);
     }
     else
 #endif
@@ -235,9 +254,11 @@ int wolfcert_client_reenroll(WolfCertClient* client, const WolfCertServerCfg* sr
 
 #ifdef WOLFCERT_HAVE_EST
     if (srv->protocol == WOLFCERT_PROTO_EST) {
+        WolfCertEstResult r;
+
         rc = wolfcert_est_simple_reenroll(srv, current_cert, current_cert_len,
-                                          current_key, csr.data, csr.len,
-                                          out_cert_pem);
+                                          current_key, csr.data, csr.len, &r);
+        rc = wolfcert_client_take_cert(rc, &r, out_cert_pem);
     }
     else
 #endif

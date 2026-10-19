@@ -143,7 +143,7 @@ four endpoints a typical device needs:
 | `POST /simplereenroll` | `wolfcert_est_simple_reenroll` | Same, with the cert being renewed used as the implicit client identity. The test server's requirements for it are at `WolfCertServerCfgSrv.tls_client_ca_pem` in `wolfcert/server.h`. |
 
 A typical flow is: `wolfcert_key_generate` → `wolfcert_csr_build` →
-`wolfcert_est_simple_enroll` → persist the returned PEM. The keep-alive
+`wolfcert_est_simple_enroll` → persist the issued PEM. The keep-alive
 `WolfCertEstSession` carries several requests on one TLS connection, and is
 what enables the post-handshake-auth bootstrap below.
 
@@ -186,10 +186,10 @@ A client that holds a cert but does not opt into PHA is refused, since the
 server no longer asks for it during a TLS 1.3 handshake.
 
 **Manual approval.** A server may park an enrollment with `202 Accepted` +
-`Retry-After` (RFC 7030 §4.2.3), symmetrical to SCEP's PENDING. The `_ex`
-enroll calls, one-shot and session, surface this as a `WolfCertEstResult`
-with `UNSET` / `SUCCESS` / `FAILURE` / `PENDING` status and a
-`retry_after_sec` hint; the simple-result calls flatten PENDING to
+`Retry-After` (RFC 7030 §4.2.3), symmetrical to SCEP's PENDING. The enroll
+calls, one-shot and session, surface this as a `WolfCertEstResult` with
+`UNSET` / `SUCCESS` / `FAILURE` / `PENDING` status and a `retry_after_sec`
+hint; `wolfcert_client_enroll` and `wolfcert_client_reenroll` return
 `WOLFCERT_ERR_PENDING`.
 
 **`/csrattrs` key-policy pinning.** `wolfcert_est_parse_csr_attrs` decodes the
@@ -213,8 +213,8 @@ whose payload is an EnvelopedData, built on wolfSSL's `wc_PKCS7` API.
 | `GetCACaps`      | plain text | `wolfcert_scep_get_ca_caps` |
 | `GetCACert`      | cert body  | `wolfcert_scep_get_ca_cert` |
 | `GetNextCACert`  | cert body  | `wolfcert_scep_get_next_ca_cert` |
-| `PKCSReq`        | 19         | `wolfcert_scep_pkcs_req_ex` (+ simple `_pkcs_req`) |
-| `RenewalReq`     | 17         | `wolfcert_scep_renewal_req_ex` (+ simple `_renewal_req`) |
+| `PKCSReq`        | 19         | `wolfcert_scep_pkcs_req` |
+| `RenewalReq`     | 17         | `wolfcert_scep_renewal_req` |
 | `GetCertInitial` | 20         | `wolfcert_scep_get_cert_initial` |
 | `GetCert`        | 21         | `wolfcert_scep_get_cert` |
 
@@ -249,7 +249,7 @@ the `ca_bundle` trust set for enrollment.
 
 **Keep-alive / async sessions.** Alongside the one-shot calls, PKCSReq,
 RenewalReq and GetCertInitial have session variants
-(`wolfcert_scep_session_pkcs_req_ex`/`_nb`, etc.) that reuse one connection,
+(`wolfcert_scep_session_pkcs_req`/`_nb`, etc.) that reuse one connection,
 built on the same non-blocking HTTP session as EST (see the session section
 below). Fetch caps + the CA cert with the one-shot getters first, then open a
 session with `wolfcert_scep_session_open` (blocking) or
@@ -429,7 +429,7 @@ wolfSSL leaves `THREAD_LS_T` empty. Otherwise (RTOS and bare-metal builds) the
 state is one global, so keep wolfCert calls on one thread. After any failing call:
 
 ```c
-int rc = wolfcert_est_simple_enroll(&srv, csr, csr_len, &cert);
+int rc = wolfcert_est_simple_enroll(&srv, csr, csr_len, &res);
 if (rc != WOLFCERT_OK) {
     LOG("wolfCert: %s (ssl=%d): %s",
         wolfcert_strerror(rc),

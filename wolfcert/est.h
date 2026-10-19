@@ -103,16 +103,14 @@ WOLFCERT_API int wolfcert_csr_attrs_build(const WolfCertCsrAttrItem* items,
                                           size_t count,
                                           WolfCertBuffer* out_der);
 
-/* Outcome of the _ex enroll calls (RFC 7030 section 4.2), matching the
+/* Outcome of the enroll calls (RFC 7030 section 4.2), matching the
  * WolfCertScepStatus values:
  *   SUCCESS - returns WOLFCERT_OK; cert_pem holds the issued cert.
  *   PENDING - returns WOLFCERT_OK; cert_pem is empty and the caller re-POSTs
  *             the identical request after retry_after_sec (section 4.2.3).
  *   FAILURE - any other HTTP status; returns WOLFCERT_ERR_AUTH for 401/403,
  *             else WOLFCERT_ERR_HTTP.
- *   UNSET   - no usable reply; the int return code says why.
- * The non-_ex calls return PENDING as WOLFCERT_ERR_PENDING and drop
- * retry_after_sec. */
+ *   UNSET   - no usable reply; the int return code says why. */
 typedef enum {
     WOLFCERT_EST_STATUS_UNSET   = 0,
     WOLFCERT_EST_STATUS_SUCCESS = 1,
@@ -138,11 +136,7 @@ WOLFCERT_API void wolfcert_est_result_free(WolfCertEstResult* r);
 /* POST /.well-known/est/simpleenroll. */
 WOLFCERT_API int wolfcert_est_simple_enroll(const WolfCertServerCfg* srv,
                                             const uint8_t* csr_der, size_t csr_der_len,
-                                            WolfCertBuffer* out_cert_pem);
-
-WOLFCERT_API int wolfcert_est_simple_enroll_ex(const WolfCertServerCfg* srv,
-                                               const uint8_t* csr_der, size_t csr_der_len,
-                                               WolfCertEstResult* out);
+                                            WolfCertEstResult* out);
 
 /* POST /.well-known/est/simplereenroll. Uses the caller's current cert/key
  * as the TLS client credential. */
@@ -150,13 +144,7 @@ WOLFCERT_API int wolfcert_est_simple_reenroll(const WolfCertServerCfg* srv,
                                               const uint8_t* current_cert, size_t current_cert_len,
                                               const WolfCertKey* current_key,
                                               const uint8_t* csr_der, size_t csr_der_len,
-                                              WolfCertBuffer* out_cert_pem);
-
-WOLFCERT_API int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
-                                                 const uint8_t* current_cert, size_t current_cert_len,
-                                                 const WolfCertKey* current_key,
-                                                 const uint8_t* csr_der, size_t csr_der_len,
-                                                 WolfCertEstResult* out);
+                                              WolfCertEstResult* out);
 
 /* Keep-alive EST session carrying several requests over one TLS connection.
  * With proto_opts.est.allow_post_handshake_auth set, the server can request
@@ -182,20 +170,16 @@ WOLFCERT_API int wolfcert_est_session_get_csr_attrs(WolfCertEstSession* s,
                                                     WolfCertBuffer* out_attrs_der);
 
 WOLFCERT_API int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
-                                                    const uint8_t* csr_der, size_t csr_der_len,
-                                                    WolfCertBuffer* out_cert_pem);
-
-WOLFCERT_API int wolfcert_est_session_simple_enroll_ex(WolfCertEstSession* s,
-                                                       const uint8_t* csr_der,
-                                                       size_t csr_der_len,
-                                                       WolfCertEstResult* out);
+                                                    const uint8_t* csr_der,
+                                                    size_t csr_der_len,
+                                                    WolfCertEstResult* out);
 
 /* The session's TLS client credential, srv->client_cert and client_key at
  * open, is the cert being renewed; WOLFCERT_ERR_BAD_ARG without one. */
-WOLFCERT_API int wolfcert_est_session_simple_reenroll_ex(WolfCertEstSession* s,
-                                                         const uint8_t* csr_der,
-                                                         size_t csr_der_len,
-                                                         WolfCertEstResult* out);
+WOLFCERT_API int wolfcert_est_session_simple_reenroll(WolfCertEstSession* s,
+                                                      const uint8_t* csr_der,
+                                                      size_t csr_der_len,
+                                                      WolfCertEstResult* out);
 
 WOLFCERT_API void wolfcert_est_session_close(WolfCertEstSession* s);
 
@@ -225,17 +209,12 @@ WOLFCERT_API int wolfcert_est_session_get_csr_attrs_nb(WolfCertEstSession* s,
 WOLFCERT_API int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
                                                        const uint8_t* csr_der,
                                                        size_t csr_der_len,
-                                                       WolfCertBuffer* out_cert_pem);
+                                                       WolfCertEstResult* out);
 
-WOLFCERT_API int wolfcert_est_session_simple_enroll_nb_ex(WolfCertEstSession* s,
-                                                          const uint8_t* csr_der,
-                                                          size_t csr_der_len,
-                                                          WolfCertEstResult* out);
-
-WOLFCERT_API int wolfcert_est_session_simple_reenroll_nb_ex(WolfCertEstSession* s,
-                                                            const uint8_t* csr_der,
-                                                            size_t csr_der_len,
-                                                            WolfCertEstResult* out);
+WOLFCERT_API int wolfcert_est_session_simple_reenroll_nb(WolfCertEstSession* s,
+                                                         const uint8_t* csr_der,
+                                                         size_t csr_der_len,
+                                                         WolfCertEstResult* out);
 
 #ifdef __cplusplus
 }

@@ -441,7 +441,20 @@ int wolfcert_est_session_get_csr_attrs_nb(WolfCertEstSession* s,
                             WOLFCERT_ENCODING_DER, out_attrs_der, NULL, 1);
 }
 
-int wolfcert_est_session_simple_enroll_ex(WolfCertEstSession* s,
+int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
+                                       const uint8_t* csr_der,
+                                       size_t csr_der_len,
+                                       WolfCertEstResult* out)
+{
+    if (out == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+    memset(out, 0, sizeof(*out));
+    return est_session_call(s, EST_OP_SIMPLE_ENROLL, csr_der, csr_der_len,
+                            WOLFCERT_ENCODING_PEM, &out->cert_pem, out, 0);
+}
+
+int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
                                           const uint8_t* csr_der,
                                           size_t csr_der_len,
                                           WolfCertEstResult* out)
@@ -451,53 +464,13 @@ int wolfcert_est_session_simple_enroll_ex(WolfCertEstSession* s,
 
     memset(out, 0, sizeof(*out));
     return est_session_call(s, EST_OP_SIMPLE_ENROLL, csr_der, csr_der_len,
-                            WOLFCERT_ENCODING_PEM, &out->cert_pem, out, 0);
-}
-
-int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
-                                       const uint8_t* csr_der, size_t csr_der_len,
-                                       WolfCertBuffer* out_cert_pem)
-{
-    WolfCertEstResult r = { 0 };
-    int rc = est_session_call(s, EST_OP_SIMPLE_ENROLL, csr_der, csr_der_len,
-                              WOLFCERT_ENCODING_PEM, out_cert_pem, &r, 0);
-
-    if (rc == WOLFCERT_OK && r.status == WOLFCERT_EST_STATUS_PENDING)
-        rc = WOLFCERT_ERR_PENDING;
-    return rc;
-}
-
-int wolfcert_est_session_simple_enroll_nb_ex(WolfCertEstSession* s,
-                                             const uint8_t* csr_der,
-                                             size_t csr_der_len,
-                                             WolfCertEstResult* out)
-{
-    if (out == NULL)
-        return WOLFCERT_ERR_BAD_ARG;
-
-    memset(out, 0, sizeof(*out));
-    return est_session_call(s, EST_OP_SIMPLE_ENROLL, csr_der, csr_der_len,
                             WOLFCERT_ENCODING_PEM, &out->cert_pem, out, 1);
 }
 
-int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
-                                          const uint8_t* csr_der,
-                                          size_t csr_der_len,
-                                          WolfCertBuffer* out_cert_pem)
-{
-    WolfCertEstResult r = { 0 };
-    int rc = est_session_call(s, EST_OP_SIMPLE_ENROLL, csr_der, csr_der_len,
-                              WOLFCERT_ENCODING_PEM, out_cert_pem, &r, 1);
-
-    if (rc == WOLFCERT_OK && r.status == WOLFCERT_EST_STATUS_PENDING)
-        rc = WOLFCERT_ERR_PENDING;
-    return rc;
-}
-
-int wolfcert_est_session_simple_reenroll_ex(WolfCertEstSession* s,
-                                            const uint8_t* csr_der,
-                                            size_t csr_der_len,
-                                            WolfCertEstResult* out)
+int wolfcert_est_session_simple_reenroll(WolfCertEstSession* s,
+                                         const uint8_t* csr_der,
+                                         size_t csr_der_len,
+                                         WolfCertEstResult* out)
 {
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -507,10 +480,10 @@ int wolfcert_est_session_simple_reenroll_ex(WolfCertEstSession* s,
                             WOLFCERT_ENCODING_PEM, &out->cert_pem, out, 0);
 }
 
-int wolfcert_est_session_simple_reenroll_nb_ex(WolfCertEstSession* s,
-                                               const uint8_t* csr_der,
-                                               size_t csr_der_len,
-                                               WolfCertEstResult* out)
+int wolfcert_est_session_simple_reenroll_nb(WolfCertEstSession* s,
+                                            const uint8_t* csr_der,
+                                            size_t csr_der_len,
+                                            WolfCertEstResult* out)
 {
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -566,9 +539,9 @@ int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
                         WOLFCERT_ENCODING_DER, out_attrs_der, NULL);
 }
 
-int wolfcert_est_simple_enroll_ex(const WolfCertServerCfg* srv,
-                                  const uint8_t* csr_der, size_t csr_der_len,
-                                  WolfCertEstResult* out)
+int wolfcert_est_simple_enroll(const WolfCertServerCfg* srv,
+                               const uint8_t* csr_der, size_t csr_der_len,
+                               WolfCertEstResult* out)
 {
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -578,24 +551,11 @@ int wolfcert_est_simple_enroll_ex(const WolfCertServerCfg* srv,
                         WOLFCERT_ENCODING_PEM, &out->cert_pem, out);
 }
 
-int wolfcert_est_simple_enroll(const WolfCertServerCfg* srv,
-                               const uint8_t* csr_der, size_t csr_der_len,
-                               WolfCertBuffer* out_cert_pem)
-{
-    WolfCertEstResult r = { 0 };
-    int rc = est_one_shot(srv, EST_OP_SIMPLE_ENROLL, csr_der, csr_der_len,
-                          WOLFCERT_ENCODING_PEM, out_cert_pem, &r);
-
-    if (rc == WOLFCERT_OK && r.status == WOLFCERT_EST_STATUS_PENDING)
-        rc = WOLFCERT_ERR_PENDING;
-    return rc;
-}
-
-int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
-                                    const uint8_t* current_cert, size_t current_cert_len,
-                                    const WolfCertKey* current_key,
-                                    const uint8_t* csr_der, size_t csr_der_len,
-                                    WolfCertEstResult* out)
+int wolfcert_est_simple_reenroll(const WolfCertServerCfg* srv,
+                                 const uint8_t* current_cert, size_t current_cert_len,
+                                 const WolfCertKey* current_key,
+                                 const uint8_t* csr_der, size_t csr_der_len,
+                                 WolfCertEstResult* out)
 {
     WolfCertServerCfg cfg;
     WolfCertBuffer key_pem = { 0 };
@@ -624,31 +584,5 @@ int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
     if (key_pem.data != NULL)
         wc_ForceZero(key_pem.data, (word32)key_pem.len);
     wolfcert_buffer_free(&key_pem);
-    return rc;
-}
-
-int wolfcert_est_simple_reenroll(const WolfCertServerCfg* srv,
-                                 const uint8_t* current_cert, size_t current_cert_len,
-                                 const WolfCertKey* current_key,
-                                 const uint8_t* csr_der, size_t csr_der_len,
-                                 WolfCertBuffer* out_cert_pem)
-{
-    WolfCertEstResult r;
-    int rc;
-
-    if (out_cert_pem == NULL)
-        return WOLFCERT_ERR_BAD_ARG;
-
-    rc = wolfcert_est_simple_reenroll_ex(srv, current_cert, current_cert_len,
-                                         current_key, csr_der, csr_der_len, &r);
-    if (rc == WOLFCERT_OK && r.status == WOLFCERT_EST_STATUS_PENDING) {
-        rc = WOLFCERT_ERR_PENDING;
-    }
-    else if (rc == WOLFCERT_OK) {
-        *out_cert_pem = r.cert_pem;
-        memset(&r.cert_pem, 0, sizeof(r.cert_pem));
-    }
-
-    wolfcert_est_result_free(&r);
     return rc;
 }

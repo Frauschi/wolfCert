@@ -98,17 +98,22 @@ int main(int argc, char** argv)
         .trust_anchors_len = trust_len,
         .verify_server     = trust != NULL,
     };
-    WolfCertBuffer cert = { 0 };
-    int rc = wolfcert_est_simple_enroll(&srv, csr.data, csr.len, &cert);
+    WolfCertEstResult res = { 0 };
+    int rc = wolfcert_est_simple_enroll(&srv, csr.data, csr.len, &res);
     if (rc != WOLFCERT_OK) {
         fprintf(stderr, "enroll failed: %s\n", wolfcert_strerror(rc));
         return 2;
     }
+    if (res.status == WOLFCERT_EST_STATUS_PENDING) {
+        fprintf(stderr, "enroll pending; retry after %d s\n",
+                res.retry_after_sec);
+        return 2;
+    }
 
-    fwrite(cert.data, 1, cert.len, stdout);
+    fwrite(res.cert_pem.data, 1, res.cert_pem.len, stdout);
 
     wolfcert_buffer_free(&csr);
-    wolfcert_buffer_free(&cert);
+    wolfcert_est_result_free(&res);
     wolfcert_key_free(key);
     free(trust);
     wolfcert_cleanup();

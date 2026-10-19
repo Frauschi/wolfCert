@@ -73,15 +73,15 @@ static int enroll_mldsa(const WolfCertServerCfg* client_cfg, WolfCertKeyType kt,
     WolfCertBuffer csr = { 0 };
     REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
 
-    WolfCertBuffer issued = { 0 };
+    WolfCertEstResult issued = { 0 };
     REQUIRE(wolfcert_est_simple_enroll(client_cfg, csr.data, csr.len, &issued)
             == WOLFCERT_OK);
-    REQUIRE(issued.len > 0);
-    size_t pem_len = issued.len;
+    REQUIRE(issued.cert_pem.len > 0);
+    size_t pem_len = issued.cert_pem.len;
 
     DerBuffer* issued_der = NULL;
-    REQUIRE(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE,
-                        &issued_der, NULL, NULL, NULL) == 0);
+    REQUIRE(wc_PemToDer(issued.cert_pem.data, (long)issued.cert_pem.len,
+                        CERT_TYPE, &issued_der, NULL, NULL, NULL) == 0);
     WOLFSSL_CERT_MANAGER* cm = wolfSSL_CertManagerNew();
     REQUIRE(cm != NULL);
     REQUIRE(wolfSSL_CertManagerLoadCABuffer(cm, ca_pem->data, (long)ca_pem->len,
@@ -95,7 +95,7 @@ static int enroll_mldsa(const WolfCertServerCfg* client_cfg, WolfCertKeyType kt,
     wc_FreeDer(&issued_der);
 
     wolfcert_buffer_free(&csr);
-    wolfcert_buffer_free(&issued);
+    wolfcert_est_result_free(&issued);
     wolfcert_key_free(dk);
     printf("  %s: enrolled + verified (%zu byte PEM)\n", label, pem_len);
     return 0;
