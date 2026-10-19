@@ -36,6 +36,7 @@
 #include <wolfssl/wolfcrypt/rsa.h>
 #include <wolfssl/wolfcrypt/ecc.h>
 
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +53,14 @@
 static void* server_thread(void* arg) { wolfcert_server_run((WolfCertServer*)arg); return NULL; }
 
 #ifdef KEEP_PEER_CERT
+/* Wait on the session fd in the direction a WANT_* return asked for. */
+static int wait_io(WolfCertEstSession* s, int rc)
+{
+    struct pollfd p = { .fd = wolfcert_est_session_fd(s),
+        .events = (rc == WOLFCERT_ERR_WANT_WRITE) ? POLLOUT : POLLIN };
+    return poll(&p, 1, 5000) > 0 ? 0 : -1;
+}
+
 /* Re-enroll the trusted cli_cert while cfg carries an identity the server
  * does not trust; the handshake must present the cert being renewed. */
 static int test_reenroll_ignores_cfg_identity(const char* url,
@@ -68,6 +77,8 @@ static int test_reenroll_ignores_cfg_identity(const char* url,
     WolfCertBuffer csr = { 0 };
     WolfCertBuffer issued = { 0 };
     WolfCertBuffer ca_pem = { 0 };
+    WolfCertEstSession* sess = NULL;
+    WolfCertEstResult res = { 0 };
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertCertMeta meta = { .subject_dn = "CN=factory-bootstrap" };
@@ -102,6 +113,26 @@ static int test_reenroll_ignores_cfg_identity(const char* url,
         fprintf(stderr, "mtls reenroll rc=%d (%s)\n", rc, wolfcert_strerror(rc));
     REQUIRE(rc == WOLFCERT_OK);
     REQUIRE(memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) != NULL);
+
+    /* A session reenrolls with the identity it was opened with. */
+    cli.client_cert     = cli_cert;
+    cli.client_cert_len = cli_cert_len;
+    cli.client_key      = cli_key;
+    cli.client_key_len  = cli_key_len;
+    REQUIRE(wolfcert_est_session_open(&cli, &sess) == WOLFCERT_OK);
+    rc = wolfcert_est_session_simple_reenroll_ex(sess, csr.data, csr.len, &res);
+    wolfcert_est_session_close(sess);
+    REQUIRE(rc == WOLFCERT_OK && res.status == WOLFCERT_EST_STATUS_SUCCESS);
+    wolfcert_est_result_free(&res);
+
+    REQUIRE(wolfcert_est_session_open_async(&cli, &sess) == WOLFCERT_OK);
+    while ((rc = wolfcert_est_session_simple_reenroll_nb_ex(sess, csr.data,
+                                                            csr.len, &res))
+               == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE)
+        REQUIRE(wait_io(sess, rc) == 0);
+    wolfcert_est_session_close(sess);
+    REQUIRE(rc == WOLFCERT_OK && res.status == WOLFCERT_EST_STATUS_SUCCESS);
+    wolfcert_est_result_free(&res);
 
     wolfcert_buffer_free(&issued);
     wolfcert_buffer_free(&csr);
@@ -549,6 +580,16 @@ int main(void)
         REQUIRE(rc != WOLFCERT_OK);
         if (rc == WOLFCERT_OK)
             wolfcert_buffer_free(&ca_pem);
+
+        /* A session without a client cert refuses reenroll before sending. */
+        static const uint8_t csr[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
+        WolfCertEstSession* ns = NULL;
+        WolfCertEstResult nr = { 0 };
+        REQUIRE(wolfcert_est_session_open(&cli, &ns) == WOLFCERT_OK);
+        REQUIRE(wolfcert_est_session_simple_reenroll_ex(ns, csr, sizeof(csr),
+                                                        &nr)
+                == WOLFCERT_ERR_BAD_ARG);
+        wolfcert_est_session_close(ns);
     }
 
     {

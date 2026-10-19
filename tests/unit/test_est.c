@@ -96,7 +96,7 @@ fail:
 
 struct srv_ctx { int listen_fd; uint8_t* body; size_t len; WOLFSSL_CTX* ctx;
                  char request[8192]; size_t request_len;
-                 int post_missing_ctenc; };
+                 int post_missing_ctenc; int status; int conns; };
 
 /* Returns a bound loopback listener and its ephemeral port. */
 static int listen_loopback(int* port)
@@ -199,11 +199,12 @@ static void handle_conn(int cs, struct srv_ctx* sc)
 
     char hdr[256];
     int hn = snprintf(hdr, sizeof(hdr),
-        "HTTP/1.1 200 OK\r\n"
+        "HTTP/1.1 %d X\r\n"
         "Content-Type: application/pkcs7-mime; smime-type=certs-only\r\n"
         "Content-Transfer-Encoding: base64\r\n"
         "Content-Length: %zu\r\n"
-        "Connection: close\r\n\r\n", sc->len);
+        "Connection: close\r\n\r\n", sc->status ? sc->status : 200,
+        sc->len);
     tls_write_all(ssl, hdr, hn);
     tls_write_all(ssl, sc->body, (int)sc->len);
     wolfSSL_shutdown(ssl);
@@ -215,7 +216,7 @@ static void* srv_thread(void* arg)
 {
     struct srv_ctx* sc = (struct srv_ctx*)arg;
 
-    for (int i = 0; i < 5; ++i) {
+    for (int i = 0; i < (sc->conns ? sc->conns : 5); ++i) {
         int cs = accept(sc->listen_fd, NULL, NULL);
         if (cs < 0)
             break;
@@ -318,6 +319,11 @@ static int test_est_require_server_auth(void)
     srv.verify_server = 1;
     REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_IO);
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_IO);
+
+    /* Bad arguments fail before the dial. */
+    REQUIRE(wolfcert_est_get_cacerts(&srv, NULL) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_simple_enroll(&srv, NULL, 0, &out)
+            == WOLFCERT_ERR_BAD_ARG);
 
     return 0;
 }
@@ -535,6 +541,8 @@ static int check_empty_body(WOLFSSL_CTX* ctx, const WolfCertServerCfg* tmpl,
 
     REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_HTTP);
     REQUIRE(out.data == NULL);
+    /* A one-shot closes after its request; a session keeps the connection. */
+    REQUIRE(strstr(sc.request, "Connection: close\r\n") != NULL);
     REQUIRE(wolfcert_est_simple_enroll(&srv, csr, csr_len, &out)
             == WOLFCERT_ERR_HTTP);
     REQUIRE(out.data == NULL);
@@ -546,6 +554,7 @@ static int check_empty_body(WOLFSSL_CTX* ctx, const WolfCertServerCfg* tmpl,
     REQUIRE(wolfcert_est_session_get_cacerts(sess, &out) == WOLFCERT_ERR_HTTP);
     wolfcert_est_session_close(sess);
     REQUIRE(out.data == NULL);
+    REQUIRE(strstr(sc.request, "Connection: keep-alive\r\n") != NULL);
 
     sess = NULL;
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_OK);
@@ -554,6 +563,43 @@ static int check_empty_body(WOLFSSL_CTX* ctx, const WolfCertServerCfg* tmpl,
     wolfcert_est_session_close(sess);
     REQUIRE(out.data == NULL);
 
+    pthread_join(tid, NULL);
+    return 0;
+}
+
+/* 401 is WOLFCERT_ERR_AUTH from every EST call, and an empty 500 does not
+ * mean "no CSR attributes". */
+static int check_error_status(WOLFSSL_CTX* ctx, const WolfCertServerCfg* tmpl)
+{
+    struct srv_ctx sc = { .ctx = ctx, .status = 401, .conns = 3 };
+    WolfCertServerCfg srv = *tmpl;
+    WolfCertEstSession* sess = NULL;
+    WolfCertBuffer out = { 0 };
+    pthread_t tid;
+    char url[128];
+    int port = 0;
+
+    sc.listen_fd = listen_loopback(&port);
+    REQUIRE(sc.listen_fd >= 0);
+    REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/.well-known/est", port);
+    srv.server_url = url;
+
+    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_AUTH);
+    REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == WOLFCERT_ERR_AUTH);
+    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_get_cacerts(sess, &out) == WOLFCERT_ERR_AUTH);
+    wolfcert_est_session_close(sess);
+    pthread_join(tid, NULL);
+
+    sc = (struct srv_ctx){ .ctx = ctx, .status = 500, .conns = 1 };
+    sc.listen_fd = listen_loopback(&port);
+    REQUIRE(sc.listen_fd >= 0);
+    REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/.well-known/est", port);
+
+    REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == WOLFCERT_ERR_HTTP);
+    REQUIRE(out.data == NULL);
     pthread_join(tid, NULL);
     return 0;
 }
@@ -670,6 +716,7 @@ int main(void)
 
     REQUIRE(check_empty_body(ctx, &srv, csr.data, csr.len, ca_der, ca_len,
                              dk) == 0);
+    REQUIRE(check_error_status(ctx, &srv) == 0);
 
     wolfcert_buffer_free(&csr);
     wolfcert_key_free(dk);

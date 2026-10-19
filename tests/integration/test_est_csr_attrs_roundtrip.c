@@ -30,6 +30,7 @@
 
 #include "tls_test_util.h"
 
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -47,6 +48,14 @@ static void* server_thread(void* arg)
 {
     wolfcert_server_run((WolfCertServer*)arg);
     return NULL;
+}
+
+/* Wait on the session fd in the direction a WANT_* return asked for. */
+static int wait_io(WolfCertEstSession* s, int rc)
+{
+    struct pollfd p = { .fd = wolfcert_est_session_fd(s),
+        .events = (rc == WOLFCERT_ERR_WANT_WRITE) ? POLLOUT : POLLIN };
+    return poll(&p, 1, 5000) > 0 ? 0 : -1;
 }
 
 static const uint8_t OID_CHALLENGE_PASSWORD[] = {
@@ -117,6 +126,24 @@ int main(void)
     REQUIRE(wolfcert_est_get_csr_attrs(&cli, &raw) == WOLFCERT_OK);
     REQUIRE(raw.len == blob.len);
     REQUIRE(memcmp(raw.data, blob.data, blob.len) == 0);
+
+    WolfCertEstSession* sess = NULL;
+    WolfCertBuffer sraw = { 0 };
+    int rc;
+    REQUIRE(wolfcert_est_session_open(&cli, &sess) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_get_csr_attrs(sess, &sraw) == WOLFCERT_OK);
+    wolfcert_est_session_close(sess);
+    REQUIRE(sraw.len == blob.len && memcmp(sraw.data, blob.data, blob.len) == 0);
+    wolfcert_buffer_free(&sraw);
+
+    REQUIRE(wolfcert_est_session_open_async(&cli, &sess) == WOLFCERT_OK);
+    while ((rc = wolfcert_est_session_get_csr_attrs_nb(sess, &sraw))
+               == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE)
+        REQUIRE(wait_io(sess, rc) == 0);
+    wolfcert_est_session_close(sess);
+    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(sraw.len == blob.len && memcmp(sraw.data, blob.data, blob.len) == 0);
+    wolfcert_buffer_free(&sraw);
 
     WolfCertCsrAttrs parsed;
     REQUIRE(wolfcert_est_parse_csr_attrs(raw.data, raw.len, &parsed) == WOLFCERT_OK);

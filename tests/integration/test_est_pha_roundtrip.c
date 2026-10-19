@@ -17,8 +17,7 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-/* TLS 1.3 post-handshake auth over the keep-alive EST session. Reenroll over
- * PHA uses a raw TLS client, since sessions have no reenroll call. */
+/* TLS 1.3 post-handshake auth over the keep-alive EST session. */
 
 #define _POSIX_C_SOURCE 200809L
 #define _DEFAULT_SOURCE
@@ -30,7 +29,6 @@
 #include <wolfcert/server.h>
 
 #include <wolfssl/wolfcrypt/asn_public.h>
-#include <wolfssl/wolfcrypt/coding.h>
 #include <wolfssl/wolfcrypt/random.h>
 
 #include "tls_test_util.h"
@@ -52,58 +50,6 @@
 
 
 static void* server_thread(void* arg) { wolfcert_server_run((WolfCertServer*)arg); return NULL; }
-
-#ifdef WOLFSSL_POST_HANDSHAKE_AUTH
-/* POST a renewal CSR for cli_cert over a PHA connection and expect a 200. */
-static int pha_reenroll(uint16_t port, const uint8_t* tls_cert, size_t tls_cert_len,
-                        const uint8_t* cli_cert, size_t cli_cert_len,
-                        const uint8_t* cli_key, size_t cli_key_len)
-{
-    WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
-                            .dev_id = WOLFCERT_DEVID_SOFTWARE };
-    WolfCertCertMeta meta = { .subject_dn = "CN=factory-bootstrap" };
-    WolfCertKey* dk = NULL;
-    WolfCertBuffer csr = { 0 };
-    TestTlsConn c;
-    char req[4096];
-    byte b64[3072];
-    word32 b64_len = sizeof(b64);
-    char resp[64] = { 0 };
-    int n;
-
-    REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
-    REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
-    wolfcert_key_free(dk);
-    REQUIRE(Base64_Encode_NoNl(csr.data, (word32)csr.len, b64, &b64_len) == 0);
-    wolfcert_buffer_free(&csr);
-    n = snprintf(req, sizeof(req),
-                 "POST /.well-known/est/simplereenroll HTTP/1.1\r\n"
-                 "Host: 127.0.0.1\r\nContent-Type: application/pkcs10\r\n"
-                 "Content-Length: %u\r\nConnection: close\r\n\r\n%.*s",
-                 (unsigned)b64_len, (int)b64_len, (const char*)b64);
-    REQUIRE(n > 0 && (size_t)n < sizeof(req));
-
-    /* wolfSSL unloads an SSL-level identity after the handshake, so it goes
-     * on the CTX. */
-    REQUIRE(test_tls_setup(&c, port, tls_cert, tls_cert_len) == 0);
-    REQUIRE(wolfSSL_CTX_use_certificate_buffer(c.ctx, cli_cert, (long)cli_cert_len,
-                                               WOLFSSL_FILETYPE_PEM) == WOLFSSL_SUCCESS);
-    REQUIRE(wolfSSL_CTX_use_PrivateKey_buffer(c.ctx, cli_key, (long)cli_key_len,
-                                              WOLFSSL_FILETYPE_PEM) == WOLFSSL_SUCCESS);
-    wolfSSL_free(c.ssl);
-    c.ssl = wolfSSL_new(c.ctx);
-    REQUIRE(c.ssl != NULL && wolfSSL_set_fd(c.ssl, c.fd) == WOLFSSL_SUCCESS);
-    REQUIRE(wolfSSL_allow_post_handshake_auth(c.ssl) == 0);
-    REQUIRE(wolfSSL_connect(c.ssl) == WOLFSSL_SUCCESS);
-    REQUIRE(test_tls_write(&c, req, (size_t)n) == 0);
-    REQUIRE(test_tls_read(&c, resp, sizeof(resp) - 1) > 0);
-    test_tls_close(&c);
-    if (strncmp(resp, "HTTP/1.1 200", 12) != 0)
-        fprintf(stderr, "pha reenroll: %s\n", resp);
-    REQUIRE(strncmp(resp, "HTTP/1.1 200", 12) == 0);
-    return 0;
-}
-#endif
 
 #ifdef WOLFSSL_POST_HANDSHAKE_AUTH
 static int discard_send(WOLFSSL* ssl, char* buf, int sz, void* ctx)
@@ -291,10 +237,44 @@ int main(void)
         REQUIRE(expect_enroll_refused(&cli, "CN=pha-no-opt-in") == 0);
     }
 
+    /* Reenroll over PHA with a CSR for cli_cert's own subject. */
+    {
+        WolfCertServerCfg cli = {
+            .protocol          = WOLFCERT_PROTO_EST,
+            .server_url        = url,
+            .trust_anchors     = tls_cert,
+            .trust_anchors_len = tls_cert_len,
+            .verify_server     = 1,
+            .client_cert       = cli_cert,
+            .client_cert_len   = cli_cert_len,
+            .client_key        = cli_key,
+            .client_key_len    = cli_key_len,
+            .proto_opts.est    = { .allow_post_handshake_auth = 1 },
+        };
+        WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
+                                .dev_id = WOLFCERT_DEVID_SOFTWARE };
+        WolfCertCertMeta meta = { .subject_dn = "CN=factory-bootstrap" };
+        WolfCertKey* dk = NULL;
+        WolfCertBuffer csr = { 0 };
+        WolfCertEstSession* s = NULL;
+        WolfCertEstResult issued = { 0 };
+
+        REQUIRE(wolfcert_key_generate(&kcfg, &dk) == WOLFCERT_OK);
+        REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
+        REQUIRE(wolfcert_est_session_open(&cli, &s) == WOLFCERT_OK);
+        REQUIRE(wolfcert_est_session_simple_reenroll_ex(s, csr.data, csr.len,
+                                                        &issued) == WOLFCERT_OK);
+        REQUIRE(issued.status == WOLFCERT_EST_STATUS_SUCCESS);
+        REQUIRE(memmem(issued.cert_pem.data, issued.cert_pem.len,
+                       "BEGIN CERTIFICATE", 17) != NULL);
+
+        wolfcert_est_result_free(&issued);
+        wolfcert_est_session_close(s);
+        wolfcert_buffer_free(&csr);
+        wolfcert_key_free(dk);
+    }
+
 #ifdef WOLFSSL_POST_HANDSHAKE_AUTH
-    /* Reenroll over PHA with a CSR for cli_cert's own subject gets 200. */
-    REQUIRE(pha_reenroll(wolfcert_server_port(srv), tls_cert, tls_cert_len,
-                         cli_cert, cli_cert_len, cli_key, cli_key_len) == 0);
 
     /* A client that never answers the CertificateRequest gets a 403. */
     {

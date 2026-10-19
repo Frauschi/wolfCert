@@ -283,6 +283,17 @@ int main(void)
     REQUIRE(wolfSSL_CertManagerLoadCABuffer(ca_cm, ca_der.data, (long)ca_der.len,
                                             WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS);
     wolfSSL_CertManagerFree(ca_cm);
+
+    WolfCertEstSession* ca_sess = NULL;
+    WolfCertBuffer sess_der = { 0 };
+    REQUIRE(wolfcert_est_session_open(&client_cfg, &ca_sess) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_get_cacerts_enc(ca_sess, WOLFCERT_ENCODING_DER,
+                                                 &sess_der) == WOLFCERT_OK);
+    wolfcert_est_session_close(ca_sess);
+    REQUIRE(sess_der.len == ca_der.len &&
+            memcmp(sess_der.data, ca_der.data, ca_der.len) == 0);
+    wolfcert_buffer_free(&sess_der);
+
     wolfcert_buffer_free(&ca_der);
     wolfcert_client_free(client);
 

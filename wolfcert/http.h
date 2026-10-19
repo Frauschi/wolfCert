@@ -87,7 +87,8 @@ WOLFCERT_API void wolfcert_http_response_free(WolfCertHttpResponse* resp);
 typedef struct WolfCertHttpSession WolfCertHttpSession;
 
 typedef struct {
-    const char*    base_url;          /* e.g. https://ca.example */
+    /* Server to connect to, e.g. https://ca.example; a path is ignored. */
+    const char*    base_url;
     const uint8_t* trust_anchors;
     size_t         trust_anchors_len;
     int            verify_server;

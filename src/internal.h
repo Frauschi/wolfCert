@@ -26,6 +26,7 @@
 #define WOLFCERT_INTERNAL_H
 
 #include <wolfcert/types.h>
+#include <wolfcert/http.h>
 #include <wolfcert/keygen.h>
 #include <wolfcert/server.h>
 #include <wolfcert/scep.h>
@@ -304,6 +305,8 @@ int wolfcert_http_hdr_is(const char* line, size_t llen, const char* name);
  * value after leading whitespace, or *val NULL when the line has no colon. */
 int wolfcert_http_hdr_split(const char* line, size_t llen, const char** val,
                             size_t* vlen);
+/* Send Connection: close on the session's requests. */
+void wolfcert_http_session_set_close(WolfCertHttpSession* s);
 
 /* `_encode` emits one line; `_encode_mime` wraps at 64 columns, which libest's
  * BIO_f_base64 body parser requires. `_decode` accepts both. */

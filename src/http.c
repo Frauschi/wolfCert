@@ -1122,6 +1122,12 @@ int wolfcert_http_session_open(const WolfCertHttpSessionCfg* cfg,
     return WOLFCERT_OK;
 }
 
+void wolfcert_http_session_set_close(WolfCertHttpSession* s)
+{
+    if (s != NULL)
+        s->keep_alive = 0;
+}
+
 int wolfcert_http_session_fd(const WolfCertHttpSession* s)
 {
 #ifdef WOLFCERT_HAVE_BUILTIN_TRANSPORT
@@ -1909,7 +1915,7 @@ int wolfcert_http_request(const WolfCertHttpRequest* req, WolfCertHttpResponse* 
 
     rc = wolfcert_http_session_open(&cfg, &s);
     if (rc == WOLFCERT_OK) {
-        s->keep_alive = 0;
+        wolfcert_http_session_set_close(s);
         rc = http_session_call(s, req, resp, 0);
     }
 
