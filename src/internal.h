@@ -283,8 +283,9 @@ typedef struct {
     int    in_trailers;
 } WolfCertChunkScan;
 
-/* 1 once the last chunk and its trailer section have arrived, 0 when more
- * bytes are needed, -1 when the framing is malformed. */
+/* 1 once the last chunk and its trailer section have arrived, with st->pos at
+ * the end of the message; 0 when more bytes are needed, -1 when the framing is
+ * malformed. */
 WOLFCERT_TEST_VIS int wolfcert_http_chunked_complete(const uint8_t* raw,
                                                      size_t raw_len,
                                                      WolfCertChunkScan* st);

@@ -116,8 +116,9 @@ typedef struct {
 WOLFCERT_API int  wolfcert_http_session_open (const WolfCertHttpSessionCfg* cfg,
                                               WolfCertHttpSession** out);
 
-/* Send one request on the open connection. req->url must match the session's
- * scheme, host and port; the TLS fields of req are ignored. */
+/* req->url must match the session's scheme, host and port; req's TLS fields
+ * are ignored. After a failed exchange, a body ending at the close or extra
+ * bytes after a reply, requests get WOLFCERT_ERR_CONN_CLOSED. */
 WOLFCERT_API int  wolfcert_http_session_request(WolfCertHttpSession* s,
                                                 const WolfCertHttpRequest* req,
                                                 WolfCertHttpResponse* resp);

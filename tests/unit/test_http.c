@@ -674,7 +674,7 @@ static void* srv_thread_capture(void* arg)
 }
 
 /* content_transfer_encoding = "base64" puts that header on the wire
- * (RFC 7030 section 4.2.1). */
+ * (RFC 7030 section 4.2.1), and the one-shot asks for Connection: close. */
 static int test_request_transfer_encoding(void)
 {
     struct capture_ctx cc = { 0 };
@@ -701,10 +701,12 @@ static int test_request_transfer_encoding(void)
     pthread_join(tid, NULL);
 
     REQUIRE(strstr(cc.request, "Content-Transfer-Encoding: base64") != NULL);
+    REQUIRE(strstr(cc.request, "Connection: close\r\n") != NULL);
     return 0;
 }
 
-/* GET http://[::1]:port sends Host: [::1]:port, one-shot or via session. */
+/* GET http://[::1]:port sends Host: [::1]:port, one-shot or via session, with
+ * Connection: close or keep-alive. */
 static int ipv6_host_header(int use_session)
 {
     struct capture_ctx cc = { 0 };
@@ -745,6 +747,8 @@ static int ipv6_host_header(int use_session)
     pthread_join(tid, NULL);
 
     REQUIRE(strstr(cc.request, expect) != NULL);
+    REQUIRE(strstr(cc.request, use_session ? "Connection: keep-alive\r\n"
+                                           : "Connection: close\r\n") != NULL);
     return 0;
 }
 
@@ -1240,6 +1244,7 @@ static int test_chunked_complete_resume(void)
         REQUIRE(r == 0);
     }
     REQUIRE(wolfcert_http_chunked_complete((const uint8_t*)ok, n, &st) == 1);
+    REQUIRE(st.pos == n);
 
     memset(&st, 0, sizeof(st));
     for (n = 1; n < sizeof(bad); n++) {

@@ -125,45 +125,72 @@ static void* srv_thread(void* arg)
     return NULL;
 }
 
+/* Start srv_thread on sc, then GET https://127.0.0.1:port/ with verify_server
+ * set and ta as the only trust anchor. */
+static int get_once(struct srv_ctx* sc, const uint8_t* ta, size_t ta_len,
+                    WolfCertHttpResponse* resp)
+{
+    WolfCertHttpRequest req = { .method = "GET", .verify_server = 1 };
+    pthread_t tid;
+    char url[128];
+    int i;
+    int rc;
+
+    WOLFSSL_ATOMIC_STORE(sc->port, 0);
+    if (pthread_create(&tid, NULL, srv_thread, sc) != 0)
+        return WOLFCERT_ERR_GENERIC;
+    for (i = 0; i < 200 && WOLFSSL_ATOMIC_LOAD(sc->port) == 0; ++i) {
+        test_sleep_ms(5);
+    }
+    if (WOLFSSL_ATOMIC_LOAD(sc->port) == 0) {
+        pthread_detach(tid);
+        return WOLFCERT_ERR_GENERIC;
+    }
+
+    snprintf(url, sizeof(url), "https://127.0.0.1:%d/",
+             WOLFSSL_ATOMIC_LOAD(sc->port));
+    req.url               = url;
+    req.trust_anchors     = ta;
+    req.trust_anchors_len = ta_len;
+
+    rc = wolfcert_http_request(&req, resp);
+    pthread_join(tid, NULL);
+
+    return rc;
+}
+
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     struct srv_ctx sc = { 0 };
+    struct srv_ctx other = { 0 };
     REQUIRE(gen_server_identity(&sc.cert_pem, &sc.cert_pem_len,
                                 &sc.key_pem, &sc.key_pem_len) == 0);
+    REQUIRE(gen_server_identity(&other.cert_pem, &other.cert_pem_len,
+                                &other.key_pem, &other.key_pem_len) == 0);
 
-    pthread_t tid;
-    REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);
-    for (int i = 0; i < 200 && WOLFSSL_ATOMIC_LOAD(sc.port) == 0; ++i) {
-        test_sleep_ms(5);
-    }
-    REQUIRE(WOLFSSL_ATOMIC_LOAD(sc.port) != 0);
-
-    char url[128];
-    snprintf(url, sizeof(url), "https://127.0.0.1:%d/", WOLFSSL_ATOMIC_LOAD(sc.port));
-
-    WolfCertHttpRequest req = {
-        .method            = "GET",
-        .url               = url,
-        .trust_anchors     = sc.cert_pem,
-        .trust_anchors_len = sc.cert_pem_len,
-        .verify_server     = 1,
-    };
     WolfCertHttpResponse resp = { 0 };
-    int rc = wolfcert_http_request(&req, &resp);
-    REQUIRE(rc == WOLFCERT_OK);
+    REQUIRE(get_once(&sc, sc.cert_pem, sc.cert_pem_len, &resp) == WOLFCERT_OK);
     REQUIRE(resp.status_code == 200);
     REQUIRE(resp.body_len == 2 && memcmp(resp.body, "ok", 2) == 0);
     wolfcert_http_response_free(&resp);
-
-    pthread_join(tid, NULL);
 #ifdef WOLFSSL_NO_TLS12
     REQUIRE(sc.version != NULL && strcmp(sc.version, "TLSv1.3") == 0);
 #else
     REQUIRE(sc.version != NULL && strcmp(sc.version, "TLSv1.2") == 0);
 #endif
+
+    /* Trusting another self-signed cert fails the handshake. */
+    sc.version = NULL;
+    REQUIRE(get_once(&sc, other.cert_pem, other.cert_pem_len, &resp)
+            != WOLFCERT_OK);
+    REQUIRE(resp.body == NULL && resp.status_code == 0);
+    REQUIRE(sc.version == NULL);
+
     free(sc.cert_pem);
     free(sc.key_pem);
+    free(other.cert_pem);
+    free(other.key_pem);
     wolfcert_cleanup();
     printf("OK\n");
     return 0;
