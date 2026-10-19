@@ -203,7 +203,15 @@ static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
         }
     }
     EST_CHECK(orc == WOLFCERT_OK);
-    EST_CHECK(wolfcert_est_session_get_cacerts(s, &ca_pem) == WOLFCERT_OK);
+    if (ret == 0) {
+        orc = wolfcert_est_session_get_cacerts(s, &ca_pem);
+        if (orc != WOLFCERT_OK) {
+            fprintf(stderr, "session_get_cacerts: rc=%d (%s) wolfssl=%d %s\n",
+                    orc, wolfcert_strerror(orc), wolfcert_last_wolfssl_err(),
+                    wolfcert_last_error_message());
+        }
+    }
+    EST_CHECK(orc == WOLFCERT_OK);
     EST_CHECK(ca_pem.len > 0);
     EST_CHECK(wolfcert_est_session_simple_enroll(s, csr.data, csr.len, &issued)
               == WOLFCERT_OK);

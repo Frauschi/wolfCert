@@ -1519,7 +1519,6 @@ static int scep_session_open_common(const WolfCertServerCfg* srv, int nonblockin
         .client_cert_len    = srv->client_cert_len,
         .client_key         = srv->client_key,
         .client_key_len     = srv->client_key_len,
-        .nonblocking        = nonblocking,
         .transport          = srv->transport,
         .heap               = heap,
     };

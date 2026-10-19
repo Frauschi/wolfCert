@@ -35,6 +35,7 @@
 
 #include <arpa/inet.h>
 #include <netinet/in.h>
+#include <poll.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -125,52 +126,188 @@ static void* srv_thread(void* arg)
     return NULL;
 }
 
-/* Start srv_thread on sc, then GET https://127.0.0.1:port/ with verify_server
- * set and ta as the only trust anchor. */
-static int get_once(struct srv_ctx* sc, const uint8_t* ta, size_t ta_len,
-                    WolfCertHttpResponse* resp)
+/* Start srv_thread on sc and write its https URL to url; 0 once it listens.
+ * A thread that never reports its port is detached, since it may block. */
+static int start_srv(struct srv_ctx* sc, pthread_t* tid, char* url,
+                     size_t url_sz)
 {
-    WolfCertHttpRequest req = { .method = "GET", .verify_server = 1 };
-    pthread_t tid;
-    char url[128];
     int i;
-    int rc;
 
     WOLFSSL_ATOMIC_STORE(sc->port, 0);
-    if (pthread_create(&tid, NULL, srv_thread, sc) != 0)
-        return WOLFCERT_ERR_GENERIC;
+    if (pthread_create(tid, NULL, srv_thread, sc) != 0)
+        return -1;
     for (i = 0; i < 200 && WOLFSSL_ATOMIC_LOAD(sc->port) == 0; ++i) {
         test_sleep_ms(5);
     }
     if (WOLFSSL_ATOMIC_LOAD(sc->port) == 0) {
-        pthread_detach(tid);
-        return WOLFCERT_ERR_GENERIC;
+        pthread_detach(*tid);
+        return -1;
     }
 
-    snprintf(url, sizeof(url), "https://127.0.0.1:%d/",
+    snprintf(url, url_sz, "https://127.0.0.1:%d/",
              WOLFSSL_ATOMIC_LOAD(sc->port));
+    return 0;
+}
+
+/* Start srv_thread on sc, then GET https://127.0.0.1:port/ with verify_server
+ * set and ta as the only trust anchor: as a one-shot, or on a session when
+ * open_rc is not NULL, which then gets the session open's result. */
+static int get_once(struct srv_ctx* sc, const uint8_t* ta, size_t ta_len,
+                    int* open_rc, WolfCertHttpResponse* resp)
+{
+    WolfCertHttpRequest req = { .method = "GET", .verify_server = 1 };
+    WolfCertHttpSessionCfg cfg = { .verify_server = 1 };
+    WolfCertHttpSession* s = NULL;
+    pthread_t tid;
+    char url[128];
+    int rc;
+
+    if (start_srv(sc, &tid, url, sizeof(url)) != 0)
+        return WOLFCERT_ERR_GENERIC;
     req.url               = url;
     req.trust_anchors     = ta;
     req.trust_anchors_len = ta_len;
 
-    rc = wolfcert_http_request(&req, resp);
+    if (open_rc == NULL) {
+        rc = wolfcert_http_request(&req, resp);
+    }
+    else {
+        cfg.base_url          = url;
+        cfg.trust_anchors     = ta;
+        cfg.trust_anchors_len = ta_len;
+        rc = *open_rc = wolfcert_http_session_open(&cfg, &s);
+        if (rc == WOLFCERT_OK)
+            rc = wolfcert_http_session_request(s, &req, resp);
+        wolfcert_http_session_close(s);
+    }
     pthread_join(tid, NULL);
 
     return rc;
 }
+
+#if defined(USE_WOLFSSL_MEMORY) && !defined(WOLFSSL_STATIC_MEMORY) && \
+    !defined(WOLFSSL_DEBUG_MEMORY)
+#define TEST_ALLOC_FAILURES
+#endif
+
+#ifdef TEST_ALLOC_FAILURES
+/* Only the main thread's allocations count, so srv_thread never fails. */
+static pthread_t g_main_thread;
+/* Allocations left before failing_malloc() returns NULL; -1 never fails. */
+static int g_allocs_left = -1;
+static int g_alloc_failed;
+
+static int alloc_fails(void)
+{
+    if (!pthread_equal(pthread_self(), g_main_thread))
+        return 0;
+    if (g_allocs_left == 0) {
+        g_alloc_failed = 1;
+        return 1;
+    }
+    if (g_allocs_left > 0)
+        g_allocs_left--;
+    return 0;
+}
+
+static void* failing_malloc(size_t sz)
+{
+    return alloc_fails() ? NULL : malloc(sz);
+}
+
+static void failing_free(void* ptr)
+{
+    free(ptr);
+}
+
+static void* failing_realloc(void* ptr, size_t sz)
+{
+    return alloc_fails() ? NULL : realloc(ptr, sz);
+}
+
+/* Lets `n` main-thread allocations succeed and fails the rest. */
+static void oom_arm(int n)
+{
+    g_allocs_left = n;
+    g_alloc_failed = 0;
+}
+
+/* Stops failing; 1 when an allocation was failed, 0 if not. */
+static int oom_disarm(void)
+{
+    g_allocs_left = -1;
+    return g_alloc_failed;
+}
+
+/* Failing each allocation of a session's first request in turn: one of them
+ * falls in the handshake and gives WOLFCERT_ERR_MEMORY with the wolfSSL code,
+ * blocking (nb 0) or non-blocking. */
+static int handshake_oom_case(struct srv_ctx* sc, int nb)
+{
+    WolfCertHttpSessionCfg cfg = { .verify_server = 1 };
+    WolfCertHttpRequest req = { .method = "GET" };
+    WolfCertHttpResponse resp = { 0 };
+    WolfCertHttpSession* s = NULL;
+    struct pollfd pfd;
+    pthread_t tid;
+    char url[128];
+    int fails;
+    int failed = 1;
+    int found = 0;
+    int rc;
+
+    cfg.trust_anchors     = sc->cert_pem;
+    cfg.trust_anchors_len = sc->cert_pem_len;
+    for (fails = 0; !found && failed == 1; fails++) {
+        REQUIRE(start_srv(sc, &tid, url, sizeof(url)) == 0);
+        cfg.base_url = url;
+        req.url      = url;
+        REQUIRE(wolfcert_http_session_open(&cfg, &s) == WOLFCERT_OK);
+
+        wolfcert_clear_error();
+        oom_arm(fails);
+        do {
+            rc = nb ? wolfcert_http_session_request_nb(s, &req, &resp)
+                    : wolfcert_http_session_request(s, &req, &resp);
+            if (rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE) {
+                pfd.fd = wolfcert_http_session_fd(s);
+                pfd.events = (rc == WOLFCERT_ERR_WANT_READ) ? POLLIN : POLLOUT;
+                (void)poll(&pfd, 1, 2000);
+            }
+        } while (rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);
+        failed = oom_disarm();
+
+        found = rc == WOLFCERT_ERR_MEMORY && wolfcert_last_wolfssl_err() != 0;
+        wolfcert_http_response_free(&resp);
+        wolfcert_http_session_close(s);
+        pthread_join(tid, NULL);
+    }
+
+    REQUIRE(found);
+    return 0;
+}
+#endif
 
 int main(void)
 {
     REQUIRE(wolfcert_init(NULL) == WOLFCERT_OK);
     struct srv_ctx sc = { 0 };
     struct srv_ctx other = { 0 };
+    int open_rc = -1;
+#ifdef TEST_ALLOC_FAILURES
+    /* Installed before any thread starts; they fail nothing until armed. */
+    g_main_thread = pthread_self();
+    REQUIRE(wolfSSL_SetAllocators(failing_malloc, failing_free,
+                                  failing_realloc) == 0);
+#endif
     REQUIRE(gen_server_identity(&sc.cert_pem, &sc.cert_pem_len,
                                 &sc.key_pem, &sc.key_pem_len) == 0);
     REQUIRE(gen_server_identity(&other.cert_pem, &other.cert_pem_len,
                                 &other.key_pem, &other.key_pem_len) == 0);
 
     WolfCertHttpResponse resp = { 0 };
-    REQUIRE(get_once(&sc, sc.cert_pem, sc.cert_pem_len, &resp) == WOLFCERT_OK);
+    REQUIRE(get_once(&sc, sc.cert_pem, sc.cert_pem_len, NULL, &resp)
+            == WOLFCERT_OK);
     REQUIRE(resp.status_code == 200);
     REQUIRE(resp.body_len == 2 && memcmp(resp.body, "ok", 2) == 0);
     wolfcert_http_response_free(&resp);
@@ -180,12 +317,20 @@ int main(void)
     REQUIRE(sc.version != NULL && strcmp(sc.version, "TLSv1.2") == 0);
 #endif
 
-    /* Trusting another self-signed cert fails the handshake. */
-    sc.version = NULL;
-    REQUIRE(get_once(&sc, other.cert_pem, other.cert_pem_len, &resp)
-            != WOLFCERT_OK);
+    /* Trusting another self-signed cert fails the handshake with ERR_TLS
+     * and the wolfSSL code on a session's first request, after its open
+     * succeeds. */
+    wolfcert_clear_error();
+    REQUIRE(get_once(&sc, other.cert_pem, other.cert_pem_len, &open_rc, &resp)
+            == WOLFCERT_ERR_TLS);
+    REQUIRE(open_rc == WOLFCERT_OK);
+    REQUIRE(wolfcert_last_wolfssl_err() != 0);
     REQUIRE(resp.body == NULL && resp.status_code == 0);
-    REQUIRE(sc.version == NULL);
+
+#ifdef TEST_ALLOC_FAILURES
+    REQUIRE(handshake_oom_case(&sc, 0) == 0);
+    REQUIRE(handshake_oom_case(&sc, 1) == 0);
+#endif
 
     free(sc.cert_pem);
     free(sc.key_pem);

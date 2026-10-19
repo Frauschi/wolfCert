@@ -226,6 +226,9 @@ int  wolfcert_set_error(int wolfcert_rc, int wolfssl_rc,
     wolfcert_set_error((rc), 0, (module), __VA_ARGS__)
 #define WOLFCERT_ERR_WC(wc_rc, module, ...) \
     wolfcert_set_error(wolfcert_map_wc_err(wc_rc), (wc_rc), (module), __VA_ARGS__)
+/* Keeps wc_rc for wolfcert_last_wolfssl_err() but returns rc unmapped. */
+#define WOLFCERT_ERR_RC_WC(rc, wc_rc, module, ...) \
+    wolfcert_set_error((rc), (wc_rc), (module), __VA_ARGS__)
 
 void wolfcert_logv(WolfCertLogLevel lvl, const char* module, const char* fmt, ...);
 

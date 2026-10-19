@@ -489,6 +489,12 @@ The contract:
   implement the negative case with a call that lets it apply, rather than an
   unbounded wait around a non-blocking transfer: the second shape silently
   discards whatever the application configured.
+- **The mode can change between requests on one connection.** wolfCert lets
+  an application make blocking and `_nb` requests on one HTTP or EST session,
+  one request at a time, so a transport can see `0` and a negative value on
+  the same connection. Take special care to honour each call's value if your
+  application needs this; otherwise keep a connection in one mode. Closing a
+  session always writes the TLS `close_notify` with `0`.
 - **Never write more than `len` bytes.** wolfCert rejects a count larger than
   it asked for, but that only keeps the overrun out of its own buffers - the
   write into yours has already happened, so honouring `len` is the transport's

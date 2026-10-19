@@ -372,7 +372,7 @@ struct WolfCertEstSession {
     enum { EST_OP_GET_CACERTS, EST_OP_SIMPLE_ENROLL } in_op;
 };
 
-static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking,
+static int est_session_open_common(const WolfCertServerCfg* srv,
                                    WolfCertEstSession** out)
 {
     if (srv == NULL || srv->server_url == NULL || out == NULL)
@@ -450,7 +450,6 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
         .client_key                = srv->client_key,
         .client_key_len            = srv->client_key_len,
         .allow_post_handshake_auth = srv->proto_opts.est.allow_post_handshake_auth,
-        .nonblocking               = nonblocking,
         .transport                 = srv->transport,
         .heap                      = heap,
     };
@@ -470,13 +469,13 @@ static int est_session_open_common(const WolfCertServerCfg* srv, int nonblocking
 int wolfcert_est_session_open(const WolfCertServerCfg* srv,
                               WolfCertEstSession** out)
 {
-    return est_session_open_common(srv, 0, out);
+    return est_session_open_common(srv, out);
 }
 
 int wolfcert_est_session_open_async(const WolfCertServerCfg* srv,
                                     WolfCertEstSession** out)
 {
-    return est_session_open_common(srv, 1, out);
+    return est_session_open_common(srv, out);
 }
 
 int wolfcert_est_session_fd(const WolfCertEstSession* s)

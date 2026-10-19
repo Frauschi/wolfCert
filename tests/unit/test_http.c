@@ -416,7 +416,6 @@ static int test_session_retry_after_reset(void)
 
     WolfCertHttpSessionCfg cfg = {
         .base_url = base,
-        .nonblocking = 1,
     };
     WolfCertHttpSession* s = NULL;
     REQUIRE(wolfcert_http_session_open(&cfg, &s) == WOLFCERT_OK);
@@ -536,7 +535,6 @@ static int test_session_near_cap_response(void)
 
     WolfCertHttpSessionCfg cfg = {
         .base_url = base,
-        .nonblocking = 1,
         .max_response_bytes = NEAR_CAP_MAX_BODY,
     };
     WolfCertHttpSession* s = NULL;
@@ -618,7 +616,6 @@ static int test_session_eof_cap_response(void)
 
     WolfCertHttpSessionCfg cfg = {
         .base_url = base,
-        .nonblocking = 1,
         .max_response_bytes = NEAR_CAP_MAX_BODY,
     };
     WolfCertHttpSession* s = NULL;

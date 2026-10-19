@@ -423,7 +423,6 @@ struct WolfCertHttpSession {
     int           closed;
     unsigned int  keep_alive : 1;
 
-    int           nonblocking;
     SmState       sm_state;
     char*         sm_head;
     size_t        sm_head_len;
@@ -1096,37 +1095,6 @@ static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
     return WOLFCERT_OK;
 }
 
-static int do_tls_handshake_blocking(WolfCertConn* c)
-{
-    int r = wolfSSL_connect(c->ssl);
-
-    if (r != WOLFSSL_SUCCESS) {
-        int e = wolfSSL_get_error(c->ssl, r);
-        char buf[80];
-        wolfSSL_ERR_error_string((unsigned long)e, buf);
-
-        return WOLFCERT_ERR_WC(e, "http",
-            "TLS handshake failed: wolfSSL_connect=%d err=%d (%s)", r, e, buf);
-    }
-
-    return WOLFCERT_OK;
-}
-
-static int do_tls_handshake_step(WolfCertConn* c)
-{
-    int r = wolfSSL_connect(c->ssl);
-    if (r == WOLFSSL_SUCCESS)
-        return WOLFCERT_OK;
-
-    int e = wolfSSL_get_error(c->ssl, r);
-    if (e == WOLFSSL_ERROR_WANT_READ)
-        return WOLFCERT_ERR_WANT_READ;
-    else if (e == WOLFSSL_ERROR_WANT_WRITE)
-        return WOLFCERT_ERR_WANT_WRITE;
-
-    return WOLFCERT_ERR_TLS;
-}
-
 static size_t rx_max(size_t max_body)
 {
     return max_body + WOLFCERT_HTTP_HEADER_BUDGET;
@@ -1156,7 +1124,6 @@ int wolfcert_http_session_open(const WolfCertHttpSessionCfg* cfg,
         return rc;
     }
 
-    s->conn.io_timeout_ms = cfg->nonblocking ? 0 : -1;
     rc = dial(&s->conn, s->base.host, s->base.port, cfg->timeout_ms,
               &cfg->transport);
     if (rc != WOLFCERT_OK) {
@@ -1181,25 +1148,7 @@ int wolfcert_http_session_open(const WolfCertHttpSessionCfg* cfg,
             wolfcert_http_session_close(s);
             return rc;
         }
-    }
-
-    if (cfg->nonblocking) {
-        /* io_timeout_ms carries the mode; the socket keeps its own state. */
-        s->nonblocking = 1;
-
-        if (s->conn.ssl) {
-            s->sm_state = SM_HANDSHAKE;
-        }
-        else {
-            s->sm_state = SM_IDLE;
-        }
-    }
-    else if (s->base.tls) {
-        rc = do_tls_handshake_blocking(&s->conn);
-        if (rc != WOLFCERT_OK) {
-            wolfcert_http_session_close(s);
-            return rc;
-        }
+        s->sm_state = SM_HANDSHAKE;
     }
 
     *out = s;
@@ -1267,6 +1216,8 @@ void wolfcert_http_session_close(WolfCertHttpSession* s)
         return;
 
     if (s->conn.ssl) {
+        /* Best effort: never wait on a peer that stopped reading. */
+        s->conn.io_timeout_ms = 0;
         wolfSSL_shutdown(s->conn.ssl);
         wolfSSL_free(s->conn.ssl);
     }
@@ -1571,12 +1522,27 @@ static void sm_publish(WolfCertHttpSession* s, uint8_t* body, size_t body_len)
 
 static int sm_handshake(WolfCertHttpSession* s)
 {
-    int rc = do_tls_handshake_step(&s->conn);
+    char buf[WOLFSSL_MAX_ERROR_SZ];
+    int  r = wolfSSL_connect(s->conn.ssl);
+    int  e;
+    int  rc;
 
-    if (rc == WOLFCERT_OK)
+    if (r == WOLFSSL_SUCCESS) {
         s->sm_state = SM_WRITE_HEAD;
+        return WOLFCERT_OK;
+    }
 
-    return rc;
+    e = wolfSSL_get_error(s->conn.ssl, r);
+    if (e == WOLFSSL_ERROR_WANT_READ)
+        return WOLFCERT_ERR_WANT_READ;
+    if (e == WOLFSSL_ERROR_WANT_WRITE)
+        return WOLFCERT_ERR_WANT_WRITE;
+
+    rc = (e == MEMORY_E || e == MEMORY_ERROR) ? WOLFCERT_ERR_MEMORY
+                                               : WOLFCERT_ERR_TLS;
+    wolfSSL_ERR_error_string((unsigned long)e, buf);
+    return WOLFCERT_ERR_RC_WC(rc, e, "http",
+        "TLS handshake failed: wolfSSL_connect=%d err=%d (%s)", r, e, buf);
 }
 
 static int sm_write_head(WolfCertHttpSession* s)
@@ -1897,12 +1863,6 @@ int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
                                      const WolfCertHttpRequest* req,
                                      WolfCertHttpResponse* resp)
 {
-    if (s != NULL && !s->nonblocking) {
-        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "http",
-            "wolfcert_http_session_request_nb: session was not opened "
-            "with WolfCertHttpSessionCfg.nonblocking = 1");
-    }
-
     return http_session_call(s, req, resp, 1);
 }
 

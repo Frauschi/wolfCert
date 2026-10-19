@@ -155,6 +155,12 @@ static const char RESP_EOF0[] =
 static const char RESP_CL0[] =
     "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
 
+/* The peer closes inside the header block, or after 3 of 10 body bytes. */
+static const char RESP_CUT_HEAD[] =
+    "HTTP/1.1 200 OK\r\nContent-Type: text/pl";
+static const char RESP_CUT_BODY[] =
+    "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhel";
+
 /* None of these is terminated by a close. */
 static const char RESP_204[] =
     "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n";
@@ -252,6 +258,24 @@ static int test_body_ends_at_close(void)
     REQUIRE(resp.body_len == 3 && memcmp(resp.body, "bye", 3) == 0);
     REQUIRE(p.disconnects == 1);
     wolfcert_http_response_free(&resp);
+    return 0;
+}
+
+/* A close before the headers or the Content-Length body are complete is
+ * ERR_IO with no response. */
+static int test_truncated_reply_is_io(void)
+{
+    WolfCertHttpResponse resp = { 0 };
+    Peer p = { 0 };
+
+    REQUIRE(fetch(&p, RESP_CUT_HEAD, sizeof(RESP_CUT_HEAD), &resp)
+            == WOLFCERT_ERR_IO);
+    REQUIRE(resp.status_code == 0 && resp.body == NULL);
+
+    memset(&p, 0, sizeof(p));
+    REQUIRE(fetch(&p, RESP_CUT_BODY, sizeof(RESP_CUT_BODY), &resp)
+            == WOLFCERT_ERR_IO);
+    REQUIRE(resp.status_code == 0 && resp.body == NULL);
     return 0;
 }
 
@@ -662,7 +686,6 @@ static int nb_fetch_m(Peer* p, const char* method, const char* bytes,
     p->chunk   = chunk;
     p->open_rc = WOLFCERT_ERR_WANT_READ;
     cfg.transport   = t;
-    cfg.nonblocking = 1;
 
     rc = wolfcert_http_session_open(&cfg, &s);
     if (rc != WOLFCERT_OK)
@@ -677,31 +700,6 @@ static int nb_fetch_m(Peer* p, const char* method, const char* bytes,
 static int nb_fetch(Peer* p, const char* bytes, WolfCertHttpResponse* out)
 {
     return nb_fetch_m(p, "GET", bytes, strlen(bytes), out);
-}
-
-static int test_nb_204_completes(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_204, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 204);
-    REQUIRE(resp.body == NULL && resp.body_len == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_204_keeps_retry_after(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_204_RETRY, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 204);
-    REQUIRE(resp.retry_after_sec == 30);
-    REQUIRE(resp.body == NULL && resp.body_len == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
 }
 
 static int retry_after_of(const char* value, int nb, int* out)
@@ -894,18 +892,6 @@ static int test_retry_after_unset_clock(void)
 }
 #endif
 
-static int test_nb_interim_then_final(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_INTERIM, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
 /* The peer closes with no body at all. */
 static int test_eof_empty_body_is_null(void)
 {
@@ -916,62 +902,6 @@ static int test_eof_empty_body_is_null(void)
     REQUIRE(resp.status_code == 200);
     REQUIRE(resp.body == NULL && resp.body_len == 0);
     wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_head_ignores_content_length(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch_m(&p, "HEAD", RESP_HEAD, strlen(RESP_HEAD), &resp)
-            == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body == NULL && resp.body_len == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_lowercase_head_is_not_head(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch_m(&p, "head", RESP_CL, strlen(RESP_CL), &resp)
-            == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_interim_at_cap_accepted(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_INTERIM_MAX, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_interim_flood_rejected(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_INTERIM_FLOOD, &resp) == WOLFCERT_ERR_PROTOCOL);
-    return 0;
-}
-
-static int test_nb_switching_protocols_rejected(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_101, &resp) == WOLFCERT_ERR_PROTOCOL);
     return 0;
 }
 
@@ -999,46 +929,6 @@ static int test_nb_204_fragmented(void)
     REQUIRE(nb_fetch_m(&p, "GET", RESP_204, 1, &resp) == WOLFCERT_OK);
     REQUIRE(resp.status_code == 204);
     REQUIRE(resp.body == NULL && resp.body_len == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_head_oversized_length_ok(void)
-{
-    WolfCertHttpSessionCfg cfg = { .base_url = "http://peer.test/" };
-    WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
-    WolfCertHttpRequest req = { .method = "HEAD", .url = "http://peer.test/" };
-    WolfCertHttpResponse resp = { 0 };
-    WolfCertHttpSession* s = NULL;
-    Peer p = { 0 };
-
-    t.ctx = &p;
-    p.resp    = RESP_HEAD_BIG;
-    p.chunk   = sizeof(RESP_HEAD_BIG);
-    p.open_rc = WOLFCERT_ERR_WANT_READ;
-    cfg.transport          = t;
-    cfg.nonblocking        = 1;
-    cfg.max_response_bytes = 16;
-
-    REQUIRE(wolfcert_http_session_open(&cfg, &s) == WOLFCERT_OK);
-    REQUIRE(drive_nb(s, &req, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body == NULL && resp.body_len == 0);
-    wolfcert_http_response_free(&resp);
-    wolfcert_http_session_close(s);
-    return 0;
-}
-
-static int test_nb_interim_headers_discarded(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_INTERIM_HDRS, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.content_type != NULL);
-    REQUIRE(strcmp(resp.content_type, "text/final") == 0);
-    REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
     wolfcert_http_response_free(&resp);
     return 0;
 }
@@ -1095,7 +985,6 @@ static int test_nb_chunked_fragmented(void)
     p.stall   = 1;
     p.open_rc = WOLFCERT_ERR_WANT_READ;
     cfg.transport   = t;
-    cfg.nonblocking = 1;
 
     REQUIRE(wolfcert_http_session_open(&cfg, &s) == WOLFCERT_OK);
 
@@ -1134,7 +1023,6 @@ static int test_in_flight_request(void)
     p.open_rc = WOLFCERT_ERR_WANT_READ;
     p.stall   = 1;
     cfg.transport   = t;
-    cfg.nonblocking = 1;
 
     REQUIRE(wolfcert_http_session_open(&cfg, &s) == WOLFCERT_OK);
     REQUIRE(wolfcert_http_session_request_nb(s, &req, &resp)
@@ -1281,6 +1169,8 @@ int main(void)
         return 1;
     if (test_body_ends_at_close())
         return 1;
+    if (test_truncated_reply_is_io())
+        return 1;
     if (test_zero_is_not_data())
         return 1;
     if (test_read_overcount_rejected())
@@ -1307,8 +1197,6 @@ int main(void)
         return 1;
     if (test_lowercase_head_is_not_head())
         return 1;
-    if (test_nb_lowercase_head_is_not_head())
-        return 1;
     if (test_interim_then_final())
         return 1;
     if (test_interim_headers_discarded())
@@ -1321,10 +1209,6 @@ int main(void)
         return 1;
     if (test_switching_protocols_rejected())
         return 1;
-    if (test_nb_204_completes())
-        return 1;
-    if (test_nb_204_keeps_retry_after())
-        return 1;
     if (test_retry_after_delay_seconds())
         return 1;
 #ifndef NO_ASN_TIME
@@ -1333,17 +1217,7 @@ int main(void)
     if (test_retry_after_unset_clock())
         return 1;
 #endif
-    if (test_nb_interim_then_final())
-        return 1;
     if (test_eof_empty_body_is_null())
-        return 1;
-    if (test_nb_head_ignores_content_length())
-        return 1;
-    if (test_nb_interim_at_cap_accepted())
-        return 1;
-    if (test_nb_interim_flood_rejected())
-        return 1;
-    if (test_nb_switching_protocols_rejected())
         return 1;
     if (test_nb_interim_fragmented())
         return 1;
@@ -1358,10 +1232,6 @@ int main(void)
     if (test_blocking_eof_body_closes())
         return 1;
     if (test_head_oversized_length_ok())
-        return 1;
-    if (test_nb_head_oversized_length_ok())
-        return 1;
-    if (test_nb_interim_headers_discarded())
         return 1;
     if (test_session_closes_on_bytes_past_body())
         return 1;
