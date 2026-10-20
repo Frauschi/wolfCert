@@ -203,7 +203,8 @@ static inline int session_basic_auth(const WolfCertServerCfg* client_cfg)
     }
     EST_CHECK(orc == WOLFCERT_OK);
     if (ret == 0) {
-        orc = wolfcert_est_session_get_cacerts(s, &ca_pem);
+        orc = wolfcert_est_session_get_cacerts(s, WOLFCERT_ENCODING_PEM,
+                                               &ca_pem);
         if (orc != WOLFCERT_OK) {
             fprintf(stderr, "session_get_cacerts: rc=%d (%s) wolfssl=%d %s\n",
                     orc, wolfcert_strerror(orc), wolfcert_last_wolfssl_err(),

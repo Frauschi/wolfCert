@@ -647,11 +647,15 @@ static int scep_call_check(const ScepCall* c)
             ok = c->caps_out != NULL;
             break;
         case SCEP_OP_GET_CA_CERT:
-            ok = c->buf_out != NULL;
+            ok = c->buf_out != NULL &&
+                 (c->enc == WOLFCERT_ENCODING_PEM ||
+                  c->enc == WOLFCERT_ENCODING_DER);
             break;
         case SCEP_OP_GET_NEXT_CA_CERT:
             ok = c->buf_out != NULL && c->ca_bundle != NULL &&
-                 c->ca_bundle_len > 0;
+                 c->ca_bundle_len > 0 &&
+                 (c->enc == WOLFCERT_ENCODING_PEM ||
+                  c->enc == WOLFCERT_ENCODING_DER);
             break;
         case SCEP_OP_PKCS_REQ:
             ok = c->csr != NULL && c->csr_len > 0;
@@ -702,6 +706,7 @@ struct WolfCertScepSession {
     /* In-flight state of the single active round trip. */
     int                  in_active;
     enum scep_session_op in_op;        /* valid when in_active */
+    WolfCertEncoding     in_enc;
     char*                in_url;       /* owned request URL */
     WolfCertBuffer       in_pki;       /* built pkiMessage, owned (POST body) */
     WolfCertHttpRequest  in_req;
@@ -905,11 +910,13 @@ static void scep_session_start(WolfCertScepSession* s, const ScepCall* c,
         s->in_req.body_len     = s->in_pki.len;
     }
     s->in_op     = c->op;
+    s->in_enc    = c->enc;
     s->in_out    = scep_call_out(c);
     s->in_active = 1;
 }
 
-/* A resumed _nb poll must name the in-flight operation and output. */
+/* A resumed _nb poll must name the in-flight operation, output and
+ * encoding. */
 static int scep_session_resume_check(const WolfCertScepSession* s,
                                      const ScepCall* c)
 {
@@ -920,6 +927,9 @@ static int scep_session_resume_check(const WolfCertScepSession* s,
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
             "output pointer differs from the in-flight request; pass the "
             "same pointer to each poll call");
+    if (c->enc != s->in_enc)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "scep",
+            "encoding differs from the in-flight request");
     return WOLFCERT_OK;
 }
 
@@ -1301,7 +1311,8 @@ static int scep_session_finish(WolfCertScepSession* s, const ScepCall* c)
         /* RFC 8894 section 4.7.1: the current CA signs a SignedData whose
          * content is a certs-only bundle holding the next CA cert. */
         rc = wolfcert_scep_verify_next_ca_response(r->body, r->body_len,
-                s->in_ca_bundle, s->in_ca_bundle_len, c->buf_out, s->heap);
+                s->in_ca_bundle, s->in_ca_bundle_len, c->enc, c->buf_out,
+                s->heap);
     }
     else {
         rc = scep_finish(s, c->res_out);
@@ -1392,18 +1403,18 @@ int wolfcert_scep_session_get_ca_caps_nb(WolfCertScepSession* s,
     return scep_session_call(s, &c, 1);
 }
 
-int wolfcert_scep_session_get_ca_cert_enc(WolfCertScepSession* s,
-                                          WolfCertEncoding enc,
-                                          WolfCertBuffer* out_ca)
+int wolfcert_scep_session_get_ca_cert(WolfCertScepSession* s,
+                                      WolfCertEncoding enc,
+                                      WolfCertBuffer* out_ca)
 {
     ScepCall c = { .op = SCEP_OP_GET_CA_CERT, .enc = enc, .buf_out = out_ca };
 
     return scep_session_call(s, &c, 0);
 }
 
-int wolfcert_scep_session_get_ca_cert_enc_nb(WolfCertScepSession* s,
-                                             WolfCertEncoding enc,
-                                             WolfCertBuffer* out_ca)
+int wolfcert_scep_session_get_ca_cert_nb(WolfCertScepSession* s,
+                                         WolfCertEncoding enc,
+                                         WolfCertBuffer* out_ca)
 {
     ScepCall c = { .op = SCEP_OP_GET_CA_CERT, .enc = enc, .buf_out = out_ca };
 
@@ -1411,25 +1422,27 @@ int wolfcert_scep_session_get_ca_cert_enc_nb(WolfCertScepSession* s,
 }
 
 int wolfcert_scep_session_get_next_ca_cert(WolfCertScepSession* s,
+                                           WolfCertEncoding enc,
                                            const uint8_t* current_ca_der,
                                            size_t current_ca_len,
-                                           WolfCertBuffer* out_next_ca_pem)
+                                           WolfCertBuffer* out_next_ca)
 {
-    ScepCall c = { .op = SCEP_OP_GET_NEXT_CA_CERT,
+    ScepCall c = { .op = SCEP_OP_GET_NEXT_CA_CERT, .enc = enc,
                    .ca_bundle = current_ca_der, .ca_bundle_len = current_ca_len,
-                   .buf_out = out_next_ca_pem };
+                   .buf_out = out_next_ca };
 
     return scep_session_call(s, &c, 0);
 }
 
 int wolfcert_scep_session_get_next_ca_cert_nb(WolfCertScepSession* s,
+                                              WolfCertEncoding enc,
                                               const uint8_t* current_ca_der,
                                               size_t current_ca_len,
-                                              WolfCertBuffer* out_next_ca_pem)
+                                              WolfCertBuffer* out_next_ca)
 {
-    ScepCall c = { .op = SCEP_OP_GET_NEXT_CA_CERT,
+    ScepCall c = { .op = SCEP_OP_GET_NEXT_CA_CERT, .enc = enc,
                    .ca_bundle = current_ca_der, .ca_bundle_len = current_ca_len,
-                   .buf_out = out_next_ca_pem };
+                   .buf_out = out_next_ca };
 
     return scep_session_call(s, &c, 1);
 }
@@ -1618,13 +1631,8 @@ int wolfcert_scep_get_ca_caps(const WolfCertServerCfg* srv, WolfCertScepCaps* ou
     return scep_one_shot(srv, &c);
 }
 
-int wolfcert_scep_get_ca_cert(const WolfCertServerCfg* srv, WolfCertBuffer* out_ca_pem)
-{
-    return wolfcert_scep_get_ca_cert_enc(srv, WOLFCERT_ENCODING_PEM, out_ca_pem);
-}
-
-int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv, WolfCertEncoding enc,
-                                  WolfCertBuffer* out_ca)
+int wolfcert_scep_get_ca_cert(const WolfCertServerCfg* srv,
+                              WolfCertEncoding enc, WolfCertBuffer* out_ca)
 {
     ScepCall c = { .op = SCEP_OP_GET_CA_CERT, .enc = enc, .buf_out = out_ca };
 
@@ -1632,13 +1640,14 @@ int wolfcert_scep_get_ca_cert_enc(const WolfCertServerCfg* srv, WolfCertEncoding
 }
 
 int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
+                                   WolfCertEncoding enc,
                                    const uint8_t* current_ca_der,
                                    size_t current_ca_len,
-                                   WolfCertBuffer* out_next_ca_pem)
+                                   WolfCertBuffer* out_next_ca)
 {
-    ScepCall c = { .op = SCEP_OP_GET_NEXT_CA_CERT,
+    ScepCall c = { .op = SCEP_OP_GET_NEXT_CA_CERT, .enc = enc,
                    .ca_bundle = current_ca_der, .ca_bundle_len = current_ca_len,
-                   .buf_out = out_next_ca_pem };
+                   .buf_out = out_next_ca };
 
     return scep_one_shot(srv, &c);
 }

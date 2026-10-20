@@ -188,7 +188,8 @@ static int bootstrap(const WolfCertServerCfg* cli, const char* cn,
 {
     if (wolfcert_scep_get_ca_caps(cli, caps) != WOLFCERT_OK)
         return -1;
-    if (wolfcert_scep_get_ca_cert(cli, ca_pem) != WOLFCERT_OK)
+    if (wolfcert_scep_get_ca_cert(cli, WOLFCERT_ENCODING_PEM,
+                                  ca_pem) != WOLFCERT_OK)
         return -1;
     if (wc_PemToDer(ca_pem->data, (long)ca_pem->len, CERT_TYPE,
                     ca_der, NULL, NULL, NULL) != 0) {
@@ -467,8 +468,8 @@ cleanup:
     return ret;
 }
 
-/* Scenario D: _nb on a blocking session, _ex on an async one, and a second
- * call mid-request with another result pointer or operation all get BAD_ARG. */
+/* Scenario D: a call mid-request with another result pointer or operation,
+ * or a blocking call, gets BAD_ARG and leaves the request in flight. */
 static int async_guard_path(WolfCertServer* s)
 {
     char real_url[128];
@@ -483,6 +484,7 @@ static int async_guard_path(WolfCertServer* s)
     WolfCertScepSession* asess = NULL;
     WolfCertScepResult r1 = { 0 };
     WolfCertScepResult r2 = { 0 };
+    WolfCertBuffer gca = { 0 };
     uint16_t bh_port = 0;
     int bh_fd = -1;
     int rc = 0;
@@ -555,6 +557,15 @@ static int async_guard_path(WolfCertServer* s)
     REQUIRE_CLEAN(rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);
     REQUIRE_CLEAN(r1.fail_info == 42);
 
+    /* encoding guard: a GetCACert in flight refuses another encoding. */
+    wolfcert_scep_session_close(asess);
+    asess = NULL;
+    REQUIRE_CLEAN(wolfcert_scep_session_open(&cli, &asess) == WOLFCERT_OK);
+    rc = wolfcert_scep_session_get_ca_cert_nb(asess, WOLFCERT_ENCODING_PEM, &gca);
+    REQUIRE_CLEAN(rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);
+    REQUIRE_CLEAN(wolfcert_scep_session_get_ca_cert_nb(asess,
+                WOLFCERT_ENCODING_DER, &gca) == WOLFCERT_ERR_BAD_ARG);
+
     ret = 0;
 cleanup:
     if (asess != NULL)
@@ -563,6 +574,7 @@ cleanup:
         close(bh_fd);
     wolfcert_scep_result_free(&r1);
     wolfcert_scep_result_free(&r2);
+    wolfcert_buffer_free(&gca);
     if (ca_der != NULL)
         wc_FreeDer(&ca_der);
     wolfcert_buffer_free(&ca_pem);
@@ -1081,7 +1093,7 @@ cleanup:
 }
 
 /* Scenario L: GetCACaps, GetCACert, GetNextCACert and GetCert on one session,
- * blocking and then _nb, each returning what the one-shot returns. */
+ * blocking and then _nb. */
 static int session_get_ops_path(WolfCertServer* s)
 {
     char url[128];
@@ -1092,7 +1104,6 @@ static int session_get_ops_path(WolfCertServer* s)
     DerBuffer* ca_der = NULL;
     WolfCertKey* dk = NULL;
     WolfCertBuffer csr = { 0 };
-    WolfCertBuffer next = { 0 };
     WolfCertBuffer sca = { 0 };
     WolfCertBuffer snext = { 0 };
     WolfCertScepSession* sess = NULL;
@@ -1109,8 +1120,6 @@ static int session_get_ops_path(WolfCertServer* s)
     cli = (WolfCertServerCfg){ .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
     REQUIRE_CLEAN(bootstrap(&cli, "CN=session-get-ops", &caps, &ca_pem, &ca_der,
                             &dk, &csr) == 0);
-    REQUIRE_CLEAN(wolfcert_scep_get_next_ca_cert(&cli, ca_der->buffer,
-                ca_der->length, &next) == WOLFCERT_OK);
 
     /* A cert to fetch back by its serial. */
     REQUIRE_CLEAN(wolfcert_scep_pkcs_req(&cli, &caps, ca_der->buffer,
@@ -1126,14 +1135,17 @@ static int session_get_ops_path(WolfCertServer* s)
     REQUIRE_CLEAN(wolfcert_scep_session_open(&cli, &sess) == WOLFCERT_OK);
     REQUIRE_CLEAN(wolfcert_scep_session_get_ca_caps(sess, &scaps) == WOLFCERT_OK);
     REQUIRE_CLEAN(memcmp(&scaps, &caps, sizeof(caps)) == 0);
-    REQUIRE_CLEAN(wolfcert_scep_session_get_ca_cert_enc(sess,
+    REQUIRE_CLEAN(wolfcert_scep_session_get_ca_cert(sess,
                 WOLFCERT_ENCODING_DER, &sca) == WOLFCERT_OK);
     REQUIRE_CLEAN(sca.len == ca_der->length &&
                   memcmp(sca.data, ca_der->buffer, sca.len) == 0);
-    REQUIRE_CLEAN(wolfcert_scep_session_get_next_ca_cert(sess, ca_der->buffer,
-                ca_der->length, &snext) == WOLFCERT_OK);
-    REQUIRE_CLEAN(snext.len == next.len &&
-                  memcmp(snext.data, next.data, next.len) == 0);
+    REQUIRE_CLEAN(wolfcert_scep_session_get_next_ca_cert(sess,
+                WOLFCERT_ENCODING_PEM, ca_der->buffer, ca_der->length,
+                &snext) == WOLFCERT_OK);
+    REQUIRE_CLEAN(memmem(snext.data, snext.len,
+                         "BEGIN CERTIFICATE", 17) != NULL);
+    REQUIRE_CLEAN(snext.len != ca_pem.len ||
+                  memcmp(snext.data, ca_pem.data, ca_pem.len) != 0);
     REQUIRE_CLEAN(wolfcert_scep_session_get_cert(sess, &caps, ca_der->buffer,
                 ca_der->length, ca_der->buffer, ca_der->length,
                 issued_der->buffer, issued_der->length, dk, dc.serial,
@@ -1154,7 +1166,7 @@ static int session_get_ops_path(WolfCertServer* s)
     REQUIRE_CLEAN(rc == WOLFCERT_OK);
     REQUIRE_CLEAN(memcmp(&scaps, &caps, sizeof(caps)) == 0);
     do {
-        rc = wolfcert_scep_session_get_ca_cert_enc_nb(sess,
+        rc = wolfcert_scep_session_get_ca_cert_nb(sess,
                 WOLFCERT_ENCODING_DER, &sca);
     } while ((rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE) &&
              wait_ready(fd, rc) == 0);
@@ -1162,13 +1174,15 @@ static int session_get_ops_path(WolfCertServer* s)
     REQUIRE_CLEAN(sca.len == ca_der->length &&
                   memcmp(sca.data, ca_der->buffer, sca.len) == 0);
     do {
-        rc = wolfcert_scep_session_get_next_ca_cert_nb(sess, ca_der->buffer,
-                ca_der->length, &snext);
+        rc = wolfcert_scep_session_get_next_ca_cert_nb(sess,
+                WOLFCERT_ENCODING_PEM, ca_der->buffer, ca_der->length, &snext);
     } while ((rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE) &&
              wait_ready(fd, rc) == 0);
     REQUIRE_CLEAN(rc == WOLFCERT_OK);
-    REQUIRE_CLEAN(snext.len == next.len &&
-                  memcmp(snext.data, next.data, next.len) == 0);
+    REQUIRE_CLEAN(memmem(snext.data, snext.len,
+                         "BEGIN CERTIFICATE", 17) != NULL);
+    REQUIRE_CLEAN(snext.len != ca_pem.len ||
+                  memcmp(snext.data, ca_pem.data, ca_pem.len) != 0);
     do {
         rc = wolfcert_scep_session_get_cert_nb(sess, &caps, ca_der->buffer,
                 ca_der->length, ca_der->buffer, ca_der->length,
@@ -1193,7 +1207,6 @@ cleanup:
     wolfcert_scep_result_free(&issued);
     wolfcert_buffer_free(&snext);
     wolfcert_buffer_free(&sca);
-    wolfcert_buffer_free(&next);
     if (ca_der != NULL)
         wc_FreeDer(&ca_der);
     wolfcert_buffer_free(&ca_pem);

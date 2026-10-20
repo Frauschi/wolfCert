@@ -154,6 +154,7 @@ struct WolfCertEstSession {
     WolfCertHttpResponse in_resp;
     const void*          in_out;       /* caller's output, checked on resume */
     enum est_session_op  in_op;
+    WolfCertEncoding     in_enc;
 };
 
 int wolfcert_est_session_open(const WolfCertServerCfg* srv,
@@ -261,7 +262,8 @@ static void est_session_reset(WolfCertEstSession* s)
 
 /* Refuse a resumed _nb call that does not match the request in flight. */
 static int est_session_resume_check(const WolfCertEstSession* s,
-                                    enum est_session_op op, const void* out)
+                                    enum est_session_op op,
+                                    WolfCertEncoding enc, const void* out)
 {
     if (s->in_op != op)
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
@@ -270,6 +272,9 @@ static int est_session_resume_check(const WolfCertEstSession* s,
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
             "output pointer differs from the in-flight request; pass the "
             "same pointer to each poll call");
+    if (enc != s->in_enc)
+        return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
+            "encoding differs from the in-flight request");
     return WOLFCERT_OK;
 }
 
@@ -306,10 +311,22 @@ static void est_call_clear(const WolfCertEstSession* s,
         memset(out, 0, sizeof(*out));
 }
 
+static int est_call_check(enum est_session_op op,
+                          const uint8_t* csr_der, size_t csr_der_len,
+                          WolfCertEncoding enc, const WolfCertBuffer* out)
+{
+    if (out == NULL ||
+        (enc != WOLFCERT_ENCODING_PEM && enc != WOLFCERT_ENCODING_DER) ||
+        (est_is_enroll(op) && (csr_der == NULL || csr_der_len == 0)))
+        return WOLFCERT_ERR_BAD_ARG;
+
+    return WOLFCERT_OK;
+}
+
 /* Build the request for op into s->in_* and mark it in flight. */
 static int est_session_begin(WolfCertEstSession* s, enum est_session_op op,
                              const uint8_t* csr_der, size_t csr_der_len,
-                             const void* out)
+                             WolfCertEncoding enc, const void* out)
 {
     int rc = WOLFCERT_OK;
 
@@ -339,6 +356,7 @@ static int est_session_begin(WolfCertEstSession* s, enum est_session_op op,
             s->in_req.body_len                  = s->in_body.len;
         }
         s->in_op     = op;
+        s->in_enc    = enc;
         s->in_out    = out;
         s->in_active = 1;
     }
@@ -360,8 +378,7 @@ static int est_session_call(WolfCertEstSession* s, enum est_session_op op,
     int rc;
 
     est_call_clear(s, out, res);
-    if (s == NULL || out == NULL ||
-        (est_is_enroll(op) && (csr_der == NULL || csr_der_len == 0)))
+    if (s == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     if (s->in_active && !nb)
@@ -369,13 +386,18 @@ static int est_session_call(WolfCertEstSession* s, enum est_session_op op,
             "an EST request is in flight on this session; continue it with "
             "the _nb call");
 
-    if (s->in_active)
-        rc = est_session_resume_check(s, op, out);
-    else if (op == EST_OP_SIMPLE_REENROLL && !s->has_client_identity)
-        rc = WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
-            "reenroll needs a session opened with the cert being renewed");
-    else
-        rc = est_session_begin(s, op, csr_der, csr_der_len, out);
+    if (s->in_active) {
+        rc = est_session_resume_check(s, op, enc, out);
+    }
+    else {
+        rc = est_call_check(op, csr_der, csr_der_len, enc, out);
+        if (rc == WOLFCERT_OK && op == EST_OP_SIMPLE_REENROLL &&
+                !s->has_client_identity)
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
+                "reenroll needs a session opened with the cert being renewed");
+        if (rc == WOLFCERT_OK)
+            rc = est_session_begin(s, op, csr_der, csr_der_len, enc, out);
+    }
     if (rc != WOLFCERT_OK)
         return rc;
 
@@ -399,30 +421,16 @@ static int est_session_call(WolfCertEstSession* s, enum est_session_op op,
 }
 
 int wolfcert_est_session_get_cacerts(WolfCertEstSession* s,
-                                     WolfCertBuffer* out_ca_pem)
-{
-    return est_session_call(s, EST_OP_GET_CACERTS, NULL, 0,
-                            WOLFCERT_ENCODING_PEM, out_ca_pem, NULL, 0);
-}
-
-int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
-                                        WolfCertBuffer* out_ca_pem)
-{
-    return est_session_call(s, EST_OP_GET_CACERTS, NULL, 0,
-                            WOLFCERT_ENCODING_PEM, out_ca_pem, NULL, 1);
-}
-
-int wolfcert_est_session_get_cacerts_enc(WolfCertEstSession* s,
-                                         WolfCertEncoding enc,
-                                         WolfCertBuffer* out_ca)
+                                     WolfCertEncoding enc,
+                                     WolfCertBuffer* out_ca)
 {
     return est_session_call(s, EST_OP_GET_CACERTS, NULL, 0, enc, out_ca,
                             NULL, 0);
 }
 
-int wolfcert_est_session_get_cacerts_enc_nb(WolfCertEstSession* s,
-                                            WolfCertEncoding enc,
-                                            WolfCertBuffer* out_ca)
+int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
+                                        WolfCertEncoding enc,
+                                        WolfCertBuffer* out_ca)
 {
     return est_session_call(s, EST_OP_GET_CACERTS, NULL, 0, enc, out_ca,
                             NULL, 1);
@@ -499,11 +507,9 @@ static int est_one_shot(const WolfCertServerCfg* srv, enum est_session_op op,
     int rc;
 
     est_call_clear(NULL, out, res);
-    if (out == NULL ||
-        (est_is_enroll(op) && (csr_der == NULL || csr_der_len == 0)))
-        return WOLFCERT_ERR_BAD_ARG;
-
-    rc = wolfcert_est_session_open(srv, &s);
+    rc = est_call_check(op, csr_der, csr_der_len, enc, out);
+    if (rc == WOLFCERT_OK)
+        rc = wolfcert_est_session_open(srv, &s);
     if (rc == WOLFCERT_OK) {
         wolfcert_http_session_set_close(s->http);
         rc = est_session_call(s, op, csr_der, csr_der_len, enc, out, res, 0);
@@ -513,14 +519,8 @@ static int est_one_shot(const WolfCertServerCfg* srv, enum est_session_op op,
     return rc;
 }
 
-int wolfcert_est_get_cacerts(const WolfCertServerCfg* srv, WolfCertBuffer* out_ca_pem)
-{
-    return est_one_shot(srv, EST_OP_GET_CACERTS, NULL, 0,
-                        WOLFCERT_ENCODING_PEM, out_ca_pem, NULL);
-}
-
-int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv, WolfCertEncoding enc,
-                                 WolfCertBuffer* out_ca)
+int wolfcert_est_get_cacerts(const WolfCertServerCfg* srv, WolfCertEncoding enc,
+                             WolfCertBuffer* out_ca)
 {
     return est_one_shot(srv, EST_OP_GET_CACERTS, NULL, 0, enc, out_ca, NULL);
 }

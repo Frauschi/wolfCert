@@ -269,7 +269,8 @@ int main(void)
     client_cfg.transport = counting_transport;
 
     WolfCertBuffer ca_pem = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&client_cfg, &ca_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&client_cfg, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem) == WOLFCERT_OK);
 
     /* For the single-cert test CA the DER result is that cert's raw DER. */
     WolfCertClient* client = NULL;
@@ -287,8 +288,8 @@ int main(void)
     WolfCertEstSession* ca_sess = NULL;
     WolfCertBuffer sess_der = { 0 };
     REQUIRE(wolfcert_est_session_open(&client_cfg, &ca_sess) == WOLFCERT_OK);
-    REQUIRE(wolfcert_est_session_get_cacerts_enc(ca_sess, WOLFCERT_ENCODING_DER,
-                                                 &sess_der) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_get_cacerts(ca_sess, WOLFCERT_ENCODING_DER,
+                                             &sess_der) == WOLFCERT_OK);
     wolfcert_est_session_close(ca_sess);
     REQUIRE(sess_der.len == ca_der.len &&
             memcmp(sess_der.data, ca_der.data, ca_der.len) == 0);

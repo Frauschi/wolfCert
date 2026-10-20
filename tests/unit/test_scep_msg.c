@@ -1571,6 +1571,7 @@ static int test_next_ca_response_signer_trust(void)
     /* Accepted when bound to the CA that actually signed it. */
     REQUIRE(wolfcert_scep_verify_next_ca_response(resp.data, resp.len,
                                                   ca_der, ca_len,
+                                                  WOLFCERT_ENCODING_PEM,
                                                   &pem, NULL) == WOLFCERT_OK);
     REQUIRE(pem.len > 0);
     wolfcert_buffer_free(&pem);
@@ -1578,12 +1579,14 @@ static int test_next_ca_response_signer_trust(void)
     /* Rejected when bound to a different CA. */
     REQUIRE(wolfcert_scep_verify_next_ca_response(resp.data, resp.len,
                                                   att_der, att_len,
+                                                  WOLFCERT_ENCODING_PEM,
                                                   &pem, NULL) != WOLFCERT_OK);
     wolfcert_buffer_free(&pem);
 
     /* A NULL current CA is rejected. */
     REQUIRE(wolfcert_scep_verify_next_ca_response(resp.data, resp.len,
-                                                  NULL, 0, &pem, NULL)
+                                                  NULL, 0, WOLFCERT_ENCODING_PEM,
+                                                  &pem, NULL)
             == WOLFCERT_ERR_BAD_ARG);
     wolfcert_buffer_free(&pem);
 
@@ -2038,6 +2041,35 @@ static int test_scep_builds_before_dial(void)
     return 0;
 }
 
+/* An unknown encoding gets BAD_ARG before the dial, with the output cleared. */
+static int test_scep_rejects_bad_encoding(void)
+{
+    static const uint8_t dummy_ca[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
+    WolfCertServerCfg srv = { .protocol = WOLFCERT_PROTO_SCEP,
+                              .server_url = "http://127.0.0.1:1/scep" };
+    WolfCertBuffer out;
+
+    memset(&out, 0xA5, sizeof(out));
+    REQUIRE(wolfcert_scep_get_ca_cert(&srv, (WolfCertEncoding)2, &out)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(out.data == NULL && out.len == 0);
+
+    memset(&out, 0xA5, sizeof(out));
+    REQUIRE(wolfcert_scep_get_next_ca_cert(&srv, (WolfCertEncoding)2,
+                                           dummy_ca, sizeof(dummy_ca), &out)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(out.data == NULL && out.len == 0);
+
+    /* So does GetNextCACert without the current CA it is checked against. */
+    REQUIRE(wolfcert_scep_get_next_ca_cert(&srv, WOLFCERT_ENCODING_PEM,
+                                           NULL, 0, &out)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_get_next_ca_cert(&srv, WOLFCERT_ENCODING_PEM,
+                                           dummy_ca, 0, &out)
+            == WOLFCERT_ERR_BAD_ARG);
+    return 0;
+}
+
 /* An EST config with Basic credentials gets BAD_ARG from the SCEP GetCA*
  * calls and the session open. */
 static int test_scep_rejects_est_cfg(void)
@@ -2054,10 +2086,12 @@ static int test_scep_rejects_est_cfg(void)
     WolfCertScepSession* sess = NULL;
 
     REQUIRE(wolfcert_scep_get_ca_caps(&srv, &caps) == WOLFCERT_ERR_BAD_ARG);
-    REQUIRE(wolfcert_scep_get_ca_cert(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
-    REQUIRE(wolfcert_scep_get_ca_cert_enc(&srv, WOLFCERT_ENCODING_DER, &out)
+    REQUIRE(wolfcert_scep_get_ca_cert(&srv, WOLFCERT_ENCODING_PEM,
+                                      &out) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_scep_get_ca_cert(&srv, WOLFCERT_ENCODING_DER, &out)
             == WOLFCERT_ERR_BAD_ARG);
-    REQUIRE(wolfcert_scep_get_next_ca_cert(&srv, dummy_ca, sizeof(dummy_ca),
+    REQUIRE(wolfcert_scep_get_next_ca_cert(&srv, WOLFCERT_ENCODING_PEM,
+                                           dummy_ca, sizeof(dummy_ca),
                                            &out) == WOLFCERT_ERR_BAD_ARG);
 
     REQUIRE(wolfcert_scep_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
@@ -2885,6 +2919,8 @@ int main(void)
     REQUIRE(test_static_mem_init() == 0);
     REQUIRE(wolfcert_init(test_heap_hint()) == WOLFCERT_OK);
     if (run_test(test_getca_url))
+        return 1;
+    if (run_test(test_scep_rejects_bad_encoding))
         return 1;
     if (run_test(test_scep_builds_before_dial))
         return 1;

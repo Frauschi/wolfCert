@@ -68,7 +68,8 @@ static int expect_enroll_refused(const WolfCertServerCfg* cli, const char* cn)
     REQUIRE(wolfcert_est_session_open(cli, &s) == WOLFCERT_OK);
 
     WolfCertBuffer ca_pem = { 0 };
-    REQUIRE(wolfcert_est_session_get_cacerts(s, &ca_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_get_cacerts(s, WOLFCERT_ENCODING_PEM,
+                                             &ca_pem) == WOLFCERT_OK);
     REQUIRE(ca_pem.len > 0);
     wolfcert_buffer_free(&ca_pem);
 
@@ -175,7 +176,8 @@ int main(void)
 
         /* /cacerts on the anonymous leg of the TLS connection. */
         WolfCertBuffer ca_pem = { 0 };
-        REQUIRE(wolfcert_est_session_get_cacerts(s, &ca_pem) == WOLFCERT_OK);
+        REQUIRE(wolfcert_est_session_get_cacerts(s, WOLFCERT_ENCODING_PEM,
+                                                 &ca_pem) == WOLFCERT_OK);
         REQUIRE(ca_pem.len > 0);
 
         /* /simpleenroll triggers the server's CertificateRequest. */

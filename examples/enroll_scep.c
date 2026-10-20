@@ -84,7 +84,8 @@ int main(int argc, char** argv)
 
     /* 1) GetCACert, converted to DER for the SCEP envelope. */
     WolfCertBuffer ca_pem = { 0 };
-    if (wolfcert_scep_get_ca_cert(&srv, &ca_pem) != WOLFCERT_OK) {
+    if (wolfcert_scep_get_ca_cert(&srv, WOLFCERT_ENCODING_PEM,
+                                  &ca_pem) != WOLFCERT_OK) {
         fprintf(stderr, "GetCACert failed\n");
         return 2;
     }

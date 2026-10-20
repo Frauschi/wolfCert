@@ -65,12 +65,12 @@ int wolfcert_client_get_ca(WolfCertClient* client, const WolfCertServerCfg* srv,
 
 #ifdef WOLFCERT_HAVE_EST
     if (srv->protocol == WOLFCERT_PROTO_EST)
-        return wolfcert_est_get_cacerts_enc(srv, encoding, out_ca);
+        return wolfcert_est_get_cacerts(srv, encoding, out_ca);
 #endif
 
 #ifdef WOLFCERT_HAVE_SCEP
     if (srv->protocol == WOLFCERT_PROTO_SCEP)
-        return wolfcert_scep_get_ca_cert_enc(srv, encoding, out_ca);
+        return wolfcert_scep_get_ca_cert(srv, encoding, out_ca);
 #endif
 
     return WOLFCERT_ERR_UNSUPPORTED;

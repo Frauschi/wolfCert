@@ -1220,7 +1220,7 @@ static int scep_resolve_ca(const WolfCertServerCfg* srv, const CaPin* pin,
                            const char* who, int pick_ra, ScepCaSet* cs)
 {
     WolfCertBuffer der = { 0 };
-    int rc = wolfcert_scep_get_ca_cert_enc(srv, WOLFCERT_ENCODING_DER, &der);
+    int rc = wolfcert_scep_get_ca_cert(srv, WOLFCERT_ENCODING_DER, &der);
 
     memset(cs, 0, sizeof(*cs));
     if (rc == WOLFCERT_OK)
@@ -1380,13 +1380,13 @@ static int cmd_getcacerts(int argc, char** argv)
     if (ret == 0) {
         if (p == WOLFCERT_PROTO_EST) {
 #ifdef WOLFCERT_HAVE_EST
-            rc = wolfcert_est_get_cacerts(&srv, &pem);
+            rc = wolfcert_est_get_cacerts(&srv, WOLFCERT_ENCODING_PEM, &pem);
 #endif
         }
         else {
 #ifdef WOLFCERT_HAVE_SCEP
-            rc = wolfcert_scep_get_ca_cert_enc(&srv, WOLFCERT_ENCODING_DER,
-                                               &der);
+            rc = wolfcert_scep_get_ca_cert(&srv, WOLFCERT_ENCODING_DER,
+                                           &der);
 #endif
         }
 
@@ -1574,7 +1574,8 @@ static int cmd_enroll(int argc, char** argv)
             rc = wolfcert_est_session_open(&srv, &es);
             if (rc == WOLFCERT_OK) {
                 WolfCertBuffer ca_pem = { 0 };
-                rc = wolfcert_est_session_get_cacerts(es, &ca_pem);
+                rc = wolfcert_est_session_get_cacerts(es, WOLFCERT_ENCODING_PEM,
+                                                      &ca_pem);
                 wolfcert_buffer_free(&ca_pem);
                 if (rc == WOLFCERT_OK)
                     rc = wolfcert_est_session_simple_enroll(es, csr.data, csr.len,
@@ -2113,7 +2114,8 @@ static int cmd_getnextca(int argc, char** argv)
     }
 
     if (ret == 0) {
-        rc = wolfcert_scep_get_next_ca_cert(&srv, current, current_len, &pem);
+        rc = wolfcert_scep_get_next_ca_cert(&srv, WOLFCERT_ENCODING_PEM,
+                                            current, current_len, &pem);
         if (rc != WOLFCERT_OK) {
             fprintf(stderr, "getnextca: %s\n", wolfcert_strerror(rc));
             if (pin.ca.len > 0 && rc == WOLFCERT_ERR_AUTH) {

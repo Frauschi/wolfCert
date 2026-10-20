@@ -37,7 +37,7 @@ If you must keep your own transport, for example on an RTOS with a proprietary s
 | `wolfSCEP_set_getCaId` | `srv.proto_opts.scep.ca_id` |
 | `wolfSCEP_set_bundle` (the pkiMessage your application built) | nothing to pass: wolfCert builds the pkiMessage. You supply `csr_der`, `ra_cert` and `ca_bundle` and it does the rest |
 | `wolfSCEP_request(WS_REQUEST_CACAPS)` then `wolfSCEP_response` | `wolfcert_scep_get_ca_caps` |
-| `wolfSCEP_request(WS_REQUEST_CA)` then `wolfSCEP_response` | `wolfcert_scep_get_ca_cert` or `wolfcert_scep_get_ca_cert_enc` |
+| `wolfSCEP_request(WS_REQUEST_CA)` then `wolfSCEP_response` | `wolfcert_scep_get_ca_cert` |
 | `wolfSCEP_request(WS_REQUEST_ENROLL)` then `wolfSCEP_response` | `wolfcert_scep_pkcs_req` |
 | `WS_POST_FLAG` | automatic: POST, or the RFC 8894 section 4.1 GET form, chosen from `GetCACaps` (see [`ARCHITECTURE.md`](ARCHITECTURE.md)) |
 | `wolfSCEP_reply_status` (the HTTP status code) | checked internally; a non-200 surfaces as `WOLFCERT_ERR_HTTP` |
@@ -45,7 +45,7 @@ If you must keep your own transport, for example on an RTOS with a proprietary s
 | `wolfSCEP_reply_error`, `wolfSCEP_get_error` | `wolfcert_strerror` and `wolfcert_last_error_message` |
 | `wolfSCEP_Debugging_ON` / `_OFF` | `wolfcert_set_log_cb` and `wolfcert_set_log_level` |
 | your own CA fingerprint check | `wolfcert_scep_verify_ca_fingerprint`, or `wolfcert-client --ca-fingerprint` from the CLI |
-| no equivalent | `wolfcert_scep_renewal_req` (either messageType, see below), `wolfcert_scep_get_cert_initial`, `wolfcert_scep_get_cert`, `wolfcert_scep_get_next_ca_cert`, the keep-alive and async session API, and all of EST |
+| no equivalent | `wolfcert_scep_renewal_req` (either messageType, see below), `wolfcert_scep_get_cert_initial`, `wolfcert_scep_get_cert`, `wolfcert_scep_get_next_ca_cert`, the keep-alive session API with blocking and `_nb` calls, and all of EST |
 
 `WS_REQUEST_CERT` and `WS_REQUEST_CRL` need no entry. Both fall through to the default case of `wolfSCEP_request()` and return `WS_BAD_ARGUMENT`, so no working integration can be using them. wolfCert covers the first anyway with `wolfcert_scep_get_cert`; it has no GetCRL, and RFC 8894 section 2.7 would rather you used the CRL distribution point.
 
@@ -86,7 +86,7 @@ WolfCertServerCfg srv = {
 
 /* 1) GetCACert, then pin it against a fingerprint you hold out of band. */
 WolfCertBuffer ca_der = { 0 };
-wolfcert_scep_get_ca_cert_enc(&srv, WOLFCERT_ENCODING_DER, &ca_der);
+wolfcert_scep_get_ca_cert(&srv, WOLFCERT_ENCODING_DER, &ca_der);
 if (wolfcert_scep_verify_ca_fingerprint(ca_der.data, ca_der.len,
                                         expected_fp, sizeof(expected_fp),
                                         WOLFCERT_SCEP_FP_SHA256) != WOLFCERT_OK)
@@ -152,7 +152,7 @@ srv.proto_opts.scep.content_cipher = WOLFCERT_SCEP_CIPHER_AES256;
 
 **Fingerprint verification is now the library's job.** Delete your helper and call `wolfcert_scep_verify_ca_fingerprint`, which hashes the DER certificate and compares in constant time.
 
-**Error codes are a different, smaller set.** wolfSCEP's `WS_*` codes map onto `wolfcert/errors.h`: `WS_BAD_ARGUMENT` to `WOLFCERT_ERR_BAD_ARG`, `WS_MEMORY_E` to `WOLFCERT_ERR_MEMORY`, `WS_PARSE_E` to `WOLFCERT_ERR_PARSE`, the `WS_CBIO_ERR_*` family to `WOLFCERT_ERR_IO` and, in non-blocking mode only, to `WOLFCERT_ERR_WANT_READ` and `WOLFCERT_ERR_WANT_WRITE`. There is no per-call error string; use `wolfcert_strerror` for the code and `wolfcert_last_error_message` for the detail.
+**Error codes are a different, smaller set.** wolfSCEP's `WS_*` codes map onto `wolfcert/errors.h`: `WS_BAD_ARGUMENT` to `WOLFCERT_ERR_BAD_ARG`, `WS_MEMORY_E` to `WOLFCERT_ERR_MEMORY`, `WS_PARSE_E` to `WOLFCERT_ERR_PARSE`, the `WS_CBIO_ERR_*` family to `WOLFCERT_ERR_IO` and, from the `_nb` calls only, to `WOLFCERT_ERR_WANT_READ` and `WOLFCERT_ERR_WANT_WRITE`. There is no per-call error string; use `wolfcert_strerror` for the code and `wolfcert_last_error_message` for the detail.
 
 **TLS is optional for SCEP and mandatory for EST.** SCEP authenticates inside the pkiMessage, so a plaintext `http://` endpoint is accepted. An `https://` endpoint requires `srv.verify_server`: every SCEP entry point, one-shot and session alike, refuses to run unverified rather than completing a silent anonymous handshake, because `verify_server` is the only peer-verification switch in the transport.
 
@@ -189,7 +189,7 @@ Link against `libwolfcert` and include `<wolfcert/wolfcert.h>`, which pulls in t
 ## What you get on top
 
 - **EST (RFC 7030)** for the same lifecycle over TLS, with ECC, Ed25519, Ed448 and ML-DSA keys, none of which SCEP permits.
-- **Keep-alive and non-blocking sessions**, so several operations share one connection and an event loop can drive them through `WOLFCERT_ERR_WANT_READ` and `WOLFCERT_ERR_WANT_WRITE`.
+- **Keep-alive sessions with `_nb` calls**, so several operations share one connection and an event loop can drive them through `WOLFCERT_ERR_WANT_READ` and `WOLFCERT_ERR_WANT_WRITE`.
 - **CryptoCb offload.** Register your TPM, HSM or PKCS#11 backend with wolfSSL and pass the resulting `dev_id` in `WolfCertKeyCfg`; the private key never has to be in memory.
 - **Pluggable storage** through `WolfCertStoreOps` for flash and NVM targets.
 - **Static memory.** Every allocation carries a heap hint, so wolfCert runs on a wolfSSL built `WOLFSSL_NO_MALLOC` with a static pool.

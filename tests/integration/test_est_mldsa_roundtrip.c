@@ -138,7 +138,8 @@ int main(void)
                                      .verify_server = 1 };
 
     WolfCertBuffer ca_pem = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&client_cfg, &ca_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&client_cfg, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem) == WOLFCERT_OK);
 
     int rc = 0;
 #ifndef WOLFSSL_NO_ML_DSA_44

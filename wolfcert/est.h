@@ -27,16 +27,12 @@
 extern "C" {
 #endif
 
-/* GET /.well-known/est/cacerts - returns the CA chain as PEM.
+/* GET /.well-known/est/cacerts - returns the CA chain as PEM for
+ * WOLFCERT_ENCODING_PEM, or as concatenated DER for WOLFCERT_ENCODING_DER.
  * A 401 or 403 returns WOLFCERT_ERR_AUTH, any other non-200 _HTTP. */
 WOLFCERT_API int wolfcert_est_get_cacerts(const WolfCertServerCfg* srv,
-                                          WolfCertBuffer* out_ca_pem);
-
-/* wolfcert_est_get_cacerts in the requested encoding; DER gives the chain as
- * concatenated DER. */
-WOLFCERT_API int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv,
-                                              WolfCertEncoding enc,
-                                              WolfCertBuffer* out_ca);
+                                          WolfCertEncoding enc,
+                                          WolfCertBuffer* out_ca);
 
 /* GET /.well-known/est/csrattrs - returns the CsrAttrs DER for
  * wolfcert_est_parse_csr_attrs, empty (NULL, 0) on 204, 404, 405, 501 or a
@@ -154,24 +150,27 @@ WOLFCERT_API int wolfcert_est_simple_reenroll(const WolfCertServerCfg* srv,
                                               WolfCertEstResult* out);
 
 /* Keep-alive EST session carrying several requests over one TLS connection.
- * With proto_opts.est.allow_post_handshake_auth set, the server can request
- * the preloaded client cert via TLS 1.3 post-handshake auth (RFC 8446 section
+ * Each call on it is blocking or _nb, and the style may change between
+ * requests. An _nb call returning WOLFCERT_ERR_WANT_READ / _WANT_WRITE is
+ * repeated with the same arguments when the session fd is ready. While a
+ * request is in flight, a call for another operation, output or encoding, and
+ * any blocking call, returns WOLFCERT_ERR_BAD_ARG and leaves it intact. Open
+ * checks the config and connects synchronously; it does not verify the server:
+ * the first request runs the TLS handshake and returns WOLFCERT_ERR_TLS if it
+ * fails, or WOLFCERT_ERR_MEMORY if wolfSSL runs out of memory. HTTP Basic
+ * credentials are copied at open and sent on every request. With
+ * proto_opts.est.allow_post_handshake_auth set, the server can request the
+ * preloaded client cert via TLS 1.3 post-handshake auth (RFC 8446 section
  * 4.6.2); open then fails with WOLFCERT_ERR_UNSUPPORTED if wolfSSL lacks
- * WOLFSSL_POST_HANDSHAKE_AUTH. HTTP Basic credentials are copied at open and
- * sent on every request. Open does not verify the server: the first request
- * runs the TLS handshake and returns WOLFCERT_ERR_TLS if it fails, or
- * WOLFCERT_ERR_MEMORY if wolfSSL runs out of memory. */
+ * WOLFSSL_POST_HANDSHAKE_AUTH. */
 typedef struct WolfCertEstSession WolfCertEstSession;
 
 WOLFCERT_API int wolfcert_est_session_open(const WolfCertServerCfg* srv,
                                            WolfCertEstSession** out);
 
 WOLFCERT_API int wolfcert_est_session_get_cacerts(WolfCertEstSession* s,
-                                                  WolfCertBuffer* out_ca_pem);
-
-WOLFCERT_API int wolfcert_est_session_get_cacerts_enc(WolfCertEstSession* s,
-                                                      WolfCertEncoding enc,
-                                                      WolfCertBuffer* out_ca);
+                                                  WolfCertEncoding enc,
+                                                  WolfCertBuffer* out_ca);
 
 WOLFCERT_API int wolfcert_est_session_get_csr_attrs(WolfCertEstSession* s,
                                                     WolfCertBuffer* out_attrs_der);
@@ -194,17 +193,9 @@ WOLFCERT_API void wolfcert_est_session_close(WolfCertEstSession* s);
  * -1 when a caller-supplied WolfCertTransport backs it (no descriptor). */
 WOLFCERT_API int wolfcert_est_session_fd(const WolfCertEstSession* s);
 
-/* Non-blocking variants. Each _nb call returns WOLFCERT_OK once the output is
- * populated, or WOLFCERT_ERR_WANT_READ / _WANT_WRITE to be repeated with the
- * same arguments when the fd is ready; any other value ends the request. While
- * a _nb request is in flight, any other request on the session returns
- * WOLFCERT_ERR_BAD_ARG and leaves it intact. */
 WOLFCERT_API int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
-                                                     WolfCertBuffer* out_ca_pem);
-
-WOLFCERT_API int wolfcert_est_session_get_cacerts_enc_nb(WolfCertEstSession* s,
-                                                         WolfCertEncoding enc,
-                                                         WolfCertBuffer* out_ca);
+                                                     WolfCertEncoding enc,
+                                                     WolfCertBuffer* out_ca);
 
 WOLFCERT_API int wolfcert_est_session_get_csr_attrs_nb(WolfCertEstSession* s,
                                                        WolfCertBuffer* out_attrs_der);

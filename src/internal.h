@@ -484,10 +484,11 @@ WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
     const uint8_t* sent_tid, size_t sent_tid_len);
 
 /* Verify a GetNextCACert response is signed by a cert in current_ca_der and
- * return the rollover certificates as PEM. */
+ * return the rollover certificates as PEM, or as concatenated DER for
+ * WOLFCERT_ENCODING_DER. */
 WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(
     const uint8_t* resp_der, size_t resp_len,
     const uint8_t* current_ca_der, size_t current_ca_len,
-    WolfCertBuffer* out_pem, void* heap);
+    WolfCertEncoding enc, WolfCertBuffer* out, void* heap);
 
 #endif /* WOLFCERT_INTERNAL_H */

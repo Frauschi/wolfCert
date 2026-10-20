@@ -649,14 +649,15 @@ WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(const uint8_t* resp_
                                           size_t resp_len,
                                           const uint8_t* current_ca_der,
                                           size_t current_ca_len,
-                                          WolfCertBuffer* out_pem, void* heap)
+                                          WolfCertEncoding enc,
+                                          WolfCertBuffer* out, void* heap)
 {
     WolfCertBuffer content = { 0 };
     uint8_t* signer = NULL;
     size_t   signer_len = 0;
     int      rc;
 
-    if (resp_der == NULL || current_ca_der == NULL || out_pem == NULL)
+    if (resp_der == NULL || current_ca_der == NULL || out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     rc = wolfcert_scep_parse_pki_message(resp_der, resp_len, &content,
@@ -669,8 +670,11 @@ WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(const uint8_t* resp_
                                              current_ca_der, current_ca_len, heap);
     }
 
-    if (rc == WOLFCERT_OK) {
-        rc = wolfcert_pkcs7_certs_to_pem(content.data, content.len, out_pem, heap);
+    if (rc == WOLFCERT_OK && enc == WOLFCERT_ENCODING_DER) {
+        rc = wolfcert_pkcs7_certs_to_der(content.data, content.len, out, heap);
+    }
+    else if (rc == WOLFCERT_OK) {
+        rc = wolfcert_pkcs7_certs_to_pem(content.data, content.len, out, heap);
     }
 
     WOLFCERT_XFREE(signer, heap);

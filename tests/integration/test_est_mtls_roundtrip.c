@@ -99,7 +99,7 @@ static int test_reenroll_ignores_cfg_identity(const char* url,
     cli.client_key_len  = stale_key_len;
 
     /* The server refuses the stale identity on its own */
-    rc = wolfcert_est_get_cacerts(&cli, &ca_pem);
+    rc = wolfcert_est_get_cacerts(&cli, WOLFCERT_ENCODING_PEM, &ca_pem);
     wolfcert_buffer_free(&ca_pem);
     REQUIRE(rc != WOLFCERT_OK);
 
@@ -604,7 +604,7 @@ int main(void)
             .verify_server     = 1,
         };
         WolfCertBuffer ca_pem = { 0 };
-        int rc = wolfcert_est_get_cacerts(&cli, &ca_pem);
+        int rc = wolfcert_est_get_cacerts(&cli, WOLFCERT_ENCODING_PEM, &ca_pem);
         REQUIRE(rc != WOLFCERT_OK);
         if (rc == WOLFCERT_OK)
             wolfcert_buffer_free(&ca_pem);
@@ -633,7 +633,8 @@ int main(void)
         };
 
         WolfCertBuffer ca_pem = { 0 };
-        REQUIRE(wolfcert_est_get_cacerts(&cli, &ca_pem) == WOLFCERT_OK);
+        REQUIRE(wolfcert_est_get_cacerts(&cli, WOLFCERT_ENCODING_PEM,
+                                         &ca_pem) == WOLFCERT_OK);
         REQUIRE(ca_pem.len > 0);
         wolfcert_buffer_free(&ca_pem);
 

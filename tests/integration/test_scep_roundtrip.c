@@ -737,7 +737,7 @@ static int fetch_ca(const char* content_type, const uint8_t* body,
                          sizeof(url)) == 0);
 
     WolfCertServerCfg cli = { .protocol = WOLFCERT_PROTO_SCEP, .server_url = url };
-    int rc = wolfcert_scep_get_ca_cert_enc(&cli, enc, out);
+    int rc = wolfcert_scep_get_ca_cert(&cli, enc, out);
     pthread_join(tid, NULL);
     return rc;
 }
@@ -1217,7 +1217,8 @@ static int check_getnextca_ca_id(const uint8_t* ca_der_buf, size_t ca_der_len)
     };
 
     WolfCertBuffer next = { 0 };
-    (void)wolfcert_scep_get_next_ca_cert(&cli, ca_der_buf, ca_der_len, &next);
+    (void)wolfcert_scep_get_next_ca_cert(&cli, WOLFCERT_ENCODING_PEM,
+                                         ca_der_buf, ca_der_len, &next);
     wolfcert_buffer_free(&next);
     pthread_join(tid, NULL);
 
@@ -1861,10 +1862,10 @@ static int test_split_ra(void)
 
     rc = wolfcert_scep_get_ca_caps(&cli, &caps);
     if (rc == WOLFCERT_OK)
-        rc = wolfcert_scep_get_ca_cert(&cli, &pem);
+        rc = wolfcert_scep_get_ca_cert(&cli, WOLFCERT_ENCODING_PEM, &pem);
     if (rc == WOLFCERT_OK)
-        rc = wolfcert_scep_get_ca_cert_enc(&cli, WOLFCERT_ENCODING_DER,
-                                           &bundle);
+        rc = wolfcert_scep_get_ca_cert(&cli, WOLFCERT_ENCODING_DER,
+                                       &bundle);
     if (rc == WOLFCERT_OK) {
         second = (const char*)memmem(pem.data + 1, pem.len - 1,
                                      "-----BEGIN CERTIFICATE", 22);
@@ -1996,7 +1997,8 @@ int main(void)
     REQUIRE(caps.renewal);
 
     WolfCertBuffer ca_pem = { 0 };
-    REQUIRE(wolfcert_scep_get_ca_cert(&cli, &ca_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli, WOLFCERT_ENCODING_PEM,
+                                      &ca_pem) == WOLFCERT_OK);
     DerBuffer* ca_der = NULL;
     REQUIRE(wc_PemToDer(ca_pem.data, (long)ca_pem.len, CERT_TYPE,
                         &ca_der, NULL, NULL, NULL) == 0);
@@ -2186,7 +2188,8 @@ int main(void)
         WolfCertScepCaps tls_caps = { 0 };
         WolfCertBuffer   tls_ca = { 0 };
         REQUIRE(wolfcert_scep_get_ca_caps(&tls_cli, &tls_caps) == WOLFCERT_ERR_TLS);
-        REQUIRE(wolfcert_scep_get_ca_cert(&tls_cli, &tls_ca) == WOLFCERT_ERR_TLS);
+        REQUIRE(wolfcert_scep_get_ca_cert(&tls_cli, WOLFCERT_ENCODING_PEM,
+                                          &tls_ca) == WOLFCERT_ERR_TLS);
         wolfcert_buffer_free(&tls_ca);
 
         /* With verify_server 1, GetCACaps to the closed port 1 fails with an
@@ -2268,7 +2271,8 @@ int main(void)
     WolfCertScepCaps caps2 = { 0 };
     REQUIRE(wolfcert_scep_get_ca_caps(&cli2, &caps2) == WOLFCERT_OK);
     WolfCertBuffer ca2_pem = { 0 };
-    REQUIRE(wolfcert_scep_get_ca_cert(&cli2, &ca2_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli2, WOLFCERT_ENCODING_PEM,
+                                      &ca2_pem) == WOLFCERT_OK);
     DerBuffer* ca2_der = NULL;
     REQUIRE(wc_PemToDer(ca2_pem.data, (long)ca2_pem.len, CERT_TYPE,
                         &ca2_der, NULL, NULL, NULL) == 0);
@@ -2401,7 +2405,8 @@ int main(void)
     WolfCertScepCaps caps3 = { 0 };
     REQUIRE(wolfcert_scep_get_ca_caps(&cli3, &caps3) == WOLFCERT_OK);
     WolfCertBuffer ca3_pem = { 0 };
-    REQUIRE(wolfcert_scep_get_ca_cert(&cli3, &ca3_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli3, WOLFCERT_ENCODING_PEM,
+                                      &ca3_pem) == WOLFCERT_OK);
     DerBuffer* ca3_der = NULL;
     REQUIRE(wc_PemToDer(ca3_pem.data, (long)ca3_pem.len, CERT_TYPE,
                         &ca3_der, NULL, NULL, NULL) == 0);
@@ -2443,7 +2448,8 @@ int main(void)
     WolfCertScepCaps caps4 = { 0 };
     REQUIRE(wolfcert_scep_get_ca_caps(&cli4, &caps4) == WOLFCERT_OK);
     WolfCertBuffer ca4_pem = { 0 };
-    REQUIRE(wolfcert_scep_get_ca_cert(&cli4, &ca4_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli4, WOLFCERT_ENCODING_PEM,
+                                      &ca4_pem) == WOLFCERT_OK);
     DerBuffer* ca4_der = NULL;
     REQUIRE(wc_PemToDer(ca4_pem.data, (long)ca4_pem.len, CERT_TYPE,
                         &ca4_der, NULL, NULL, NULL) == 0);
@@ -2485,7 +2491,8 @@ int main(void)
     WolfCertScepCaps caps5 = { 0 };
     REQUIRE(wolfcert_scep_get_ca_caps(&cli5, &caps5) == WOLFCERT_OK);
     WolfCertBuffer ca5_pem = { 0 };
-    REQUIRE(wolfcert_scep_get_ca_cert(&cli5, &ca5_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_scep_get_ca_cert(&cli5, WOLFCERT_ENCODING_PEM,
+                                      &ca5_pem) == WOLFCERT_OK);
     DerBuffer* ca5_der = NULL;
     REQUIRE(wc_PemToDer(ca5_pem.data, (long)ca5_pem.len, CERT_TYPE,
                         &ca5_der, NULL, NULL, NULL) == 0);

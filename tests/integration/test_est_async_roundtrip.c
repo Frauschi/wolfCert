@@ -67,7 +67,8 @@ static int wait_io(WolfCertEstSession* s, int rc)
 static int pump_get_cacerts(WolfCertEstSession* s, WolfCertBuffer* out)
 {
     for (;;) {
-        int rc = wolfcert_est_session_get_cacerts_nb(s, out);
+        int rc = wolfcert_est_session_get_cacerts_nb(s, WOLFCERT_ENCODING_PEM,
+                                                     out);
         if (rc == WOLFCERT_OK)
             return 0;
         if (rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE) {
@@ -237,7 +238,8 @@ int main(void)
     wolfcert_est_result_free(&wr);
 
     /* The failed enroll no longer counts as in flight. */
-    REQUIRE(wolfcert_est_session_get_cacerts_nb(bes, &bca)
+    REQUIRE(wolfcert_est_session_get_cacerts_nb(bes, WOLFCERT_ENCODING_PEM,
+                                                &bca)
             != WOLFCERT_ERR_BAD_ARG);
     wolfcert_buffer_free(&bca);
     wolfcert_est_session_close(bes);

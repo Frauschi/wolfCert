@@ -295,7 +295,8 @@ static int test_est_require_server_auth(void)
     WolfCertKey* rk = NULL;
 
     /* Each call gets ERR_TLS, even simple_enroll with a placeholder CSR. */
-    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_TLS);
+    REQUIRE(wolfcert_est_get_cacerts(&srv, WOLFCERT_ENCODING_PEM,
+                                     &out) == WOLFCERT_ERR_TLS);
     REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == WOLFCERT_ERR_TLS);
     REQUIRE(wolfcert_est_simple_enroll(&srv, dummy_csr, sizeof(dummy_csr),
                                        &res) == WOLFCERT_ERR_TLS);
@@ -317,19 +318,39 @@ static int test_est_require_server_auth(void)
     /* A pinned trust anchor alone does not count as server authentication. */
     srv.trust_anchors     = dummy_ta;
     srv.trust_anchors_len = sizeof(dummy_ta);
-    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_TLS);
+    REQUIRE(wolfcert_est_get_cacerts(&srv, WOLFCERT_ENCODING_PEM,
+                                     &out) == WOLFCERT_ERR_TLS);
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_TLS);
 
     /* With verify_server on, the dial to port 1 fails with WOLFCERT_ERR_IO. */
     srv.verify_server = 1;
-    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_IO);
+    REQUIRE(wolfcert_est_get_cacerts(&srv, WOLFCERT_ENCODING_PEM,
+                                     &out) == WOLFCERT_ERR_IO);
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_IO);
 
     /* Bad arguments fail before the dial. */
-    REQUIRE(wolfcert_est_get_cacerts(&srv, NULL) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_get_cacerts(&srv, WOLFCERT_ENCODING_PEM,
+                                     NULL) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(wolfcert_est_simple_enroll(&srv, NULL, 0, &res)
             == WOLFCERT_ERR_BAD_ARG);
 
+    return 0;
+}
+
+/* An unknown encoding gets BAD_ARG before the dial, with the output cleared. */
+static int test_est_rejects_bad_encoding(void)
+{
+    WolfCertServerCfg srv = {
+        .protocol      = WOLFCERT_PROTO_EST,
+        .server_url    = "https://127.0.0.1:1/.well-known/est",
+        .verify_server = 1
+    };
+    WolfCertBuffer out;
+
+    memset(&out, 0xA5, sizeof(out));
+    REQUIRE(wolfcert_est_get_cacerts(&srv, (WolfCertEncoding)2, &out)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(out.data == NULL && out.len == 0);
     return 0;
 }
 
@@ -354,7 +375,8 @@ static int test_est_rejects_scep_cfg(void)
                             .dev_id = WOLFCERT_DEVID_SOFTWARE };
     WolfCertKey* rk = NULL;
 
-    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_get_cacerts(&srv, WOLFCERT_ENCODING_PEM,
+                                     &out) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(wolfcert_est_simple_enroll(&srv, dummy_csr, sizeof(dummy_csr),
                                        &res) == WOLFCERT_ERR_BAD_ARG);
@@ -370,7 +392,8 @@ static int test_est_rejects_scep_cfg(void)
 
     /* protocol = 0 is refused too. */
     srv.protocol = (WolfCertProtocol)0;
-    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_est_get_cacerts(&srv, WOLFCERT_ENCODING_PEM,
+                                     &out) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
 
     return 0;
@@ -495,7 +518,8 @@ static int test_est_uses_cfg_transport(void)
 
     srv.transport = tr;
     g_cfg_tr_connects = 0;
-    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) != WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&srv, WOLFCERT_ENCODING_PEM,
+                                     &out) != WOLFCERT_OK);
     REQUIRE(g_cfg_tr_connects == 1);
     return 0;
 }
@@ -544,7 +568,8 @@ static int check_empty_body(WOLFSSL_CTX* ctx, const WolfCertServerCfg* tmpl,
     snprintf(url, sizeof(url), "https://127.0.0.1:%d/.well-known/est", port);
     srv.server_url = url;
 
-    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_HTTP);
+    REQUIRE(wolfcert_est_get_cacerts(&srv, WOLFCERT_ENCODING_PEM,
+                                     &out) == WOLFCERT_ERR_HTTP);
     REQUIRE(out.data == NULL);
     /* A one-shot closes after its request; a session keeps the connection. */
     REQUIRE(strstr(sc.request, "Connection: close\r\n") != NULL);
@@ -556,7 +581,8 @@ static int check_empty_body(WOLFSSL_CTX* ctx, const WolfCertServerCfg* tmpl,
     REQUIRE(res.cert_pem.data == NULL);
 
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_OK);
-    REQUIRE(wolfcert_est_session_get_cacerts(sess, &out) == WOLFCERT_ERR_HTTP);
+    REQUIRE(wolfcert_est_session_get_cacerts(sess, WOLFCERT_ENCODING_PEM,
+                                             &out) == WOLFCERT_ERR_HTTP);
     wolfcert_est_session_close(sess);
     REQUIRE(out.data == NULL);
     REQUIRE(strstr(sc.request, "Connection: keep-alive\r\n") != NULL);
@@ -572,40 +598,39 @@ static int check_empty_body(WOLFSSL_CTX* ctx, const WolfCertServerCfg* tmpl,
     return 0;
 }
 
-/* 401 is WOLFCERT_ERR_AUTH from every EST call, and an empty 500 does not
- * mean "no CSR attributes". */
+/* An empty /csrattrs reply: a 401 is WOLFCERT_ERR_AUTH, a 500 is not "no CSR
+ * attributes", and a 200, 405 or 501 is. Every outcome leaves the output
+ * empty. */
 static int check_error_status(WOLFSSL_CTX* ctx, const WolfCertServerCfg* tmpl)
 {
-    struct srv_ctx sc = { .ctx = ctx, .status = 401, .conns = 3 };
+    static const struct { int status; int rc; } cases[] = {
+        { 401, WOLFCERT_ERR_AUTH }, { 500, WOLFCERT_ERR_HTTP },
+        { 200, WOLFCERT_OK },       { 405, WOLFCERT_OK },
+        { 501, WOLFCERT_OK },
+    };
     WolfCertServerCfg srv = *tmpl;
-    WolfCertEstSession* sess = NULL;
-    WolfCertBuffer out = { 0 };
+    WolfCertBuffer out;
+    struct srv_ctx sc;
     pthread_t tid;
     char url[128];
     int port = 0;
+    size_t i;
 
-    sc.listen_fd = listen_loopback(&port);
-    REQUIRE(sc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);
-    snprintf(url, sizeof(url), "https://127.0.0.1:%d/.well-known/est", port);
-    srv.server_url = url;
+    for (i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        sc = (struct srv_ctx){ .ctx = ctx, .status = cases[i].status,
+                               .conns = 1 };
+        sc.listen_fd = listen_loopback(&port);
+        REQUIRE(sc.listen_fd >= 0);
+        REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);
+        snprintf(url, sizeof(url), "https://127.0.0.1:%d/.well-known/est",
+                 port);
+        srv.server_url = url;
 
-    REQUIRE(wolfcert_est_get_cacerts(&srv, &out) == WOLFCERT_ERR_AUTH);
-    REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == WOLFCERT_ERR_AUTH);
-    REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_OK);
-    REQUIRE(wolfcert_est_session_get_cacerts(sess, &out) == WOLFCERT_ERR_AUTH);
-    wolfcert_est_session_close(sess);
-    pthread_join(tid, NULL);
-
-    sc = (struct srv_ctx){ .ctx = ctx, .status = 500, .conns = 1 };
-    sc.listen_fd = listen_loopback(&port);
-    REQUIRE(sc.listen_fd >= 0);
-    REQUIRE(pthread_create(&tid, NULL, srv_thread, &sc) == 0);
-    snprintf(url, sizeof(url), "https://127.0.0.1:%d/.well-known/est", port);
-
-    REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == WOLFCERT_ERR_HTTP);
-    REQUIRE(out.data == NULL);
-    pthread_join(tid, NULL);
+        memset(&out, 0xA5, sizeof(out));
+        REQUIRE(wolfcert_est_get_csr_attrs(&srv, &out) == cases[i].rc);
+        pthread_join(tid, NULL);
+        REQUIRE(out.data == NULL && out.len == 0);
+    }
     return 0;
 }
 
@@ -627,6 +652,9 @@ int main(void)
         return 1;
 
     if (test_est_rejects_scep_cfg())
+        return 1;
+
+    if (test_est_rejects_bad_encoding())
         return 1;
 
     if (test_est_uses_cfg_transport())
@@ -675,7 +703,8 @@ int main(void)
                               .verify_server = 1 };
 
     WolfCertBuffer ca_pem = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&srv, &ca_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&srv, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem) == WOLFCERT_OK);
     REQUIRE(memmem(ca_pem.data, ca_pem.len, "BEGIN CERTIFICATE", 17) != NULL);
     wolfcert_buffer_free(&ca_pem);
 

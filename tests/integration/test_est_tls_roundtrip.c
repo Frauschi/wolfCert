@@ -384,7 +384,8 @@ int main(void)
     };
 
     WolfCertBuffer ca_pem = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&cli, &ca_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&cli, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem) == WOLFCERT_OK);
     REQUIRE(ca_pem.len > 0);
 
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
@@ -416,7 +417,8 @@ int main(void)
         .verify_server     = 1,
     };
     WolfCertBuffer ca_pem_der = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&cli_der, &ca_pem_der) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&cli_der, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem_der) == WOLFCERT_OK);
     REQUIRE(ca_pem_der.len > 0);
     wolfcert_buffer_free(&ca_pem_der);
     wc_FreeDer(&ta_der);
@@ -436,7 +438,8 @@ int main(void)
         .verify_server     = 1,
     };
     WolfCertBuffer ca_pem_chain = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&cli_chain, &ca_pem_chain) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&cli_chain, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem_chain) == WOLFCERT_OK);
     REQUIRE(ca_pem_chain.len > 0);
     wolfcert_buffer_free(&ca_pem_chain);
     free(ta_chain);

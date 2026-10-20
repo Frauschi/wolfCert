@@ -82,7 +82,8 @@ static int pump_enroll_nb(WolfCertEstSession* s, const uint8_t* csr,
 static int pump_cacerts_nb(WolfCertEstSession* s, WolfCertBuffer* out)
 {
     for (;;) {
-        int rc = wolfcert_est_session_get_cacerts_nb(s, out);
+        int rc = wolfcert_est_session_get_cacerts_nb(s, WOLFCERT_ENCODING_PEM,
+                                                     out);
         if (rc != WOLFCERT_ERR_WANT_READ && rc != WOLFCERT_ERR_WANT_WRITE)
             return rc;
         if (wait_io(s, rc) != 0)
@@ -140,7 +141,8 @@ static int pending_path(WolfCertServer* s)
                               .verify_server = 1 };
 
     WolfCertBuffer ca_pem = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&cli, &ca_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&cli, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem) == WOLFCERT_OK);
 
     /* The one-shot reports PENDING with the Retry-After hint, then SUCCESS. */
     WolfCertKey* dk_ex = NULL;
@@ -275,7 +277,8 @@ static int pending_path(WolfCertServer* s)
     wolfcert_est_result_free(&sr3);
 
     WolfCertBuffer sess_ca = { 0 };
-    REQUIRE(wolfcert_est_session_get_cacerts(xsess, &sess_ca) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_get_cacerts(xsess, WOLFCERT_ENCODING_PEM,
+                                             &sess_ca) == WOLFCERT_OK);
     REQUIRE(sess_ca.len > 0);
     wolfcert_buffer_free(&sess_ca);
 
@@ -310,7 +313,8 @@ static int pending_path(WolfCertServer* s)
 
     /* A blocking call works on the session after its _nb requests. */
     WolfCertBuffer async_ca = { 0 };
-    REQUIRE(wolfcert_est_session_get_cacerts(nsess, &async_ca) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_get_cacerts(nsess, WOLFCERT_ENCODING_PEM,
+                                             &async_ca) == WOLFCERT_OK);
     REQUIRE(async_ca.len > 0);
     wolfcert_buffer_free(&async_ca);
 
@@ -338,7 +342,8 @@ static int pending_path(WolfCertServer* s)
     WolfCertEstSession* msess = NULL;
     REQUIRE(wolfcert_est_session_open(&bh_cli, &msess) == WOLFCERT_OK);
     WolfCertBuffer mix_ca = { 0 };
-    rc = wolfcert_est_session_get_cacerts_nb(msess, &mix_ca);
+    rc = wolfcert_est_session_get_cacerts_nb(msess, WOLFCERT_ENCODING_PEM,
+                                             &mix_ca);
     REQUIRE(rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);
 
     WolfCertEstResult mr = { 0 };
@@ -348,7 +353,12 @@ static int pending_path(WolfCertServer* s)
     REQUIRE(mr.status == WOLFCERT_EST_STATUS_UNSET);
     REQUIRE(mr.cert_pem.data == NULL);
     WolfCertBuffer other_ca = { 0 };
-    REQUIRE(wolfcert_est_session_get_cacerts_nb(msess, &other_ca)
+    REQUIRE(wolfcert_est_session_get_cacerts_nb(msess, WOLFCERT_ENCODING_PEM,
+                                                &other_ca)
+            == WOLFCERT_ERR_BAD_ARG);
+    /* So does the in-flight output with another encoding. */
+    REQUIRE(wolfcert_est_session_get_cacerts_nb(msess, WOLFCERT_ENCODING_DER,
+                                                &mix_ca)
             == WOLFCERT_ERR_BAD_ARG);
 
     /* Blocking session requests are refused as well. */
@@ -356,20 +366,23 @@ static int pending_path(WolfCertServer* s)
                                                csr_mix.len, &mr)
             == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(mr.status == WOLFCERT_EST_STATUS_UNSET);
-    REQUIRE(wolfcert_est_session_get_cacerts(msess, &other_ca)
+    REQUIRE(wolfcert_est_session_get_cacerts(msess, WOLFCERT_ENCODING_PEM,
+                                             &other_ca)
             == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(other_ca.data == NULL);
 
     /* A blocking call with the in-flight output is refused too, and keeps
      * the request: another operation still gets BAD_ARG. */
-    REQUIRE(wolfcert_est_session_get_cacerts(msess, &mix_ca)
+    REQUIRE(wolfcert_est_session_get_cacerts(msess, WOLFCERT_ENCODING_PEM,
+                                             &mix_ca)
             == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(wolfcert_est_session_simple_enroll_nb(msess, csr_mix.data,
                                                   csr_mix.len, &mr)
             == WOLFCERT_ERR_BAD_ARG);
 
     /* The refused calls left the /cacerts request in flight. */
-    rc = wolfcert_est_session_get_cacerts_nb(msess, &mix_ca);
+    rc = wolfcert_est_session_get_cacerts_nb(msess, WOLFCERT_ENCODING_PEM,
+                                             &mix_ca);
     REQUIRE(rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);
     REQUIRE(mix_ca.data == NULL);
     wolfcert_est_session_close(msess);
@@ -395,7 +408,8 @@ static int pending_path(WolfCertServer* s)
     REQUIRE(mr.cert_pem.data == NULL && mr.cert_pem.len == 0);
     REQUIRE(mr.retry_after_sec == 0 && mr.heap == NULL);
 
-    REQUIRE(wolfcert_est_session_get_cacerts_nb(msess, &mix_ca)
+    REQUIRE(wolfcert_est_session_get_cacerts_nb(msess, WOLFCERT_ENCODING_PEM,
+                                                &mix_ca)
             == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(mix_ca.data == NULL);
     WolfCertEstResult other_r = { 0 };
