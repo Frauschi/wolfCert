@@ -155,11 +155,14 @@ static const char RESP_EOF0[] =
 static const char RESP_CL0[] =
     "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
 
-/* The peer closes inside the header block, or after 3 of 10 body bytes. */
+/* The peer closes inside the header block, after 3 of 10 body bytes, or
+ * inside a chunk. */
 static const char RESP_CUT_HEAD[] =
     "HTTP/1.1 200 OK\r\nContent-Type: text/pl";
 static const char RESP_CUT_BODY[] =
     "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhel";
+static const char RESP_CUT_CHUNKED[] =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel";
 
 /* None of these is terminated by a close. */
 static const char RESP_204[] =
@@ -361,21 +364,29 @@ static int test_header_block_over_budget(void)
     return 0;
 }
 
-/* A close before the headers or the Content-Length body are complete is
- * ERR_IO with no response. */
+/* A close before the headers, the Content-Length body or the chunked body
+ * are complete is ERR_IO with a message and no response. */
 static int test_truncated_reply_is_io(void)
 {
+    static const char* const cut[] = {
+        RESP_CUT_HEAD, RESP_CUT_BODY, RESP_CUT_CHUNKED
+    };
+    static const char* const why[] = {
+        "inside the response header", "after 3 of 10 body bytes",
+        "inside the chunked body"
+    };
     WolfCertHttpResponse resp = { 0 };
     Peer p = { 0 };
+    size_t i;
 
-    REQUIRE(fetch(&p, RESP_CUT_HEAD, sizeof(RESP_CUT_HEAD), &resp)
-            == WOLFCERT_ERR_IO);
-    REQUIRE(resp.status_code == 0 && resp.body == NULL);
-
-    memset(&p, 0, sizeof(p));
-    REQUIRE(fetch(&p, RESP_CUT_BODY, sizeof(RESP_CUT_BODY), &resp)
-            == WOLFCERT_ERR_IO);
-    REQUIRE(resp.status_code == 0 && resp.body == NULL);
+    for (i = 0; i < sizeof(cut) / sizeof(cut[0]); i++) {
+        memset(&p, 0, sizeof(p));
+        wolfcert_clear_error();
+        REQUIRE(fetch(&p, cut[i], strlen(cut[i]) + 1, &resp)
+                == WOLFCERT_ERR_IO);
+        REQUIRE(strstr(wolfcert_last_error_message(), why[i]) != NULL);
+        REQUIRE(resp.status_code == 0 && resp.body == NULL);
+    }
     return 0;
 }
 

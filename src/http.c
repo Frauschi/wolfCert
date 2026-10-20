@@ -420,17 +420,17 @@ struct WolfCertHttpSession {
     WolfCertUrl   base;
     size_t        max_body;
     void*         heap;
-    int           closed;
+    unsigned int  closed : 1;
     unsigned int  keep_alive : 1;
+    unsigned int  sm_head_request : 1;
 
     SmState       sm_state;
     char*         sm_head;
     size_t        sm_head_len;
-    size_t        sm_head_off;
+    size_t        sm_tx_off;
     /* Borrowed from the caller; valid only until SM_DONE. */
     const uint8_t* sm_body;
     size_t         sm_body_len;
-    size_t         sm_body_off;
     uint8_t*      sm_rx;
     size_t        sm_rx_len;
     size_t        sm_rx_cap;
@@ -441,9 +441,7 @@ struct WolfCertHttpSession {
     char*         sm_content_type;     /* taken from headers */
     int           sm_status;
     int           sm_retry_after_sec;   /* seconds; 0 if absent */
-    int           sm_head_request;
     int           sm_interim;           /* interim 1xx blocks dropped so far */
-    int           sm_chunked;
     WolfCertHttpResponse* sm_resp;     /* caller's resp; written to on DONE */
 };
 
@@ -1145,7 +1143,6 @@ static void sm_drop_head(WolfCertHttpSession* s)
     WOLFCERT_XFREE(s->sm_head, s->heap);
     s->sm_head = NULL;
     s->sm_head_len = 0;
-    s->sm_head_off = 0;
 }
 
 static void sm_reset(WolfCertHttpSession* s)
@@ -1155,7 +1152,7 @@ static void sm_reset(WolfCertHttpSession* s)
     WOLFCERT_XFREE(s->sm_content_type, s->heap);
     s->sm_body = NULL;
     s->sm_body_len = 0;
-    s->sm_body_off = 0;
+    s->sm_tx_off = 0;
     s->sm_rx = NULL;
     s->sm_rx_len = 0;
     s->sm_rx_cap = 0;
@@ -1168,7 +1165,6 @@ static void sm_reset(WolfCertHttpSession* s)
     s->sm_retry_after_sec = 0;
     s->sm_head_request = 0;
     s->sm_interim = 0;
-    s->sm_chunked = 0;
     memset(&s->sm_scan, 0, sizeof(s->sm_scan));
 }
 
@@ -1427,13 +1423,14 @@ static int build_head(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
 
     s->sm_head = head;
     s->sm_head_len = (size_t)hn;
-    s->sm_head_off = 0;
+    s->sm_tx_off = 0;
 
     return WOLFCERT_OK;
 }
 
 static int inspect_headers(WolfCertHttpSession* s)
 {
+    int   chunked = 0;
     char* hdrs = (char*)WOLFCERT_XMALLOC(s->sm_hdr_end + 1, s->heap);
     if (hdrs == NULL)
         return WOLFCERT_ERR_MEMORY;
@@ -1461,13 +1458,12 @@ static int inspect_headers(WolfCertHttpSession* s)
         return WOLFCERT_OK;
     }
 
-    s->sm_chunked = 0;
     if (response_has_no_body(status, s->sm_head_request)) {
         s->sm_content_length = 0;
     }
     else {
         char* te = find_header(hdrs, "Transfer-Encoding", s->heap);
-        s->sm_chunked = (te != NULL && ci_cmp(te, "chunked") == 0);
+        chunked = (te != NULL && ci_cmp(te, "chunked") == 0);
         WOLFCERT_XFREE(te, s->heap);
 
         char* cl = find_header(hdrs, "Content-Length", s->heap);
@@ -1478,6 +1474,18 @@ static int inspect_headers(WolfCertHttpSession* s)
             WOLFCERT_XFREE(hdrs, s->heap);
             return WOLFCERT_ERR_PROTOCOL;
         }
+    }
+
+    if (chunked) {
+        memset(&s->sm_scan, 0, sizeof(s->sm_scan));
+        s->sm_scan.max = s->max_body;
+        s->sm_state = SM_READ_BODY_CHUNKED;
+    }
+    else if (s->sm_content_length >= 0) {
+        s->sm_state = SM_READ_BODY_CL;
+    }
+    else {
+        s->sm_state = SM_READ_BODY_EOF;
     }
 
     s->sm_content_type = find_header(hdrs, "Content-Type", s->heap);
@@ -1547,10 +1555,11 @@ static int sm_handshake(WolfCertHttpSession* s)
 static int sm_write_head(WolfCertHttpSession* s)
 {
     int rc = nb_write(&s->conn, (const uint8_t*)s->sm_head, s->sm_head_len,
-                      &s->sm_head_off);
+                      &s->sm_tx_off);
 
     if (rc == WOLFCERT_OK) {
         sm_drop_head(s);
+        s->sm_tx_off = 0;
         s->sm_state = (s->sm_body_len > 0) ? SM_WRITE_BODY : SM_READ_HEAD;
     }
 
@@ -1559,7 +1568,7 @@ static int sm_write_head(WolfCertHttpSession* s)
 
 static int sm_write_body(WolfCertHttpSession* s)
 {
-    int rc = nb_write(&s->conn, s->sm_body, s->sm_body_len, &s->sm_body_off);
+    int rc = nb_write(&s->conn, s->sm_body, s->sm_body_len, &s->sm_tx_off);
 
     if (rc == WOLFCERT_OK)
         s->sm_state = SM_READ_HEAD;
@@ -1586,8 +1595,10 @@ static int sm_read_head(WolfCertHttpSession* s)
         }
         s->sm_hdr_scan = i;
         rc = nb_read_some(s, WOLFCERT_HTTP_HEADER_BUDGET, &ended);
-        if (rc == WOLFCERT_OK && ended)
-            rc = WOLFCERT_ERR_IO;
+        if (rc == WOLFCERT_OK && ended) {
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_IO, "http",
+                "http: connection closed inside the response header");
+        }
         return rc;
     }
 
@@ -1597,17 +1608,6 @@ static int sm_read_head(WolfCertHttpSession* s)
         return rc;
 
     if (!status_is_interim(s->sm_status)) {
-        if (s->sm_chunked) {
-            memset(&s->sm_scan, 0, sizeof(s->sm_scan));
-            s->sm_scan.max = s->max_body;
-            s->sm_state = SM_READ_BODY_CHUNKED;
-        }
-        else if (s->sm_content_length >= 0) {
-            s->sm_state = SM_READ_BODY_CL;
-        }
-        else {
-            s->sm_state = SM_READ_BODY_EOF;
-        }
 #ifdef WOLFSSL_STATIC_MEMORY
         /* A pool realloc always copies, so try to grow once for an unknown
          * length; without a pool block that large, grow as bytes arrive. */
@@ -1652,8 +1652,11 @@ static int sm_read_body_cl(WolfCertHttpSession* s)
             s->sm_rx_cap = end;
         }
         rc = nb_read_some(s, end, &ended);
-        if (rc == WOLFCERT_OK && ended)
-            rc = WOLFCERT_ERR_IO;
+        if (rc == WOLFCERT_OK && ended) {
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_IO, "http",
+                "http: connection closed after %zu of %zu body bytes",
+                s->sm_rx_len - s->sm_hdr_end, body_len);
+        }
         return rc;
     }
 
@@ -1682,8 +1685,10 @@ static int sm_read_body_chunked(WolfCertHttpSession* s)
         return WOLFCERT_ERR_PROTOCOL;
     if (framed == 0) {
         rc = nb_read_some(s, rx_max(s->max_body), &ended);
-        if (rc == WOLFCERT_OK && ended)
-            rc = WOLFCERT_ERR_IO;
+        if (rc == WOLFCERT_OK && ended) {
+            rc = WOLFCERT_ERR(WOLFCERT_ERR_IO, "http",
+                "http: connection closed inside the chunked body");
+        }
         return rc;
     }
 
@@ -1811,7 +1816,6 @@ static int sm_begin(WolfCertHttpSession* s, const WolfCertHttpRequest* req,
     s->sm_resp         = resp;
     s->sm_body         = req->body;
     s->sm_body_len     = req->body_len;
-    s->sm_body_off     = 0;
     s->sm_head_request = (strcmp(req->method, "HEAD") == 0);
     s->sm_interim      = 0;
 
