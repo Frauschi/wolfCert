@@ -32,6 +32,12 @@ extern "C" {
 WOLFCERT_API int wolfcert_est_get_cacerts(const WolfCertServerCfg* srv,
                                           WolfCertBuffer* out_ca_pem);
 
+/* wolfcert_est_get_cacerts in the requested encoding; DER gives the chain as
+ * concatenated DER. */
+WOLFCERT_API int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv,
+                                              WolfCertEncoding enc,
+                                              WolfCertBuffer* out_ca);
+
 /* GET /.well-known/est/csrattrs - returns the CsrAttrs DER for
  * wolfcert_est_parse_csr_attrs, empty (NULL, 0) on 204, 404, 405, 501 or a
  * 200 with no body. A 401 or 403 returns WOLFCERT_ERR_AUTH, others _HTTP. */
@@ -130,7 +136,8 @@ typedef struct {
 
 /* Every wolfcert_est_* call taking a WolfCertEstResult* initializes a
  * non-NULL *out first, so freeing it after any outcome is safe. A populated
- * result must be freed before it is passed again. */
+ * result must be freed before it is passed again, except a session's
+ * in-flight result, which every resume passes back unfreed. */
 WOLFCERT_API void wolfcert_est_result_free(WolfCertEstResult* r);
 
 /* POST /.well-known/est/simpleenroll. */
@@ -187,15 +194,11 @@ WOLFCERT_API void wolfcert_est_session_close(WolfCertEstSession* s);
  * -1 when a caller-supplied WolfCertTransport backs it (no descriptor). */
 WOLFCERT_API int wolfcert_est_session_fd(const WolfCertEstSession* s);
 
-/* Non-blocking variants, for a session from wolfcert_est_session_open or
- * wolfcert_est_session_open_async. Each _nb call returns WOLFCERT_OK once the
- * output is populated, or WOLFCERT_ERR_WANT_READ / _WANT_WRITE to be repeated
- * with the same arguments when the fd is ready; any other value ends the
- * request. While a _nb request is in flight, any other request on the session
- * returns WOLFCERT_ERR_BAD_ARG and leaves it intact. */
-WOLFCERT_API int wolfcert_est_session_open_async(const WolfCertServerCfg* srv,
-                                                 WolfCertEstSession** out);
-
+/* Non-blocking variants. Each _nb call returns WOLFCERT_OK once the output is
+ * populated, or WOLFCERT_ERR_WANT_READ / _WANT_WRITE to be repeated with the
+ * same arguments when the fd is ready; any other value ends the request. While
+ * a _nb request is in flight, any other request on the session returns
+ * WOLFCERT_ERR_BAD_ARG and leaves it intact. */
 WOLFCERT_API int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
                                                      WolfCertBuffer* out_ca_pem);
 

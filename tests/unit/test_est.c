@@ -305,6 +305,10 @@ static int test_est_require_server_auth(void)
     REQUIRE(wolfcert_est_simple_reenroll(&srv, dummy_csr, sizeof(dummy_csr), rk,
                                          dummy_csr, sizeof(dummy_csr), &res)
             == WOLFCERT_ERR_TLS);
+    /* An empty current cert is refused before the config is checked. */
+    REQUIRE(wolfcert_est_simple_reenroll(&srv, dummy_csr, 0, rk, dummy_csr,
+                                         sizeof(dummy_csr), &res)
+            == WOLFCERT_ERR_BAD_ARG);
     wolfcert_key_free(rk);
 
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_TLS);
@@ -329,7 +333,7 @@ static int test_est_require_server_auth(void)
     return 0;
 }
 
-/* A SCEP config gets BAD_ARG from the EST one-shots and both session opens. */
+/* A SCEP config gets BAD_ARG from the EST one-shots and the session open. */
 static int test_est_rejects_scep_cfg(void)
 {
     static const uint8_t dummy_csr[] = { 0x30, 0x03, 0x02, 0x01, 0x00 };
@@ -362,8 +366,6 @@ static int test_est_rejects_scep_cfg(void)
     wolfcert_key_free(rk);
 
     REQUIRE(wolfcert_est_session_open(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
-    REQUIRE(sess == NULL);
-    REQUIRE(wolfcert_est_session_open_async(&srv, &sess) == WOLFCERT_ERR_BAD_ARG);
     REQUIRE(sess == NULL);
 
     /* protocol = 0 is refused too. */
@@ -710,7 +712,7 @@ int main(void)
 
     /* Non-blocking session enroll also sends the base64 CTE header. */
     WolfCertEstSession* sess_nb = NULL;
-    REQUIRE(wolfcert_est_session_open_async(&srv, &sess_nb) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_open(&srv, &sess_nb) == WOLFCERT_OK);
     WolfCertEstResult sess_nb_enrolled = { 0 };
     REQUIRE(pump_simple_enroll(sess_nb, csr.data, csr.len,
                                &sess_nb_enrolled) == 0);

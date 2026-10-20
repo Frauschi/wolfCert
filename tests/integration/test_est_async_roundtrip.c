@@ -156,7 +156,7 @@ int main(void)
             .proto_opts.est    = { .allow_post_handshake_auth = 1 },
         };
         WolfCertEstSession* es = NULL;
-        REQUIRE(wolfcert_est_session_open_async(&cli, &es) == WOLFCERT_OK);
+        REQUIRE(wolfcert_est_session_open(&cli, &es) == WOLFCERT_OK);
         REQUIRE(wolfcert_est_session_fd(es) >= 0);
 
         WolfCertBuffer ca_pem = { 0 };
@@ -179,7 +179,7 @@ int main(void)
         wolfcert_server_free(srv);
     }
 
-    /* Basic-only server: cacerts and enroll on one async session as alice. */
+    /* Basic-only server: _nb cacerts and enroll on one session as alice. */
     WolfCertServerCfgSrv bcfg = {
         .protocol        = WOLFCERT_PROTO_EST,
         .bind_host       = "127.0.0.1",
@@ -208,7 +208,7 @@ int main(void)
         .verify_server     = 1,
     };
     WolfCertEstSession* bes = NULL;
-    REQUIRE(wolfcert_est_session_open_async(&bcli, &bes) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_open(&bcli, &bes) == WOLFCERT_OK);
 
     WolfCertBuffer bca = { 0 };
     WolfCertEstResult bissued = { 0 };
@@ -227,7 +227,7 @@ int main(void)
     WolfCertServerCfg wcli = bcli;
     wcli.proto_opts.est.password = "wrong";
     bes = NULL;
-    REQUIRE(wolfcert_est_session_open_async(&wcli, &bes) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_open(&wcli, &bes) == WOLFCERT_OK);
 
     WolfCertEstResult wr = { 0 };
     REQUIRE(pump_simple_enroll(bes, csr.data, csr.len, &wr)

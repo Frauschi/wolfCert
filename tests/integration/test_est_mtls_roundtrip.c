@@ -122,11 +122,9 @@ static int test_reenroll_ignores_cfg_identity(const char* url,
     cli.client_key_len  = cli_key_len;
     REQUIRE(wolfcert_est_session_open(&cli, &sess) == WOLFCERT_OK);
     rc = wolfcert_est_session_simple_reenroll(sess, csr.data, csr.len, &res);
-    wolfcert_est_session_close(sess);
     REQUIRE(rc == WOLFCERT_OK && res.status == WOLFCERT_EST_STATUS_SUCCESS);
     wolfcert_est_result_free(&res);
 
-    REQUIRE(wolfcert_est_session_open_async(&cli, &sess) == WOLFCERT_OK);
     while ((rc = wolfcert_est_session_simple_reenroll_nb(sess, csr.data,
                                                          csr.len, &res))
                == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE)

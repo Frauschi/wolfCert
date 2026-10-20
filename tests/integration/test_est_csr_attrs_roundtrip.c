@@ -132,11 +132,9 @@ int main(void)
     int rc;
     REQUIRE(wolfcert_est_session_open(&cli, &sess) == WOLFCERT_OK);
     REQUIRE(wolfcert_est_session_get_csr_attrs(sess, &sraw) == WOLFCERT_OK);
-    wolfcert_est_session_close(sess);
     REQUIRE(sraw.len == blob.len && memcmp(sraw.data, blob.data, blob.len) == 0);
     wolfcert_buffer_free(&sraw);
 
-    REQUIRE(wolfcert_est_session_open_async(&cli, &sess) == WOLFCERT_OK);
     while ((rc = wolfcert_est_session_get_csr_attrs_nb(sess, &sraw))
                == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE)
         REQUIRE(wait_io(sess, rc) == 0);
@@ -200,6 +198,14 @@ int main(void)
 
     WolfCertBuffer empty = { 0 };
     REQUIRE(wolfcert_est_get_csr_attrs(&cli2, &empty) == WOLFCERT_OK);
+    REQUIRE(empty.data == NULL);
+    REQUIRE(empty.len  == 0);
+
+    /* An empty session reply clears the output too, whatever it held. */
+    REQUIRE(wolfcert_est_session_open(&cli2, &sess) == WOLFCERT_OK);
+    memset(&empty, 0xA5, sizeof(empty));
+    REQUIRE(wolfcert_est_session_get_csr_attrs(sess, &empty) == WOLFCERT_OK);
+    wolfcert_est_session_close(sess);
     REQUIRE(empty.data == NULL);
     REQUIRE(empty.len  == 0);
 

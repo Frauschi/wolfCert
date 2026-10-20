@@ -76,42 +76,6 @@ int wolfcert_client_get_ca(WolfCertClient* client, const WolfCertServerCfg* srv,
     return WOLFCERT_ERR_UNSUPPORTED;
 }
 
-int wolfcert_client_fetch_meta(WolfCertClient* client, const WolfCertServerCfg* srv,
-                               WolfCertCertMeta* meta)
-{
-    (void)client;
-    if (srv == NULL)
-        return WOLFCERT_ERR_BAD_ARG;
-
-#ifdef WOLFCERT_HAVE_EST
-    if (srv->protocol == WOLFCERT_PROTO_EST) {
-        WolfCertBuffer raw = { 0 };
-        int rc = wolfcert_est_get_csr_attrs(srv, &raw);
-        if (rc != WOLFCERT_OK)
-            return rc;
-
-        if (raw.data == NULL || raw.len == 0)
-            return WOLFCERT_OK;
-
-        WolfCertCsrAttrs attrs;
-        rc = wolfcert_est_parse_csr_attrs(raw.data, raw.len, &attrs);
-        wolfcert_buffer_free(&raw);
-        if (rc != WOLFCERT_OK)
-            return rc;
-
-        if (meta != NULL)
-            rc = wolfcert_csr_attrs_apply(&attrs, NULL, meta);
-
-        wolfcert_csr_attrs_free(&attrs);
-        return rc;
-    }
-#endif
-
-    /* SCEP has no /csrattrs equivalent. */
-    (void)meta;
-    return WOLFCERT_ERR_UNSUPPORTED;
-}
-
 #ifdef WOLFCERT_HAVE_EST
 /* Overlay the server's /csrattrs hints onto key_cfg and meta. */
 static int wolfcert_client_auto_csrattrs(const WolfCertServerCfg* srv,
@@ -154,6 +118,23 @@ static int wolfcert_client_take_cert(int rc, WolfCertEstResult* r,
     return rc;
 }
 #endif
+
+int wolfcert_client_fetch_meta(WolfCertClient* client, const WolfCertServerCfg* srv,
+                               WolfCertCertMeta* meta)
+{
+    (void)client;
+    if (srv == NULL)
+        return WOLFCERT_ERR_BAD_ARG;
+
+#ifdef WOLFCERT_HAVE_EST
+    if (srv->protocol == WOLFCERT_PROTO_EST)
+        return wolfcert_client_auto_csrattrs(srv, NULL, meta);
+#endif
+
+    /* SCEP has no /csrattrs equivalent. */
+    (void)meta;
+    return WOLFCERT_ERR_UNSUPPORTED;
+}
 
 int wolfcert_client_enroll(WolfCertClient* client, const WolfCertServerCfg* srv,
                            const WolfCertKeyCfg* key_cfg,

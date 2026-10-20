@@ -289,7 +289,7 @@ static int pending_path(WolfCertServer* s)
     REQUIRE(make_csr("CN=device-est-pending-async-ex", &dk_nex, &csr_nex) == 0);
 
     WolfCertEstSession* nsess = NULL;
-    REQUIRE(wolfcert_est_session_open_async(&cli, &nsess) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_open(&cli, &nsess) == WOLFCERT_OK);
 
     WolfCertEstResult nr1 = { 0 };
     rc = pump_enroll_nb(nsess, csr_nex.data, csr_nex.len, &nr1);
@@ -308,7 +308,7 @@ static int pending_path(WolfCertServer* s)
                    "BEGIN CERTIFICATE", 17) != NULL);
     wolfcert_est_result_free(&nr2);
 
-    /* A blocking call works on the same session from _open_async. */
+    /* A blocking call works on the session after its _nb requests. */
     WolfCertBuffer async_ca = { 0 };
     REQUIRE(wolfcert_est_session_get_cacerts(nsess, &async_ca) == WOLFCERT_OK);
     REQUIRE(async_ca.len > 0);
@@ -336,7 +336,7 @@ static int pending_path(WolfCertServer* s)
     /* With /cacerts in flight, an enroll or a /cacerts call with a different
      * output buffer gets BAD_ARG. */
     WolfCertEstSession* msess = NULL;
-    REQUIRE(wolfcert_est_session_open_async(&bh_cli, &msess) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_open(&bh_cli, &msess) == WOLFCERT_OK);
     WolfCertBuffer mix_ca = { 0 };
     rc = wolfcert_est_session_get_cacerts_nb(msess, &mix_ca);
     REQUIRE(rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);
@@ -369,7 +369,7 @@ static int pending_path(WolfCertServer* s)
     /* With an enroll in flight, /cacerts or an enroll with a different output
      * gets BAD_ARG. */
     msess = NULL;
-    REQUIRE(wolfcert_est_session_open_async(&bh_cli, &msess) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_open(&bh_cli, &msess) == WOLFCERT_OK);
 
     /* A missing CSR is refused without starting a request. */
     REQUIRE(wolfcert_est_session_simple_enroll_nb(msess, NULL, csr_mix.len,
@@ -395,15 +395,19 @@ static int pending_path(WolfCertServer* s)
                                                   csr_mix.len, &other_r)
             == WOLFCERT_ERR_BAD_ARG);
 
+    /* A resume leaves the in-flight result as it is; 42 is a sentinel a
+     * clear would reset. */
+    mr.retry_after_sec = 42;
     rc = wolfcert_est_session_simple_enroll_nb(msess, csr_mix.data,
                                                csr_mix.len, &mr);
     REQUIRE(rc == WOLFCERT_ERR_WANT_READ || rc == WOLFCERT_ERR_WANT_WRITE);
+    REQUIRE(mr.retry_after_sec == 42);
     wolfcert_est_session_close(msess);
     close(bh_fd);
 
     /* A finished enroll frees the session for /cacerts. */
     msess = NULL;
-    REQUIRE(wolfcert_est_session_open_async(&cli, &msess) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_open(&cli, &msess) == WOLFCERT_OK);
     REQUIRE(pump_enroll_nb(msess, csr_mix.data, csr_mix.len, &mr)
             == WOLFCERT_OK);
     REQUIRE(mr.status == WOLFCERT_EST_STATUS_PENDING);

@@ -17,8 +17,6 @@
  * along with wolfCert.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#define _POSIX_C_SOURCE 200809L
-
 #include <wolfcert/est.h>
 #include <wolfcert/http.h>
 #include <wolfcert/errors.h>
@@ -26,7 +24,6 @@
 
 #include <wolfssl/wolfcrypt/memory.h>
 
-#include <stdio.h>
 #include <string.h>
 
 enum est_session_op {
@@ -46,7 +43,7 @@ static const struct {
     { "simplereenroll", "application/pkcs7-mime" }
 };
 
-static int est_is_enroll(int op)
+static int est_is_enroll(enum est_session_op op)
 {
     return op == EST_OP_SIMPLE_ENROLL || op == EST_OP_SIMPLE_REENROLL;
 }
@@ -70,7 +67,8 @@ static char* join_path(const char* base, const char* suffix, void* heap)
 
 /* Parse the response to op into *out and free resp. res takes an enroll op's
  * status and is NULL for the other ops. */
-static int est_finish(void* heap, WolfCertHttpResponse* resp, int op,
+static int est_finish(void* heap, WolfCertHttpResponse* resp,
+                      enum est_session_op op,
                       WolfCertEncoding enc, WolfCertBuffer* out,
                       WolfCertEstResult* res)
 {
@@ -88,7 +86,7 @@ static int est_finish(void* heap, WolfCertHttpResponse* resp, int op,
     else if (op == EST_OP_GET_CSRATTRS &&
              (status == 204 || status == 404 || status == 405 ||
               status == 501 || (status == 200 && resp->body_len == 0))) {
-        rc = WOLFCERT_OK;
+        memset(out, 0, sizeof(*out));
     }
     else if (status != 200) {
         if (res != NULL)
@@ -154,12 +152,12 @@ struct WolfCertEstSession {
     WolfCertBuffer       in_body;      /* base64-encoded CSR for POST, owned */
     WolfCertHttpRequest  in_req;
     WolfCertHttpResponse in_resp;
-    const void*          in_owner;     /* caller's output, checked on resume */
+    const void*          in_out;       /* caller's output, checked on resume */
     enum est_session_op  in_op;
 };
 
-static int est_session_open_common(const WolfCertServerCfg* srv,
-                                   WolfCertEstSession** out)
+int wolfcert_est_session_open(const WolfCertServerCfg* srv,
+                              WolfCertEstSession** out)
 {
     if (srv == NULL || srv->server_url == NULL || out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
@@ -196,7 +194,7 @@ static int est_session_open_common(const WolfCertServerCfg* srv,
                              srv->client_key != NULL;
     s->base_url            = wolfcert_strdup(srv->server_url, heap);
     if (s->base_url == NULL) {
-        WOLFCERT_XFREE(s, heap);
+        wolfcert_est_session_close(s);
         return WOLFCERT_ERR_MEMORY;
     }
 
@@ -238,18 +236,6 @@ static int est_session_open_common(const WolfCertServerCfg* srv,
     return WOLFCERT_OK;
 }
 
-int wolfcert_est_session_open(const WolfCertServerCfg* srv,
-                              WolfCertEstSession** out)
-{
-    return est_session_open_common(srv, out);
-}
-
-int wolfcert_est_session_open_async(const WolfCertServerCfg* srv,
-                                    WolfCertEstSession** out)
-{
-    return est_session_open_common(srv, out);
-}
-
 int wolfcert_est_session_fd(const WolfCertEstSession* s)
 {
     return s != NULL ? wolfcert_http_session_fd(s->http) : -1;
@@ -264,23 +250,23 @@ static void est_session_free_request(WolfCertEstSession* s)
     memset(&s->in_req, 0, sizeof(s->in_req));
 }
 
-static void est_async_reset(WolfCertEstSession* s)
+static void est_session_reset(WolfCertEstSession* s)
 {
     est_session_free_request(s);
     wolfcert_http_response_free(&s->in_resp);
     memset(&s->in_resp, 0, sizeof(s->in_resp));
-    s->in_owner  = NULL;
+    s->in_out    = NULL;
     s->in_active = 0;
 }
 
 /* Refuse a resumed _nb call that does not match the request in flight. */
-static int est_session_resume_check(const WolfCertEstSession* s, int op,
-                                    const void* owner)
+static int est_session_resume_check(const WolfCertEstSession* s,
+                                    enum est_session_op op, const void* out)
 {
-    if ((int)s->in_op != op)
+    if (s->in_op != op)
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
             "a different EST operation is already in flight on this session");
-    if (owner != s->in_owner)
+    if (out != s->in_out)
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
             "output pointer differs from the in-flight request; pass the "
             "same pointer to each poll call");
@@ -292,7 +278,7 @@ void wolfcert_est_session_close(WolfCertEstSession* s)
     if (s == NULL)
         return;
 
-    est_async_reset(s);
+    est_session_reset(s);
     if (s->http)
         wolfcert_http_session_close(s->http);
 
@@ -307,10 +293,23 @@ void wolfcert_est_session_close(WolfCertEstSession* s)
     WOLFCERT_XFREE(s, s->heap);
 }
 
+/* Clear the caller's output, unless it is the in-flight request's. */
+static void est_call_clear(const WolfCertEstSession* s,
+                           WolfCertBuffer* out, WolfCertEstResult* res)
+{
+    if (s != NULL && s->in_active && (const void*)out == s->in_out)
+        return;
+
+    if (res != NULL)
+        memset(res, 0, sizeof(*res));
+    else if (out != NULL)
+        memset(out, 0, sizeof(*out));
+}
+
 /* Build the request for op into s->in_* and mark it in flight. */
-static int est_session_begin(WolfCertEstSession* s, int op,
+static int est_session_begin(WolfCertEstSession* s, enum est_session_op op,
                              const uint8_t* csr_der, size_t csr_der_len,
-                             const void* owner)
+                             const void* out)
 {
     int rc = WOLFCERT_OK;
 
@@ -339,12 +338,12 @@ static int est_session_begin(WolfCertEstSession* s, int op,
             s->in_req.body                      = s->in_body.data;
             s->in_req.body_len                  = s->in_body.len;
         }
-        s->in_op     = (enum est_session_op)op;
-        s->in_owner  = owner;
+        s->in_op     = op;
+        s->in_out    = out;
         s->in_active = 1;
     }
     else {
-        est_async_reset(s);
+        est_session_reset(s);
     }
 
     return rc;
@@ -353,20 +352,22 @@ static int est_session_begin(WolfCertEstSession* s, int op,
 /* Run op on s, or continue the _nb request in flight, and parse the response
  * into *out and, for an enroll op, *res. *out also identifies the caller
  * across _nb calls. */
-static int est_session_call(WolfCertEstSession* s, int op,
+static int est_session_call(WolfCertEstSession* s, enum est_session_op op,
                             const uint8_t* csr_der, size_t csr_der_len,
                             WolfCertEncoding enc, WolfCertBuffer* out,
                             WolfCertEstResult* res, int nb)
 {
     int rc;
 
+    est_call_clear(s, out, res);
     if (s == NULL || out == NULL ||
         (est_is_enroll(op) && (csr_der == NULL || csr_der_len == 0)))
         return WOLFCERT_ERR_BAD_ARG;
 
     if (s->in_active && !nb)
         return WOLFCERT_ERR(WOLFCERT_ERR_BAD_ARG, "est",
-            "an async EST request is in flight on this session");
+            "an EST request is in flight on this session; continue it with "
+            "the _nb call");
 
     if (s->in_active)
         rc = est_session_resume_check(s, op, out);
@@ -393,7 +394,7 @@ static int est_session_call(WolfCertEstSession* s, int op,
         rc = est_finish(s->heap, &s->in_resp, op, enc, out, res);
     }
 
-    est_async_reset(s);
+    est_session_reset(s);
     return rc;
 }
 
@@ -449,7 +450,6 @@ int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    memset(out, 0, sizeof(*out));
     return est_session_call(s, EST_OP_SIMPLE_ENROLL, csr_der, csr_der_len,
                             WOLFCERT_ENCODING_PEM, &out->cert_pem, out, 0);
 }
@@ -462,7 +462,6 @@ int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    memset(out, 0, sizeof(*out));
     return est_session_call(s, EST_OP_SIMPLE_ENROLL, csr_der, csr_der_len,
                             WOLFCERT_ENCODING_PEM, &out->cert_pem, out, 1);
 }
@@ -475,7 +474,6 @@ int wolfcert_est_session_simple_reenroll(WolfCertEstSession* s,
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    memset(out, 0, sizeof(*out));
     return est_session_call(s, EST_OP_SIMPLE_REENROLL, csr_der, csr_der_len,
                             WOLFCERT_ENCODING_PEM, &out->cert_pem, out, 0);
 }
@@ -488,12 +486,11 @@ int wolfcert_est_session_simple_reenroll_nb(WolfCertEstSession* s,
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    memset(out, 0, sizeof(*out));
     return est_session_call(s, EST_OP_SIMPLE_REENROLL, csr_der, csr_der_len,
                             WOLFCERT_ENCODING_PEM, &out->cert_pem, out, 1);
 }
 
-static int est_one_shot(const WolfCertServerCfg* srv, int op,
+static int est_one_shot(const WolfCertServerCfg* srv, enum est_session_op op,
                         const uint8_t* csr_der, size_t csr_der_len,
                         WolfCertEncoding enc, WolfCertBuffer* out,
                         WolfCertEstResult* res)
@@ -501,11 +498,12 @@ static int est_one_shot(const WolfCertServerCfg* srv, int op,
     WolfCertEstSession* s = NULL;
     int rc;
 
+    est_call_clear(NULL, out, res);
     if (out == NULL ||
         (est_is_enroll(op) && (csr_der == NULL || csr_der_len == 0)))
         return WOLFCERT_ERR_BAD_ARG;
 
-    rc = est_session_open_common(srv, &s);
+    rc = wolfcert_est_session_open(srv, &s);
     if (rc == WOLFCERT_OK) {
         wolfcert_http_session_set_close(s->http);
         rc = est_session_call(s, op, csr_der, csr_der_len, enc, out, res, 0);
@@ -530,11 +528,6 @@ int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv, WolfCertEncoding 
 int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
                                WolfCertBuffer* out_attrs_der)
 {
-    if (srv == NULL || out_attrs_der == NULL)
-        return WOLFCERT_ERR_BAD_ARG;
-
-    memset(out_attrs_der, 0, sizeof(*out_attrs_der));
-    out_attrs_der->heap = srv->heap ? srv->heap : wolfcert_default_heap();
     return est_one_shot(srv, EST_OP_GET_CSRATTRS, NULL, 0,
                         WOLFCERT_ENCODING_DER, out_attrs_der, NULL);
 }
@@ -546,7 +539,6 @@ int wolfcert_est_simple_enroll(const WolfCertServerCfg* srv,
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    memset(out, 0, sizeof(*out));
     return est_one_shot(srv, EST_OP_SIMPLE_ENROLL, csr_der, csr_der_len,
                         WOLFCERT_ENCODING_PEM, &out->cert_pem, out);
 }
@@ -564,9 +556,10 @@ int wolfcert_est_simple_reenroll(const WolfCertServerCfg* srv,
     if (out == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
-    memset(out, 0, sizeof(*out));
+    est_call_clear(NULL, &out->cert_pem, out);
 
-    if (srv == NULL || current_cert == NULL || current_key == NULL)
+    if (srv == NULL || current_cert == NULL || current_cert_len == 0 ||
+        current_key == NULL)
         return WOLFCERT_ERR_BAD_ARG;
 
     /* The TLS identity is the cert being renewed. */
