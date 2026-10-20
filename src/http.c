@@ -507,42 +507,6 @@ static int wolfcert_cbio_send(WOLFSSL* ssl, char* buf, int sz, void* ctx)
     }
 }
 
-typedef struct {
-    uint8_t* buf;
-    size_t   len;
-    size_t   cap;
-    size_t   max;
-    void*    heap;
-} DynBuf;
-
-static int dyn_append(DynBuf* d, const void* data, size_t len)
-{
-    if (len > d->max - d->len)
-        return WOLFCERT_ERR_PROTOCOL;
-
-    if (d->len + len > d->cap) {
-        size_t nc = d->cap ? d->cap : 1024;
-
-        while (nc < d->len + len)
-            nc *= 2;
-
-        if (nc > d->max)
-            nc = d->max;
-
-        uint8_t* nb = (uint8_t*)WOLFCERT_XREALLOC(d->buf, nc, d->heap);
-        if (nb == NULL)
-            return WOLFCERT_ERR_MEMORY;
-
-        d->buf = nb;
-        d->cap = nc;
-    }
-
-    memcpy(d->buf + d->len, data, len);
-    d->len += len;
-
-    return WOLFCERT_OK;
-}
-
 static char* find_header(const char* headers, const char* name, void* heap)
 {
     const char* p = headers;
@@ -927,60 +891,65 @@ static int check_trailers(const uint8_t* raw, size_t raw_len)
     return WOLFCERT_ERR_PROTOCOL;
 }
 
+/* Decode a whole chunked body into dst, which may alias src at or below it. */
+static int chunked_decode_into(uint8_t* dst, const uint8_t* src, size_t len,
+                               size_t* out_len)
+{
+    size_t p = 0;
+    size_t w = 0;
+
+    for (;;) {
+        size_t clen = 0;
+        size_t he = p;
+
+        if (find_crlf(src, len, &he) != 0 ||
+                parse_chunk_size(src, p, he, &clen) != 0)
+            return WOLFCERT_ERR_PROTOCOL;
+
+        p = he + 2;
+        if (clen == 0) {
+            *out_len = w;
+            return check_trailers(src + p, len - p);
+        }
+
+        if (p + 2 > len || clen > len - p - 2 ||
+                src[p + clen] != '\r' || src[p + clen + 1] != '\n')
+            return WOLFCERT_ERR_PROTOCOL;
+
+        memmove(dst + w, src + p, clen);
+        w += clen;
+        p += clen + 2;
+    }
+}
+
 int wolfcert_http_chunked_decode(const uint8_t* in, size_t in_len,
                                  uint8_t** out, size_t* out_len,
                                  size_t max_bytes, void* heap)
 {
-    DynBuf body = { .heap = heap, .max = max_bytes };
-    size_t p = 0;
+    uint8_t* buf;
+    size_t len = 0;
     int rc;
 
-    while (p < in_len) {
-        size_t clen = 0;
-        size_t he = p;
+    if (in_len == 0)
+        return WOLFCERT_ERR_PROTOCOL;
 
-        if (find_crlf(in, in_len, &he) != 0 ||
-                parse_chunk_size(in, p, he, &clen) != 0) {
-            WOLFCERT_XFREE(body.buf, heap);
-            return WOLFCERT_ERR_PROTOCOL;
-        }
+    buf = (uint8_t*)WOLFCERT_XMALLOC(in_len, heap);
+    if (buf == NULL)
+        return WOLFCERT_ERR_MEMORY;
 
-        p = he + 2;
-        if (clen == 0) {
-            rc = check_trailers(in + p, in_len - p);
-            if (rc != WOLFCERT_OK) {
-                WOLFCERT_XFREE(body.buf, heap);
-                return rc;
-            }
-
-            *out = body.buf;
-            *out_len = body.len;
-            return WOLFCERT_OK;
-        }
-
-        if (clen > max_bytes || p + 2 > in_len || clen > in_len - p - 2) {
-            WOLFCERT_XFREE(body.buf, heap);
-            return WOLFCERT_ERR_PROTOCOL;
-        }
-
-        rc = dyn_append(&body, in + p, clen);
-        if (rc != WOLFCERT_OK) {
-            WOLFCERT_XFREE(body.buf, heap);
-            return rc;
-        }
-
-        p += clen;
-        if (in[p] != '\r' || in[p+1] != '\n') {
-            WOLFCERT_XFREE(body.buf, heap);
-            return WOLFCERT_ERR_PROTOCOL;
-        }
-
-        p += 2;
+    rc = chunked_decode_into(buf, in, in_len, &len);
+    if (rc == WOLFCERT_OK && len > max_bytes)
+        rc = WOLFCERT_ERR_PROTOCOL;
+    if (rc != WOLFCERT_OK || len == 0) {
+        WOLFCERT_XFREE(buf, heap);
+        buf = NULL;
+    }
+    if (rc == WOLFCERT_OK) {
+        *out = buf;
+        *out_len = len;
     }
 
-    WOLFCERT_XFREE(body.buf, heap);
-
-    return WOLFCERT_ERR_PROTOCOL;
+    return rc;
 }
 
 typedef struct {
@@ -1296,16 +1265,24 @@ static int nb_rx_reserve(WolfCertHttpSession* s, size_t need)
     return WOLFCERT_OK;
 }
 
-/* `ended` is set when the peer closed cleanly. */
-static int nb_read_some(WolfCertHttpSession* s, int* ended)
+/* Append to sm_rx while it holds fewer than limit bytes; `ended` is set when
+ * the peer closed cleanly. */
+static int nb_read_some(WolfCertHttpSession* s, size_t limit, int* ended)
 {
+    uint8_t  probe;
+    uint8_t* dst;
+    size_t   room;
+    int      probing = 0;
+    int      rc;
+    int      r;
+    int      e;
+
     *ended = 0;
+    if (s->sm_rx_len > limit)
+        return WOLFCERT_ERR_PROTOCOL;
 
     /* Clamp to the allowance left, so a response ending in it still fits. */
-    size_t room = rx_max(s->max_body) - s->sm_rx_len;
-    uint8_t probe;
-    uint8_t* dst;
-    int probing = 0;
+    room = limit - s->sm_rx_len;
 
     if (room == 0) {
         /* An EOF-delimited body may end exactly on the allowance, so probe
@@ -1318,7 +1295,13 @@ static int nb_read_some(WolfCertHttpSession* s, int* ended)
         if (room > WOLFCERT_HTTP_READ_CHUNK)
             room = WOLFCERT_HTTP_READ_CHUNK;
 
-        int rc = nb_rx_reserve(s, room);
+        rc = nb_rx_reserve(s, room);
+        if (rc == WOLFCERT_ERR_MEMORY) {
+            return WOLFCERT_ERR(WOLFCERT_ERR_MEMORY, "http",
+                "http: cannot grow the response buffer past %zu bytes; lower "
+                "max_response_bytes or WOLFCERT_HTTP_HEADER_BUDGET",
+                s->sm_rx_cap);
+        }
         if (rc != WOLFCERT_OK)
             return rc;
 
@@ -1326,7 +1309,7 @@ static int nb_read_some(WolfCertHttpSession* s, int* ended)
     }
 
     if (s->conn.ssl) {
-        int r = wolfSSL_read(s->conn.ssl, dst, (int)room);
+        r = wolfSSL_read(s->conn.ssl, dst, (int)room);
         if (r > 0) {
             if (probing)
                 return WOLFCERT_ERR_PROTOCOL;
@@ -1340,7 +1323,7 @@ static int nb_read_some(WolfCertHttpSession* s, int* ended)
             return WOLFCERT_OK;
         }
 
-        int e = wolfSSL_get_error(s->conn.ssl, r);
+        e = wolfSSL_get_error(s->conn.ssl, r);
         if (e == WOLFSSL_ERROR_WANT_READ)
             return WOLFCERT_ERR_WANT_READ;
         if (e == WOLFSSL_ERROR_WANT_WRITE)
@@ -1353,8 +1336,8 @@ static int nb_read_some(WolfCertHttpSession* s, int* ended)
         return WOLFCERT_ERR_IO;
     }
 
-    int r = s->conn.t.read(s->conn.t.ctx, s->conn.handle, dst,
-                           room, s->conn.io_timeout_ms);
+    r = s->conn.t.read(s->conn.t.ctx, s->conn.handle, dst, room,
+                       s->conn.io_timeout_ms);
     if (r > 0) {
         if ((size_t)r > room)
             return WOLFCERT_ERR_IO;
@@ -1509,6 +1492,22 @@ static int inspect_headers(WolfCertHttpSession* s)
     return WOLFCERT_OK;
 }
 
+/* Move the body to the front of sm_rx and hand the buffer over. */
+static uint8_t* sm_take_body(WolfCertHttpSession* s, size_t body_len)
+{
+    uint8_t* body = s->sm_rx;
+
+    if (body_len == 0)
+        return NULL;
+
+    memmove(body, body + s->sm_hdr_end, body_len);
+    s->sm_rx = NULL;
+    s->sm_rx_len = 0;
+    s->sm_rx_cap = 0;
+
+    return body;
+}
+
 static void sm_publish(WolfCertHttpSession* s, uint8_t* body, size_t body_len)
 {
     s->sm_resp->status_code     = s->sm_status;
@@ -1580,8 +1579,13 @@ static int sm_read_head(WolfCertHttpSession* s)
             break;
     }
     if (i + 3 >= s->sm_rx_len) {
+        if (s->sm_rx_len >= WOLFCERT_HTTP_HEADER_BUDGET) {
+            return WOLFCERT_ERR(WOLFCERT_ERR_PROTOCOL, "http",
+                "http: response header block exceeds %d bytes",
+                (int)WOLFCERT_HTTP_HEADER_BUDGET);
+        }
         s->sm_hdr_scan = i;
-        rc = nb_read_some(s, &ended);
+        rc = nb_read_some(s, WOLFCERT_HTTP_HEADER_BUDGET, &ended);
         if (rc == WOLFCERT_OK && ended)
             rc = WOLFCERT_ERR_IO;
         return rc;
@@ -1604,6 +1608,16 @@ static int sm_read_head(WolfCertHttpSession* s)
         else {
             s->sm_state = SM_READ_BODY_EOF;
         }
+#ifdef WOLFSSL_STATIC_MEMORY
+        /* A pool realloc always copies, so try to grow once for an unknown
+         * length; without a pool block that large, grow as bytes arrive. */
+        if ((s->heap != NULL || wolfSSL_GetGlobalHeapHint() != NULL) &&
+            s->sm_state != SM_READ_BODY_CL) {
+            rc = nb_rx_reserve(s, rx_max(s->max_body) - s->sm_rx_len);
+            if (rc != WOLFCERT_ERR_MEMORY)
+                return rc;
+        }
+#endif
         return WOLFCERT_OK;
     }
 
@@ -1623,30 +1637,31 @@ static int sm_read_head(WolfCertHttpSession* s)
 
 static int sm_read_body_cl(WolfCertHttpSession* s)
 {
-    uint8_t* body = NULL;
+    uint8_t* body;
     size_t   body_len = (size_t)s->sm_content_length;
     size_t   end = s->sm_hdr_end + body_len;
     int      ended = 0;
     int      rc;
 
     if (s->sm_rx_len < end) {
-        rc = nb_read_some(s, &ended);
+        if (s->sm_rx_cap < end) {
+            body = (uint8_t*)WOLFCERT_XREALLOC(s->sm_rx, end, s->heap);
+            if (body == NULL)
+                return WOLFCERT_ERR_MEMORY;
+            s->sm_rx = body;
+            s->sm_rx_cap = end;
+        }
+        rc = nb_read_some(s, end, &ended);
         if (rc == WOLFCERT_OK && ended)
             rc = WOLFCERT_ERR_IO;
         return rc;
     }
 
-    if (body_len > 0) {
-        body = (uint8_t*)WOLFCERT_XMALLOC(body_len, s->heap);
-        if (body == NULL)
-            return WOLFCERT_ERR_MEMORY;
-        memcpy(body, s->sm_rx + s->sm_hdr_end, body_len);
-    }
-
-    sm_publish(s, body, body_len);
     /* Without pipelining, bytes past the response mean broken framing. */
     if (s->sm_rx_len > end)
         s->closed = 1;
+    body = sm_take_body(s, body_len);
+    sm_publish(s, body, body_len);
 
     return WOLFCERT_OK;
 }
@@ -1666,23 +1681,25 @@ static int sm_read_body_chunked(WolfCertHttpSession* s)
     if (framed < 0)
         return WOLFCERT_ERR_PROTOCOL;
     if (framed == 0) {
-        rc = nb_read_some(s, &ended);
+        rc = nb_read_some(s, rx_max(s->max_body), &ended);
         if (rc == WOLFCERT_OK && ended)
             rc = WOLFCERT_ERR_IO;
         return rc;
     }
 
     end = s->sm_hdr_end + s->sm_scan.pos;
-    rc = wolfcert_http_chunked_decode(s->sm_rx + s->sm_hdr_end,
-                                      end - s->sm_hdr_end, &body, &body_len,
-                                      s->max_body, s->heap);
-    if (rc == WOLFCERT_OK) {
-        sm_publish(s, body, body_len);
-        if (s->sm_rx_len > end)
-            s->closed = 1;
-    }
+    rc = chunked_decode_into(s->sm_rx, s->sm_rx + s->sm_hdr_end,
+                             s->sm_scan.pos, &body_len);
+    if (rc != WOLFCERT_OK)
+        return rc;
 
-    return rc;
+    if (s->sm_rx_len > end)
+        s->closed = 1;
+    s->sm_hdr_end = 0;
+    body = sm_take_body(s, body_len);
+    sm_publish(s, body, body_len);
+
+    return WOLFCERT_OK;
 }
 
 static int sm_read_body_eof(WolfCertHttpSession* s)
@@ -1690,19 +1707,13 @@ static int sm_read_body_eof(WolfCertHttpSession* s)
     uint8_t* body = NULL;
     size_t   body_len;
     int      ended = 0;
-    int      rc = nb_read_some(s, &ended);
+    int      rc = nb_read_some(s, s->sm_hdr_end + s->max_body, &ended);
 
     if (rc != WOLFCERT_OK || !ended)
         return rc;
 
     body_len = s->sm_rx_len - s->sm_hdr_end;
-    if (body_len > 0) {
-        body = (uint8_t*)WOLFCERT_XMALLOC(body_len, s->heap);
-        if (body == NULL)
-            return WOLFCERT_ERR_MEMORY;
-        memcpy(body, s->sm_rx + s->sm_hdr_end, body_len);
-    }
-
+    body = sm_take_body(s, body_len);
     sm_publish(s, body, body_len);
     s->closed = 1;
 

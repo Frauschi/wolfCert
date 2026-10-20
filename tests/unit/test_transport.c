@@ -261,6 +261,106 @@ static int test_body_ends_at_close(void)
     return 0;
 }
 
+/* With a 16-byte cap, a body that ends at the close may be 16 bytes; 17 is
+ * ERR_PROTOCOL, arriving with the headers or in a later read. */
+static int test_eof_body_capped(void)
+{
+    static const char hdr[] = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+    WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
+    WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };
+    WolfCertHttpResponse resp = { 0 };
+    const size_t hl = sizeof(hdr) - 1;
+    char wire[sizeof(hdr) + 32];
+    Peer p = { 0 };
+
+    t.ctx = &p;
+    req.transport = t;
+    req.max_response_bytes = 16;
+    memcpy(wire, hdr, hl);
+
+    memset(wire + hl, 'B', 16);
+    wire[hl + 16] = '\0';
+    p.resp  = wire;
+    p.chunk = sizeof(wire);
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_OK);
+    REQUIRE(resp.body_len == 16);
+    wolfcert_http_response_free(&resp);
+
+    memset(wire + hl, 'B', 17);
+    wire[hl + 17] = '\0';
+    memset(&p, 0, sizeof(p));
+    p.resp  = wire;
+    p.chunk = sizeof(wire);
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_ERR_PROTOCOL);
+
+    memset(&p, 0, sizeof(p));
+    p.resp  = wire;
+    p.chunk = hl + 16;
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_ERR_PROTOCOL);
+    return 0;
+}
+
+#if defined(WOLFSSL_STATIC_MEMORY) && defined(WOLFSSL_NO_MALLOC)
+/* With a 256 KiB cap no pool block holds the whole allowance: a short
+ * chunked reply still arrives, and a 160 KiB one, larger than any block,
+ * fails with a message naming the settings. */
+static int test_chunked_over_pool_block(void)
+{
+    static const char head[] =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n28000\r\n";
+    static const char tail[] = "\r\n0\r\n\r\n";
+    static char big[sizeof(head) + 0x28000 + sizeof(tail)];
+    WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
+    WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };
+    WolfCertHttpResponse resp = { 0 };
+    const size_t hl = sizeof(head) - 1;
+    Peer p = { 0 };
+
+    t.ctx = &p;
+    req.transport = t;
+    req.max_response_bytes = 256 * 1024;
+    p.resp  = RESP_CHUNKED;
+    p.chunk = sizeof(RESP_CHUNKED);
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_OK);
+    REQUIRE(resp.body_len == 11 && memcmp(resp.body, "hello world", 11) == 0);
+    wolfcert_http_response_free(&resp);
+
+    memcpy(big, head, hl);
+    memset(big + hl, 'A', 0x28000);
+    memcpy(big + hl + 0x28000, tail, sizeof(tail));
+    memset(&p, 0, sizeof(p));
+    p.resp  = big;
+    p.chunk = 4096;
+    wolfcert_clear_error();
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_ERR_MEMORY);
+    REQUIRE(strstr(wolfcert_last_error_message(), "max_response_bytes")
+            != NULL);
+    REQUIRE(resp.body == NULL);
+    return 0;
+}
+#endif
+
+/* A header block 100 bytes over the budget, arriving 1000 bytes per read so
+ * one read could carry it past the budget, is refused with ERR_PROTOCOL. */
+static int test_header_block_over_budget(void)
+{
+    static const char head[] =
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Pad: ";
+    static char wire[WOLFCERT_HTTP_HEADER_BUDGET + 128];
+    const size_t total = WOLFCERT_HTTP_HEADER_BUDGET + 100;
+    const size_t hl = sizeof(head) - 1;
+    WolfCertHttpResponse resp = { 0 };
+    Peer p = { 0 };
+
+    memcpy(wire, head, hl);
+    memset(wire + hl, 'A', total - hl - 4);
+    memcpy(wire + total - 4, "\r\n\r\n", 5);
+    wolfcert_clear_error();
+    REQUIRE(fetch(&p, wire, 1000, &resp) == WOLFCERT_ERR_PROTOCOL);
+    REQUIRE(strstr(wolfcert_last_error_message(), "header block") != NULL);
+    return 0;
+}
+
 /* A close before the headers or the Content-Length body are complete is
  * ERR_IO with no response. */
 static int test_truncated_reply_is_io(void)
@@ -1171,6 +1271,14 @@ int main(void)
         return 1;
     if (test_truncated_reply_is_io())
         return 1;
+    if (test_header_block_over_budget())
+        return 1;
+    if (test_eof_body_capped())
+        return 1;
+#if defined(WOLFSSL_STATIC_MEMORY) && defined(WOLFSSL_NO_MALLOC)
+    if (test_chunked_over_pool_block())
+        return 1;
+#endif
     if (test_zero_is_not_data())
         return 1;
     if (test_read_overcount_rejected())

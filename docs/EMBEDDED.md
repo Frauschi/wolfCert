@@ -105,6 +105,7 @@ miscompile.
 | wolfSSL `Cert` (CSR / cert build) | **heap** (`wc_CertNew`) | ~20+ KB | `altNames[16384]` |
 | wolfSSL `DecodedCert` (cert parse) | **stack** or **heap**, transient | several KB | parse scratch |
 | HTTP request handling | **stack** (EST server); **heap** (SCEP server, client) | 2-3 KB stack | request read buffer |
+| HTTP response (client) | **heap**, handed to the caller as `resp->body` | up to `max_response_bytes` + 8 KB | receive buffer; its allocation can exceed `body_len` |
 
 The good news: wolfCert never stack-allocates a `Cert`. Every CSR/cert
 build path (`src/csr.c`, `src/ca_issue.c`, `src/scep/scep_msg.c`) obtains
@@ -188,15 +189,15 @@ the request completes) so it never counts against the stack budget.
 | `WOLFCERT_HTTP_QUERY_SZ` | `8192` | sized to hold a base64 GET `PKIOperation` message; on the SCEP server it extends the heap read buffer (`REQ_BUF_SZ + QUERY_SZ`) that `query` points into |
 | `WOLFCERT_HTTP_AUTH_BUF_SZ` | `512` | client Basic-auth header line (`http.c`) |
 | `WOLFCERT_HTTP_MAX_PATH_LEN` | `8192` | client-side ceiling on a request URL's path+query (`http.c`) |
-| `WOLFCERT_HTTP_HEADER_BUDGET` | `8192` | client response allowance added to the caller's body cap, bounding the status line plus header block. The response reader grows its accumulator to `max_response_bytes + this` (`http.c`) |
+| `WOLFCERT_HTTP_HEADER_BUDGET` | `8192` | client limit on a response's status line plus header block; a longer block fails with `WOLFCERT_ERR_PROTOCOL`. The client's receive buffer holds at most `max_response_bytes + this` (`http.c`) |
 | `WOLFCERT_SCEP_MAX_GET_URL` | `8192` | client cap on a GET `PKIOperation` URL; a larger message is refused with `WOLFCERT_ERR_UNSUPPORTED` so the caller POSTs (`internal.h`) |
 
 Shrinking `WOLFCERT_HTTP_REQ_BUF_SZ` lowers the largest request header
 block the server accepts; `WOLFCERT_HTTP_PATH_SZ` / `WOLFCERT_HTTP_QUERY_SZ`
 lower the longest request path / query; `WOLFCERT_HTTP_AUTH_BUF_SZ` lowers the
 longest Basic-auth credential the client can send. `WOLFCERT_HTTP_HEADER_BUDGET`
-trims the client's response accumulator, and with it the largest response
-header block it will accept, so keep it above the headers your CA actually
+sets the largest response header block the client accepts, and with it the
+client's receive buffer, so keep it above the headers your CA actually
 sends. A POST-only SCEP deployment
 can trim `WOLFCERT_HTTP_QUERY_SZ` (and, on the client, `WOLFCERT_SCEP_MAX_GET_URL`
 and `WOLFCERT_HTTP_MAX_PATH_LEN`) back down. Example:
@@ -265,6 +266,20 @@ pool hint to bound total heap use; this is the primary mechanism for
 keeping the large heap-allocated `Cert` off a general-purpose allocator.
 See [`ARCHITECTURE.md` section 4.1](ARCHITECTURE.md#41-heap-hints--static-memory-pools)
 for the three levels of hint granularity.
+
+A pool realloc always copies, so a chunked or close-delimited HTTP response
+first tries to take its whole receive buffer in one block of
+`max_response_bytes + WOLFCERT_HTTP_HEADER_BUDGET`, 72 KB by default. If no
+pool block is that large, the buffer doubles as bytes arrive, taking a new
+block each time; with wolfSSL's default buckets it stops at 8192 bytes,
+headers and read room included, and a response that needs more fails with
+`WOLFCERT_ERR_MEMORY`. A `Content-Length` response takes one block of its
+exact size. For larger responses, give the pool one block of that sum per
+session receiving at the same time, or lower `max_response_bytes` (per
+request, or per session at open) or `WOLFCERT_HTTP_HEADER_BUDGET` (at build
+time) until their sum fits wolfSSL's largest bucket (`LARGEST_MEM_BUCKET`,
+16128 bytes unless ML-DSA or `SESSION_CERTS` raises it): 7936 + 8192, for
+example.
 
 ## 5. Threading
 

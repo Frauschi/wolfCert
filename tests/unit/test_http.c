@@ -469,9 +469,24 @@ static int test_chunked_size_overflow(void)
  * max_response_bytes = NEAR_CAP_MAX_BODY reads, header budget included. */
 #define NEAR_CAP_MAX_BODY 1024
 #define NEAR_CAP_TOTAL    (NEAR_CAP_MAX_BODY + WOLFCERT_HTTP_HEADER_BUDGET)
-#if NEAR_CAP_TOTAL < 256
+#if WOLFCERT_HTTP_HEADER_BUDGET < 256
 #error "test_session_near_cap_response needs WOLFCERT_HTTP_HEADER_BUDGET >= 256"
 #endif
+
+/* A header block of hdr_len bytes padded from head, then body_len bytes ending
+ * in "ready". */
+static size_t near_cap_fill(char* out, const char* head, size_t hdr_len,
+                            size_t body_len)
+{
+    size_t hl = strlen(head);
+
+    memcpy(out, head, hl);
+    memset(out + hl, 'A', hdr_len - hl - 4);
+    memcpy(out + hdr_len - 4, "\r\n\r\n", 4);
+    memset(out + hdr_len, 'B', body_len - 5);
+    memcpy(out + hdr_len + body_len - 5, "ready", 5);
+    return hdr_len + body_len;
+}
 
 static void* srv_thread_near_cap(void* arg)
 {
@@ -493,22 +508,19 @@ static void* srv_thread_near_cap(void* arg)
             break;
     }
 
-    const char* head =
-        "HTTP/1.1 200 OK\r\n"
-        "Content-Type: text/plain\r\n"
-        "Content-Length: 5\r\n"
-        "X-Pad: ";
-    const char* tail = "\r\n\r\nready";
-    size_t pad = NEAR_CAP_TOTAL - strlen(head) - strlen(tail);
+    char head[96];
+    snprintf(head, sizeof(head), "HTTP/1.1 200 OK\r\n"
+             "Content-Type: text/plain\r\n"
+             "Content-Length: %d\r\n"
+             "X-Pad: ", NEAR_CAP_MAX_BODY);
 
     char response[NEAR_CAP_TOTAL];
-    memcpy(response, head, strlen(head));
-    memset(response + strlen(head), 'A', pad);
-    memcpy(response + strlen(head) + pad, tail, strlen(tail));
+    size_t len = near_cap_fill(response, head, WOLFCERT_HTTP_HEADER_BUDGET,
+                               NEAR_CAP_MAX_BODY);
 
     size_t off = 0;
-    while (off < sizeof(response)) {
-        ssize_t w = send(cs, response + off, sizeof(response) - off, 0);
+    while (off < len) {
+        ssize_t w = send(cs, response + off, len - off, 0);
         if (w <= 0)
             break;
         off += (size_t)w;
@@ -544,8 +556,8 @@ static int test_session_near_cap_response(void)
     WolfCertHttpResponse resp = { 0 };
     REQUIRE(drive_nb(s, &req, &resp) == WOLFCERT_OK);
     REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body_len == 5);
-    REQUIRE(memcmp(resp.body, "ready", 5) == 0);
+    REQUIRE(resp.body_len == NEAR_CAP_MAX_BODY);
+    REQUIRE(memcmp(resp.body + resp.body_len - 5, "ready", 5) == 0);
     wolfcert_http_response_free(&resp);
 
     wolfcert_http_session_close(s);
@@ -579,17 +591,13 @@ static void* srv_thread_eof_cap(void* arg)
         "Content-Type: text/plain\r\n"
         "Connection: close\r\n"
         "X-Pad: ";
-    const char* tail = "\r\n\r\nready";
-    size_t pad = NEAR_CAP_TOTAL - strlen(head) - strlen(tail);
-
     char response[NEAR_CAP_TOTAL];
-    memcpy(response, head, strlen(head));
-    memset(response + strlen(head), 'A', pad);
-    memcpy(response + strlen(head) + pad, tail, strlen(tail));
+    size_t len = near_cap_fill(response, head, WOLFCERT_HTTP_HEADER_BUDGET,
+                               NEAR_CAP_MAX_BODY);
 
     size_t off = 0;
-    while (off < sizeof(response)) {
-        ssize_t w = send(cs, response + off, sizeof(response) - off, 0);
+    while (off < len) {
+        ssize_t w = send(cs, response + off, len - off, 0);
         if (w <= 0)
             break;
         off += (size_t)w;
@@ -625,7 +633,7 @@ static int test_session_eof_cap_response(void)
     WolfCertHttpResponse resp = { 0 };
     REQUIRE(drive_nb(s, &req, &resp) == WOLFCERT_OK);
     REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body_len >= 5);
+    REQUIRE(resp.body_len == NEAR_CAP_MAX_BODY);
     REQUIRE(memcmp(resp.body + resp.body_len - 5, "ready", 5) == 0);
     wolfcert_http_response_free(&resp);
 
