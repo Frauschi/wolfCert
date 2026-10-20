@@ -226,6 +226,9 @@ int  wolfcert_set_error(int wolfcert_rc, int wolfssl_rc,
     wolfcert_set_error((rc), 0, (module), __VA_ARGS__)
 #define WOLFCERT_ERR_WC(wc_rc, module, ...) \
     wolfcert_set_error(wolfcert_map_wc_err(wc_rc), (wc_rc), (module), __VA_ARGS__)
+/* Keeps wc_rc for wolfcert_last_wolfssl_err() but returns rc unmapped. */
+#define WOLFCERT_ERR_RC_WC(rc, wc_rc, module, ...) \
+    wolfcert_set_error((rc), (wc_rc), (module), __VA_ARGS__)
 
 void wolfcert_logv(WolfCertLogLevel lvl, const char* module, const char* fmt, ...);
 
@@ -283,8 +286,9 @@ typedef struct {
     int    in_trailers;
 } WolfCertChunkScan;
 
-/* 1 once the last chunk and its trailer section have arrived, 0 when more
- * bytes are needed, -1 when the framing is malformed. */
+/* 1 once the last chunk and its trailer section have arrived, with st->pos at
+ * the end of the message; 0 when more bytes are needed, -1 when the framing is
+ * malformed. */
 WOLFCERT_TEST_VIS int wolfcert_http_chunked_complete(const uint8_t* raw,
                                                      size_t raw_len,
                                                      WolfCertChunkScan* st);

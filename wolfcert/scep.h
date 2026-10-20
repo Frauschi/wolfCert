@@ -225,7 +225,10 @@ WOLFCERT_API int wolfcert_scep_get_next_ca_cert(const WolfCertServerCfg* srv,
  * the _nb calls wolfcert_scep_session_open_async; a mismatch returns
  * WOLFCERT_ERR_BAD_ARG. A _nb call returning WANT_READ / WANT_WRITE is repeated
  * with the same arguments; a call with a different out pointer returns
- * WOLFCERT_ERR_BAD_ARG. DNS and the initial connect stay synchronous. */
+ * WOLFCERT_ERR_BAD_ARG. DNS and the initial connect stay synchronous. Over
+ * https:// open does not verify the server: the first request runs the TLS
+ * handshake and returns WOLFCERT_ERR_TLS if it fails, or WOLFCERT_ERR_MEMORY
+ * if wolfSSL runs out of memory. */
 typedef struct WolfCertScepSession WolfCertScepSession;
 
 WOLFCERT_API int  wolfcert_scep_session_open(const WolfCertServerCfg* srv,

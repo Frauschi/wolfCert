@@ -53,6 +53,7 @@ typedef struct {
     int         fail_write;
     int         bogus_connect_rc;  /* positive return, breaking the contract */
     int         overcount;         /* report more bytes than written */
+    int         read_timeout;      /* timeout_ms of the last read */
 } Peer;
 
 static int p_connect(void* ctx, const char* host, int port, int timeout_ms,
@@ -76,7 +77,8 @@ static int p_read(void* ctx, void* conn, uint8_t* buf, size_t len,
     Peer*  p = (Peer*)ctx;
     size_t n = strlen(p->resp) - p->off;
 
-    (void)conn; (void)timeout_ms;
+    (void)conn;
+    p->read_timeout = timeout_ms;
     if (p->stall) {
         p->stall_now = !p->stall_now;
         if (p->stall_now)
@@ -153,6 +155,15 @@ static const char RESP_EOF0[] =
 static const char RESP_CL0[] =
     "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: keep-alive\r\n\r\n";
 
+/* The peer closes inside the header block, after 3 of 10 body bytes, or
+ * inside a chunk. */
+static const char RESP_CUT_HEAD[] =
+    "HTTP/1.1 200 OK\r\nContent-Type: text/pl";
+static const char RESP_CUT_BODY[] =
+    "HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhel";
+static const char RESP_CUT_CHUNKED[] =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhel";
+
 /* None of these is terminated by a close. */
 static const char RESP_204[] =
     "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n";
@@ -192,13 +203,28 @@ static const char RESP_INTERIM_HDRS[] =
     "Content-Type: text/interim\r\n\r\n"
     "HTTP/1.1 200 OK\r\nContent-Type: text/final\r\n"
     "Content-Length: 5\r\nConnection: keep-alive\r\n\r\nhello";
-/* A 204 followed by the next response on the same connection. */
-static const char RESP_204_THEN_CL[] =
-    "HTTP/1.1 204 No Content\r\nConnection: keep-alive\r\n\r\n"
-    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n"
-    "Content-Length: 5\r\nConnection: keep-alive\r\n\r\nhello";
+/* A long interim block, then a final header block shorter than it. */
+static const char RESP_LONG_INTERIM_204[] =
+    "HTTP/1.1 103 Early Hints\r\n"
+    "Link: </assets/a-rather-long-stylesheet-name.css>; rel=preload\r\n\r\n"
+    "HTTP/1.1 204 No Content\r\n\r\n";
+/* A reply the server sends unasked, right behind the one requested. */
+#define STALE_500 "HTTP/1.1 500 Stale\r\nContent-Length: 0\r\n\r\n"
 static const char RESP_101[] =
     "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n\r\n";
+static const char RESP_CHUNKED[] =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+    "Connection: keep-alive\r\n\r\n"
+    "5\r\nhello\r\n6;x=1\r\n world\r\n0\r\nX-T: 1\r\n\r\n";
+/* A HEAD reply and a 204 that name a transfer coding but carry no body. */
+static const char RESP_HEAD_CHUNKED[] =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n"
+    "Connection: keep-alive\r\n\r\n";
+static const char RESP_204_CHUNKED[] =
+    "HTTP/1.1 204 No Content\r\nTransfer-Encoding: chunked\r\n\r\n";
+static const char RESP_CHUNKED_SHORT[] =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
+    "3\r\nabc\r\n0\r\n\r\n";
 
 static int test_roundtrip(void)
 {
@@ -235,6 +261,132 @@ static int test_body_ends_at_close(void)
     REQUIRE(resp.body_len == 3 && memcmp(resp.body, "bye", 3) == 0);
     REQUIRE(p.disconnects == 1);
     wolfcert_http_response_free(&resp);
+    return 0;
+}
+
+/* With a 16-byte cap, a body that ends at the close may be 16 bytes; 17 is
+ * ERR_PROTOCOL, arriving with the headers or in a later read. */
+static int test_eof_body_capped(void)
+{
+    static const char hdr[] = "HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n";
+    WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
+    WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };
+    WolfCertHttpResponse resp = { 0 };
+    const size_t hl = sizeof(hdr) - 1;
+    char wire[sizeof(hdr) + 32];
+    Peer p = { 0 };
+
+    t.ctx = &p;
+    req.transport = t;
+    req.max_response_bytes = 16;
+    memcpy(wire, hdr, hl);
+
+    memset(wire + hl, 'B', 16);
+    wire[hl + 16] = '\0';
+    p.resp  = wire;
+    p.chunk = sizeof(wire);
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_OK);
+    REQUIRE(resp.body_len == 16);
+    wolfcert_http_response_free(&resp);
+
+    memset(wire + hl, 'B', 17);
+    wire[hl + 17] = '\0';
+    memset(&p, 0, sizeof(p));
+    p.resp  = wire;
+    p.chunk = sizeof(wire);
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_ERR_PROTOCOL);
+
+    memset(&p, 0, sizeof(p));
+    p.resp  = wire;
+    p.chunk = hl + 16;
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_ERR_PROTOCOL);
+    return 0;
+}
+
+#if defined(WOLFSSL_STATIC_MEMORY) && defined(WOLFSSL_NO_MALLOC)
+/* With a 256 KiB cap no pool block holds the whole allowance: a short
+ * chunked reply still arrives, and a 160 KiB one, larger than any block,
+ * fails with a message naming the settings. */
+static int test_chunked_over_pool_block(void)
+{
+    static const char head[] =
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n28000\r\n";
+    static const char tail[] = "\r\n0\r\n\r\n";
+    static char big[sizeof(head) + 0x28000 + sizeof(tail)];
+    WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
+    WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };
+    WolfCertHttpResponse resp = { 0 };
+    const size_t hl = sizeof(head) - 1;
+    Peer p = { 0 };
+
+    t.ctx = &p;
+    req.transport = t;
+    req.max_response_bytes = 256 * 1024;
+    p.resp  = RESP_CHUNKED;
+    p.chunk = sizeof(RESP_CHUNKED);
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_OK);
+    REQUIRE(resp.body_len == 11 && memcmp(resp.body, "hello world", 11) == 0);
+    wolfcert_http_response_free(&resp);
+
+    memcpy(big, head, hl);
+    memset(big + hl, 'A', 0x28000);
+    memcpy(big + hl + 0x28000, tail, sizeof(tail));
+    memset(&p, 0, sizeof(p));
+    p.resp  = big;
+    p.chunk = 4096;
+    wolfcert_clear_error();
+    REQUIRE(wolfcert_http_request(&req, &resp) == WOLFCERT_ERR_MEMORY);
+    REQUIRE(strstr(wolfcert_last_error_message(), "max_response_bytes")
+            != NULL);
+    REQUIRE(resp.body == NULL);
+    return 0;
+}
+#endif
+
+/* A header block 100 bytes over the budget, arriving 1000 bytes per read so
+ * one read could carry it past the budget, is refused with ERR_PROTOCOL. */
+static int test_header_block_over_budget(void)
+{
+    static const char head[] =
+        "HTTP/1.1 200 OK\r\nContent-Length: 0\r\nX-Pad: ";
+    static char wire[WOLFCERT_HTTP_HEADER_BUDGET + 128];
+    const size_t total = WOLFCERT_HTTP_HEADER_BUDGET + 100;
+    const size_t hl = sizeof(head) - 1;
+    WolfCertHttpResponse resp = { 0 };
+    Peer p = { 0 };
+
+    memcpy(wire, head, hl);
+    memset(wire + hl, 'A', total - hl - 4);
+    memcpy(wire + total - 4, "\r\n\r\n", 5);
+    wolfcert_clear_error();
+    REQUIRE(fetch(&p, wire, 1000, &resp) == WOLFCERT_ERR_PROTOCOL);
+    REQUIRE(strstr(wolfcert_last_error_message(), "header block") != NULL);
+    return 0;
+}
+
+/* A close before the headers, the Content-Length body or the chunked body
+ * are complete is ERR_IO with a message and no response. */
+static int test_truncated_reply_is_io(void)
+{
+    static const char* const cut[] = {
+        RESP_CUT_HEAD, RESP_CUT_BODY, RESP_CUT_CHUNKED
+    };
+    static const char* const why[] = {
+        "inside the response header", "after 3 of 10 body bytes",
+        "inside the chunked body"
+    };
+    WolfCertHttpResponse resp = { 0 };
+    Peer p = { 0 };
+    size_t i;
+
+    for (i = 0; i < sizeof(cut) / sizeof(cut[0]); i++) {
+        memset(&p, 0, sizeof(p));
+        wolfcert_clear_error();
+        REQUIRE(fetch(&p, cut[i], strlen(cut[i]) + 1, &resp)
+                == WOLFCERT_ERR_IO);
+        REQUIRE(strstr(wolfcert_last_error_message(), why[i]) != NULL);
+        REQUIRE(resp.status_code == 0 && resp.body == NULL);
+    }
     return 0;
 }
 
@@ -414,6 +566,43 @@ static int test_204_no_body(void)
     return 0;
 }
 
+/* A HEAD reply and a 204 carrying Transfer-Encoding: chunked have no body,
+ * and the next GET on the session gets its own reply. */
+static int test_no_body_ignores_chunked(void)
+{
+    static const char* const replies[] = {
+        RESP_HEAD_CHUNKED, RESP_204_CHUNKED
+    };
+    static const char* const methods[] = { "HEAD", "GET" };
+    WolfCertHttpRequest req = { .url = "http://peer.test/" };
+    WolfCertHttpResponse resp = { 0 };
+    WolfCertHttpSession* s = NULL;
+    Peer p = { 0 };
+    size_t i;
+
+    p.open_rc = WOLFCERT_ERR_IO;
+    REQUIRE(open_scoped(&p, &s) == WOLFCERT_OK);
+    for (i = 0; i < sizeof(replies) / sizeof(replies[0]); i++) {
+        p.resp  = replies[i];
+        p.off   = 0;
+        p.chunk = strlen(replies[i]);
+        req.method = methods[i];
+        REQUIRE(wolfcert_http_session_request(s, &req, &resp) == WOLFCERT_OK);
+        REQUIRE(resp.body == NULL && resp.body_len == 0);
+        wolfcert_http_response_free(&resp);
+
+        p.resp  = RESP_CL;
+        p.off   = 0;
+        p.chunk = sizeof(RESP_CL);
+        req.method = "GET";
+        REQUIRE(wolfcert_http_session_request(s, &req, &resp) == WOLFCERT_OK);
+        REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
+        wolfcert_http_response_free(&resp);
+    }
+    wolfcert_http_session_close(s);
+    return 0;
+}
+
 static int test_304_no_body(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -512,6 +701,20 @@ static int test_interim_then_final(void)
     return 0;
 }
 
+/* Fed one byte per read, a final header block shorter than the interim one
+ * before it is still found: 204. */
+static int test_short_final_after_long_interim(void)
+{
+    WolfCertHttpResponse resp = { 0 };
+    Peer p = { 0 };
+
+    REQUIRE(fetch(&p, RESP_LONG_INTERIM_204, 1, &resp) == WOLFCERT_OK);
+    REQUIRE(resp.status_code == 204);
+    REQUIRE(resp.body == NULL && resp.body_len == 0);
+    wolfcert_http_response_free(&resp);
+    return 0;
+}
+
 static int test_interim_headers_discarded(void)
 {
     WolfCertHttpResponse resp = { 0 };
@@ -594,7 +797,6 @@ static int nb_fetch_m(Peer* p, const char* method, const char* bytes,
     p->chunk   = chunk;
     p->open_rc = WOLFCERT_ERR_WANT_READ;
     cfg.transport   = t;
-    cfg.nonblocking = 1;
 
     rc = wolfcert_http_session_open(&cfg, &s);
     if (rc != WOLFCERT_OK)
@@ -609,31 +811,6 @@ static int nb_fetch_m(Peer* p, const char* method, const char* bytes,
 static int nb_fetch(Peer* p, const char* bytes, WolfCertHttpResponse* out)
 {
     return nb_fetch_m(p, "GET", bytes, strlen(bytes), out);
-}
-
-static int test_nb_204_completes(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_204, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 204);
-    REQUIRE(resp.body == NULL && resp.body_len == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_204_keeps_retry_after(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_204_RETRY, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 204);
-    REQUIRE(resp.retry_after_sec == 30);
-    REQUIRE(resp.body == NULL && resp.body_len == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
 }
 
 static int retry_after_of(const char* value, int nb, int* out)
@@ -826,18 +1003,6 @@ static int test_retry_after_unset_clock(void)
 }
 #endif
 
-static int test_nb_interim_then_final(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_INTERIM, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
 /* The peer closes with no body at all. */
 static int test_eof_empty_body_is_null(void)
 {
@@ -848,62 +1013,6 @@ static int test_eof_empty_body_is_null(void)
     REQUIRE(resp.status_code == 200);
     REQUIRE(resp.body == NULL && resp.body_len == 0);
     wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_head_ignores_content_length(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch_m(&p, "HEAD", RESP_HEAD, strlen(RESP_HEAD), &resp)
-            == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body == NULL && resp.body_len == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_lowercase_head_is_not_head(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch_m(&p, "head", RESP_CL, strlen(RESP_CL), &resp)
-            == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_interim_at_cap_accepted(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_INTERIM_MAX, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-static int test_nb_interim_flood_rejected(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_INTERIM_FLOOD, &resp) == WOLFCERT_ERR_PROTOCOL);
-    return 0;
-}
-
-static int test_nb_switching_protocols_rejected(void)
-{
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_101, &resp) == WOLFCERT_ERR_PROTOCOL);
     return 0;
 }
 
@@ -935,76 +1044,165 @@ static int test_nb_204_fragmented(void)
     return 0;
 }
 
-static int test_nb_head_oversized_length_ok(void)
+/* A stale 500 in the same read as a 204 or a chunked body leaves that reply
+ * intact but closes the session: the next request gets
+ * WOLFCERT_ERR_CONN_CLOSED with a message. */
+static int test_session_closes_on_bytes_past_body(void)
+{
+    static const char* const first[] = { RESP_204, RESP_CHUNKED };
+    static const int first_status[]  = { 204, 200 };
+    WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };
+    WolfCertHttpResponse resp = { 0 };
+    WolfCertHttpSession* s = NULL;
+    Peer p = { 0 };
+    char wire[512];
+    size_t i;
+
+    for (i = 0; i < sizeof(first) / sizeof(first[0]); i++) {
+        snprintf(wire, sizeof(wire), "%s" STALE_500, first[i]);
+        memset(&p, 0, sizeof(p));
+        p.resp    = wire;
+        p.chunk   = strlen(wire);
+        p.open_rc = WOLFCERT_ERR_IO;
+
+        REQUIRE(open_scoped(&p, &s) == WOLFCERT_OK);
+        REQUIRE(wolfcert_http_session_request(s, &req, &resp) == WOLFCERT_OK);
+        REQUIRE(resp.status_code == first_status[i]);
+        wolfcert_http_response_free(&resp);
+
+        wolfcert_clear_error();
+        REQUIRE(wolfcert_http_session_request(s, &req, &resp)
+                == WOLFCERT_ERR_CONN_CLOSED);
+        REQUIRE(strstr(wolfcert_last_error_message(), "closed") != NULL);
+        wolfcert_http_session_close(s);
+    }
+
+    return 0;
+}
+
+/* Two chunked replies on one non-blocking session, one byte per read with a
+ * WANT_READ between: "hello world", then a shorter "abc". */
+static int test_nb_chunked_fragmented(void)
 {
     WolfCertHttpSessionCfg cfg = { .base_url = "http://peer.test/" };
     WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
-    WolfCertHttpRequest req = { .method = "HEAD", .url = "http://peer.test/" };
+    WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };
     WolfCertHttpResponse resp = { 0 };
     WolfCertHttpSession* s = NULL;
     Peer p = { 0 };
 
     t.ctx = &p;
-    p.resp    = RESP_HEAD_BIG;
-    p.chunk   = sizeof(RESP_HEAD_BIG);
+    p.chunk   = 1;
+    p.stall   = 1;
     p.open_rc = WOLFCERT_ERR_WANT_READ;
-    cfg.transport          = t;
-    cfg.nonblocking        = 1;
-    cfg.max_response_bytes = 16;
+    cfg.transport   = t;
 
     REQUIRE(wolfcert_http_session_open(&cfg, &s) == WOLFCERT_OK);
+
+    p.resp = RESP_CHUNKED;
     REQUIRE(drive_nb(s, &req, &resp) == WOLFCERT_OK);
     REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.body == NULL && resp.body_len == 0);
+    REQUIRE(resp.body_len == 11 && memcmp(resp.body, "hello world", 11) == 0);
+    wolfcert_http_response_free(&resp);
+
+    p.resp = RESP_CHUNKED_SHORT;
+    p.off  = 0;
+    REQUIRE(drive_nb(s, &req, &resp) == WOLFCERT_OK);
+    REQUIRE(resp.body_len == 3 && memcmp(resp.body, "abc", 3) == 0);
+    wolfcert_http_response_free(&resp);
+
+    wolfcert_http_session_close(s);
+    return 0;
+}
+
+/* An _nb GET waits on WANT_READ with a 0 timeout. A blocking call, or an _nb
+ * call with another resp, gets BAD_ARG; the _nb GET then completes, and the
+ * next GET on the session runs blocking with a -1 timeout. */
+static int test_in_flight_request(void)
+{
+    WolfCertHttpSessionCfg cfg = { .base_url = "http://peer.test/" };
+    WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
+    WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };
+    WolfCertHttpResponse resp = { 0 };
+    WolfCertHttpResponse other = { 0 };
+    WolfCertHttpSession* s = NULL;
+    Peer p = { 0 };
+
+    t.ctx = &p;
+    p.resp    = RESP_CL;
+    p.chunk   = sizeof(RESP_CL);
+    p.open_rc = WOLFCERT_ERR_WANT_READ;
+    p.stall   = 1;
+    cfg.transport   = t;
+
+    REQUIRE(wolfcert_http_session_open(&cfg, &s) == WOLFCERT_OK);
+    REQUIRE(wolfcert_http_session_request_nb(s, &req, &resp)
+            == WOLFCERT_ERR_WANT_READ);
+    REQUIRE(p.read_timeout == 0);
+
+    REQUIRE(wolfcert_http_session_request_nb(s, &req, &other)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(wolfcert_http_session_request(s, &req, &resp)
+            == WOLFCERT_ERR_BAD_ARG);
+    REQUIRE(other.body == NULL && other.status_code == 0);
+
+    p.stall = 0;
+    REQUIRE(drive_nb(s, &req, &resp) == WOLFCERT_OK);
+    REQUIRE(resp.status_code == 200);
+    REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
+    wolfcert_http_response_free(&resp);
+
+    p.resp = RESP_CL;
+    p.off  = 0;
+    REQUIRE(wolfcert_http_session_request(s, &req, &resp) == WOLFCERT_OK);
+    REQUIRE(p.read_timeout == -1);
+    REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
     wolfcert_http_response_free(&resp);
     wolfcert_http_session_close(s);
     return 0;
 }
 
-static int test_nb_interim_headers_discarded(void)
+/* A WANT_READ reaching a blocking session request is ERR_IO and closes the
+ * session, so the next request gets CONN_CLOSED. */
+static int test_blocking_want_read_is_io(void)
 {
-    WolfCertHttpResponse resp = { 0 };
-    Peer p = { 0 };
-
-    REQUIRE(nb_fetch(&p, RESP_INTERIM_HDRS, &resp) == WOLFCERT_OK);
-    REQUIRE(resp.status_code == 200);
-    REQUIRE(resp.content_type != NULL);
-    REQUIRE(strcmp(resp.content_type, "text/final") == 0);
-    REQUIRE(resp.body_len == 5 && memcmp(resp.body, "hello", 5) == 0);
-    wolfcert_http_response_free(&resp);
-    return 0;
-}
-
-/* The bytes past a bodyless response belong to the next one on the session. */
-static int test_nb_session_reuse_after_204(void)
-{
-    WolfCertHttpSessionCfg cfg = { .base_url = "http://peer.test/" };
-    WolfCertTransport t = { p_connect, p_read, p_write, p_disconnect, NULL };
     WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };
-    WolfCertHttpResponse first = { 0 };
-    WolfCertHttpResponse second = { 0 };
+    WolfCertHttpResponse resp = { 0 };
     WolfCertHttpSession* s = NULL;
     Peer p = { 0 };
 
-    t.ctx = &p;
-    p.resp    = RESP_204_THEN_CL;
-    p.chunk   = strlen(RESP_204_THEN_CL);
-    p.open_rc = WOLFCERT_ERR_WANT_READ;
-    cfg.transport   = t;
-    cfg.nonblocking = 1;
+    p.resp  = RESP_CL;
+    p.chunk = sizeof(RESP_CL);
+    p.stall = 1;
 
-    REQUIRE(wolfcert_http_session_open(&cfg, &s) == WOLFCERT_OK);
+    REQUIRE(open_scoped(&p, &s) == WOLFCERT_OK);
+    wolfcert_clear_error();
+    REQUIRE(wolfcert_http_session_request(s, &req, &resp) == WOLFCERT_ERR_IO);
+    REQUIRE(strstr(wolfcert_last_error_message(), "WANT_READ") != NULL);
+    REQUIRE(wolfcert_http_session_request(s, &req, &resp)
+            == WOLFCERT_ERR_CONN_CLOSED);
+    wolfcert_http_session_close(s);
+    return 0;
+}
 
-    REQUIRE(drive_nb(s, &req, &first) == WOLFCERT_OK);
-    REQUIRE(first.status_code == 204);
-    REQUIRE(first.body == NULL && first.body_len == 0);
-    wolfcert_http_response_free(&first);
+/* A body that ends at the close gives "bye" and closes the blocking session,
+ * so the next request gets CONN_CLOSED. */
+static int test_blocking_eof_body_closes(void)
+{
+    WolfCertHttpRequest req = { .method = "GET", .url = "http://peer.test/" };
+    WolfCertHttpResponse resp = { 0 };
+    WolfCertHttpSession* s = NULL;
+    Peer p = { 0 };
 
-    REQUIRE(drive_nb(s, &req, &second) == WOLFCERT_OK);
-    REQUIRE(second.status_code == 200);
-    REQUIRE(second.body_len == 5 && memcmp(second.body, "hello", 5) == 0);
-    wolfcert_http_response_free(&second);
+    p.resp  = RESP_EOF;
+    p.chunk = sizeof(RESP_EOF);
 
+    REQUIRE(open_scoped(&p, &s) == WOLFCERT_OK);
+    REQUIRE(wolfcert_http_session_request(s, &req, &resp) == WOLFCERT_OK);
+    REQUIRE(resp.body_len == 3 && memcmp(resp.body, "bye", 3) == 0);
+    wolfcert_http_response_free(&resp);
+    REQUIRE(wolfcert_http_session_request(s, &req, &resp)
+            == WOLFCERT_ERR_CONN_CLOSED);
     wolfcert_http_session_close(s);
     return 0;
 }
@@ -1082,6 +1280,16 @@ int main(void)
         return 1;
     if (test_body_ends_at_close())
         return 1;
+    if (test_truncated_reply_is_io())
+        return 1;
+    if (test_header_block_over_budget())
+        return 1;
+    if (test_eof_body_capped())
+        return 1;
+#if defined(WOLFSSL_STATIC_MEMORY) && defined(WOLFSSL_NO_MALLOC)
+    if (test_chunked_over_pool_block())
+        return 1;
+#endif
     if (test_zero_is_not_data())
         return 1;
     if (test_read_overcount_rejected())
@@ -1100,27 +1308,25 @@ int main(void)
         return 1;
     if (test_304_no_body())
         return 1;
+    if (test_no_body_ignores_chunked())
+        return 1;
     if (test_204_keeps_retry_after())
         return 1;
     if (test_head_ignores_content_length())
         return 1;
     if (test_lowercase_head_is_not_head())
         return 1;
-    if (test_nb_lowercase_head_is_not_head())
-        return 1;
     if (test_interim_then_final())
         return 1;
     if (test_interim_headers_discarded())
+        return 1;
+    if (test_short_final_after_long_interim())
         return 1;
     if (test_interim_at_cap_accepted())
         return 1;
     if (test_interim_flood_rejected())
         return 1;
     if (test_switching_protocols_rejected())
-        return 1;
-    if (test_nb_204_completes())
-        return 1;
-    if (test_nb_204_keeps_retry_after())
         return 1;
     if (test_retry_after_delay_seconds())
         return 1;
@@ -1130,29 +1336,23 @@ int main(void)
     if (test_retry_after_unset_clock())
         return 1;
 #endif
-    if (test_nb_interim_then_final())
-        return 1;
     if (test_eof_empty_body_is_null())
-        return 1;
-    if (test_nb_head_ignores_content_length())
-        return 1;
-    if (test_nb_interim_at_cap_accepted())
-        return 1;
-    if (test_nb_interim_flood_rejected())
-        return 1;
-    if (test_nb_switching_protocols_rejected())
         return 1;
     if (test_nb_interim_fragmented())
         return 1;
     if (test_nb_204_fragmented())
         return 1;
+    if (test_nb_chunked_fragmented())
+        return 1;
+    if (test_in_flight_request())
+        return 1;
+    if (test_blocking_want_read_is_io())
+        return 1;
+    if (test_blocking_eof_body_closes())
+        return 1;
     if (test_head_oversized_length_ok())
         return 1;
-    if (test_nb_head_oversized_length_ok())
-        return 1;
-    if (test_nb_interim_headers_discarded())
-        return 1;
-    if (test_nb_session_reuse_after_204())
+    if (test_session_closes_on_bytes_past_body())
         return 1;
 #ifdef WOLFCERT_HAVE_BUILTIN_TRANSPORT
     if (test_zero_transport_takes_builtin())

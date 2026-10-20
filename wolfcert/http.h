@@ -104,20 +104,20 @@ typedef struct {
     /* TLS 1.3 post-handshake auth opt-in (RFC 8446 section 4.6.2). */
     int            allow_post_handshake_auth;
 
-    /* wolfcert_http_session_request_nb returns WANT_READ / WANT_WRITE instead
-     * of blocking. DNS and the initial connect stay synchronous. */
-    int            nonblocking;
-
     void*          heap;
 
     WolfCertTransport transport;
 } WolfCertHttpSessionCfg;
 
+/* Connects without verifying the server; the first request runs the TLS
+ * handshake and returns WOLFCERT_ERR_TLS if it fails, or WOLFCERT_ERR_MEMORY
+ * if wolfSSL runs out of memory. */
 WOLFCERT_API int  wolfcert_http_session_open (const WolfCertHttpSessionCfg* cfg,
                                               WolfCertHttpSession** out);
 
-/* Send one request on the open connection. req->url must match the session's
- * scheme, host and port; the TLS fields of req are ignored. */
+/* req->url must match the session's scheme, host and port; req's TLS fields
+ * are ignored. After a failed exchange, a body ending at the close or extra
+ * bytes after a reply, requests get WOLFCERT_ERR_CONN_CLOSED. */
 WOLFCERT_API int  wolfcert_http_session_request(WolfCertHttpSession* s,
                                                 const WolfCertHttpRequest* req,
                                                 WolfCertHttpResponse* resp);
@@ -129,10 +129,9 @@ WOLFCERT_API void wolfcert_http_session_close(WolfCertHttpSession* s);
  * close. */
 WOLFCERT_API int wolfcert_http_session_fd(const WolfCertHttpSession* s);
 
-/* Non-blocking wolfcert_http_session_request, for a session opened with
- * nonblocking = 1. Returns WOLFCERT_OK with resp populated, or WANT_READ /
- * WANT_WRITE to be repeated with the same, unmodified req and resp once the fd
- * is ready. Any other error is permanent and the caller closes the session. */
+/* wolfcert_http_session_request without waiting, on any session. WANT_READ /
+ * WANT_WRITE: repeat with the same req and resp once the fd is ready, keeping
+ * req->body valid and unchanged; other calls get WOLFCERT_ERR_BAD_ARG. */
 WOLFCERT_API int wolfcert_http_session_request_nb(WolfCertHttpSession* s,
                                                   const WolfCertHttpRequest* req,
                                                   WolfCertHttpResponse* resp);

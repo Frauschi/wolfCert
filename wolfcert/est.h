@@ -161,7 +161,9 @@ WOLFCERT_API int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
  * the preloaded client cert via TLS 1.3 post-handshake auth (RFC 8446 section
  * 4.6.2); open then fails with WOLFCERT_ERR_UNSUPPORTED if wolfSSL lacks
  * WOLFSSL_POST_HANDSHAKE_AUTH. HTTP Basic credentials are copied at open and
- * sent on every request. */
+ * sent on every request. Open does not verify the server: the first request
+ * runs the TLS handshake and returns WOLFCERT_ERR_TLS if it fails, or
+ * WOLFCERT_ERR_MEMORY if wolfSSL runs out of memory. */
 typedef struct WolfCertEstSession WolfCertEstSession;
 
 WOLFCERT_API int wolfcert_est_session_open(const WolfCertServerCfg* srv,
@@ -185,12 +187,12 @@ WOLFCERT_API void wolfcert_est_session_close(WolfCertEstSession* s);
  * -1 when a caller-supplied WolfCertTransport backs it (no descriptor). */
 WOLFCERT_API int wolfcert_est_session_fd(const WolfCertEstSession* s);
 
-/* Non-blocking variants, for a session from wolfcert_est_session_open_async.
- * Each _nb call returns WOLFCERT_OK once the output is populated, or
- * WOLFCERT_ERR_WANT_READ / _WANT_WRITE to be repeated with the same arguments
- * when the fd is ready; any other value ends the request. While a _nb request
- * is in flight, any other request on the session returns WOLFCERT_ERR_BAD_ARG
- * and leaves it intact. */
+/* Non-blocking variants, for a session from wolfcert_est_session_open or
+ * wolfcert_est_session_open_async. Each _nb call returns WOLFCERT_OK once the
+ * output is populated, or WOLFCERT_ERR_WANT_READ / _WANT_WRITE to be repeated
+ * with the same arguments when the fd is ready; any other value ends the
+ * request. While a _nb request is in flight, any other request on the session
+ * returns WOLFCERT_ERR_BAD_ARG and leaves it intact. */
 WOLFCERT_API int wolfcert_est_session_open_async(const WolfCertServerCfg* srv,
                                                  WolfCertEstSession** out);
 

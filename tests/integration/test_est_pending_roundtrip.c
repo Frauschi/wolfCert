@@ -298,6 +298,12 @@ static int pending_path(WolfCertServer* s)
                    "BEGIN CERTIFICATE", 17) != NULL);
     wolfcert_buffer_free(&async_out);
 
+    /* A blocking call works on the same session from _open_async. */
+    WolfCertBuffer async_ca = { 0 };
+    REQUIRE(wolfcert_est_session_get_cacerts(asess, &async_ca) == WOLFCERT_OK);
+    REQUIRE(async_ca.len > 0);
+    wolfcert_buffer_free(&async_ca);
+
     wolfcert_est_session_close(asess);
     wolfcert_buffer_free(&csr_async);
     wolfcert_key_free(dk_async);
@@ -336,13 +342,15 @@ static int pending_path(WolfCertServer* s)
                    "BEGIN CERTIFICATE", 17) != NULL);
     wolfcert_est_result_free(&sr2);
 
-    /* A failed _nb enroll on a blocking session leaves no request in flight. */
+    /* An _nb enroll on a session from wolfcert_est_session_open() runs to
+     * PENDING (the issued CSR is queued again), then a blocking call works. */
     WolfCertEstResult sr3 = { 0 };
-    REQUIRE(wolfcert_est_session_simple_enroll_nb_ex(xsess, csr_sex.data,
-                                                     csr_sex.len, &sr3)
-            == WOLFCERT_ERR_BAD_ARG);
-    REQUIRE(sr3.status == WOLFCERT_EST_STATUS_UNSET);
+    REQUIRE(pump_enroll_nb_ex(xsess, csr_sex.data, csr_sex.len, &sr3)
+            == WOLFCERT_OK);
+    REQUIRE(sr3.status == WOLFCERT_EST_STATUS_PENDING);
+    REQUIRE(sr3.retry_after_sec == 1);
     REQUIRE(sr3.cert_pem.data == NULL);
+    wolfcert_est_result_free(&sr3);
 
     WolfCertBuffer sess_ca = { 0 };
     REQUIRE(wolfcert_est_session_get_cacerts(xsess, &sess_ca) == WOLFCERT_OK);
