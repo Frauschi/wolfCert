@@ -46,10 +46,11 @@ A few constraints shape the whole library:
    wolfCert threads that into every wolfSSL crypto call on the key.
 4. **Pluggable storage and protocol handling via vtables** (see
    [section 5](#5-extension-points)).
-5. **Event-loop-friendly I/O.** The keep-alive HTTP and EST session APIs
-   support a non-blocking mode that surfaces `WOLFCERT_ERR_WANT_READ` /
-   `WOLFCERT_ERR_WANT_WRITE` so callers can drive the flow from their own
-   `poll`/`epoll`/`kqueue` loop. Blocking transports are the default.
+5. **Event-loop-friendly I/O.** Every keep-alive session (HTTP, EST, SCEP)
+   takes non-blocking `_nb` calls that surface `WOLFCERT_ERR_WANT_READ` /
+   `WOLFCERT_ERR_WANT_WRITE`, so callers can drive the flow from their own
+   `poll`/`epoll`/`kqueue` loop, and blocking calls on the same session.
+   Blocking transports are the default.
 6. **Compile-time feature gating.** EST, SCEP, the test server, the optional
    key types, and a handful of wolfSSL-tuning opt-ins are all togglable;
    disabled subsystems disappear from the link entirely.
@@ -137,15 +138,17 @@ four endpoints a typical device needs:
 
 | Endpoint | Entry point | Notes |
 |---|---|---|
-| `GET  /cacerts`        | `wolfcert_est_get_cacerts`     | CA chain as degenerate PKCS#7; decoded to PEM for you. |
-| `GET  /csrattrs`       | `wolfcert_est_get_csr_attrs`   | Raw body (empty on HTTP 204); decode with `wolfcert_est_parse_csr_attrs`. |
+| `GET  /cacerts`        | `wolfcert_est_get_cacerts`     | CA chain as degenerate PKCS#7; decoded to PEM or DER for you. |
+| `GET  /csrattrs`       | `wolfcert_est_get_csr_attrs`   | Raw body (empty on HTTP 204, 404, 405, 501 or an empty 200); decode with `wolfcert_est_parse_csr_attrs`. |
 | `POST /simpleenroll`   | `wolfcert_est_simple_enroll`   | Body is base64-wrapped CSR DER; 200 returns the issued cert as PKCS#7. |
 | `POST /simplereenroll` | `wolfcert_est_simple_reenroll` | Same, with the cert being renewed used as the implicit client identity. The test server's requirements for it are at `WolfCertServerCfgSrv.tls_client_ca_pem` in `wolfcert/server.h`. |
 
 A typical flow is: `wolfcert_key_generate` → `wolfcert_csr_build` →
-`wolfcert_est_simple_enroll` → persist the returned PEM. The keep-alive
-`WolfCertEstSession` carries several requests on one TLS connection, and is
-what enables the post-handshake-auth bootstrap below.
+`wolfcert_est_simple_enroll` → persist the issued PEM. Every endpoint also has
+session calls (`wolfcert_est_session_get_cacerts`/`_nb`, etc.) on the keep-alive
+`WolfCertEstSession`, which carries several requests on one TLS connection.
+`wolfcert_est_session_simple_reenroll` renews the cert the session was opened
+with as its client identity.
 
 **Authentication shapes.** EST supports three, all through the same
 `WolfCertServerCfg`:
@@ -157,12 +160,12 @@ what enables the post-handshake-auth bootstrap below.
 2. **mTLS up front** — set `client_cert` / `client_key`; they're presented
    during the handshake.
 3. **TLS 1.3 post-handshake auth** — set `client_cert` / `client_key` *and*
-   `proto_opts.est.allow_post_handshake_auth = 1`, and use the session API. The first request
-   (`/cacerts`) rides an anonymous handshake; the server triggers a
-   mid-session `CertificateRequest` when the client first hits a protected
-   endpoint, and wolfSSL answers from the pre-loaded identity with no further
-   caller involvement. Requires a wolfSSL built with
-   `WOLFSSL_POST_HANDSHAKE_AUTH`.
+   `proto_opts.est.allow_post_handshake_auth = 1`, for one-shots and sessions
+   alike. The handshake is anonymous; the server sends a `CertificateRequest`
+   when the client first hits a protected endpoint, and wolfSSL answers from
+   the pre-loaded identity with no further caller involvement. On a session,
+   earlier requests such as `/cacerts` stay anonymous. Requires a wolfSSL
+   built with `WOLFSSL_POST_HANDSHAKE_AUTH`.
 
 **Test server PHA mode.** `WolfCertServerCfgSrv.tls_post_handshake_auth`
 turns the in-tree server into the other end of shape 3. It needs
@@ -186,10 +189,10 @@ A client that holds a cert but does not opt into PHA is refused, since the
 server no longer asks for it during a TLS 1.3 handshake.
 
 **Manual approval.** A server may park an enrollment with `202 Accepted` +
-`Retry-After` (RFC 7030 §4.2.3), symmetrical to SCEP's PENDING. The `_ex`
-enroll calls, one-shot and session, surface this as a `WolfCertEstResult`
-with `UNSET` / `SUCCESS` / `FAILURE` / `PENDING` status and a
-`retry_after_sec` hint; the simple-result calls flatten PENDING to
+`Retry-After` (RFC 7030 §4.2.3), symmetrical to SCEP's PENDING. The enroll
+calls, one-shot and session, surface this as a `WolfCertEstResult` with
+`UNSET` / `SUCCESS` / `FAILURE` / `PENDING` status and a `retry_after_sec`
+hint; `wolfcert_client_enroll` and `wolfcert_client_reenroll` return
 `WOLFCERT_ERR_PENDING`.
 
 **`/csrattrs` key-policy pinning.** `wolfcert_est_parse_csr_attrs` decodes the
@@ -213,8 +216,8 @@ whose payload is an EnvelopedData, built on wolfSSL's `wc_PKCS7` API.
 | `GetCACaps`      | plain text | `wolfcert_scep_get_ca_caps` |
 | `GetCACert`      | cert body  | `wolfcert_scep_get_ca_cert` |
 | `GetNextCACert`  | cert body  | `wolfcert_scep_get_next_ca_cert` |
-| `PKCSReq`        | 19         | `wolfcert_scep_pkcs_req_ex` (+ simple `_pkcs_req`) |
-| `RenewalReq`     | 17         | `wolfcert_scep_renewal_req_ex` (+ simple `_renewal_req`) |
+| `PKCSReq`        | 19         | `wolfcert_scep_pkcs_req` |
+| `RenewalReq`     | 17         | `wolfcert_scep_renewal_req` |
 | `GetCertInitial` | 20         | `wolfcert_scep_get_cert_initial` |
 | `GetCert`        | 21         | `wolfcert_scep_get_cert` |
 
@@ -247,16 +250,14 @@ the fingerprint length) and constant-time-compares it, returning
 `WOLFCERT_ERR_AUTH` on mismatch. Verify the bundle this way before using it as
 the `ca_bundle` trust set for enrollment.
 
-**Keep-alive / async sessions.** Alongside the one-shot calls, PKCSReq,
-RenewalReq and GetCertInitial have session variants
-(`wolfcert_scep_session_pkcs_req_ex`/`_nb`, etc.) that reuse one connection,
-built on the same non-blocking HTTP session as EST (see the session section
-below). Fetch caps + the CA cert with the one-shot getters first, then open a
-session with `wolfcert_scep_session_open` (blocking) or
-`wolfcert_scep_session_open_async` (event-loop). Each round trip is
-prepared (envelope + sign), sent, and its CertRep parsed as one logical step;
-in async mode only the HTTP transport is pumped through `WANT_READ`/`WANT_WRITE`
-while the crypto stays synchronous.
+**Keep-alive sessions.** Every SCEP operation also has session calls
+(`wolfcert_scep_session_pkcs_req`/`_nb`, etc.) that reuse one connection; each
+one-shot opens such a session for its one request. Open a session with
+`wolfcert_scep_session_open`; each call on it is blocking, or `_nb` for an
+event loop (see the session section below). Each round trip is prepared
+(envelope + sign), sent, and its CertRep parsed as one logical step; an `_nb`
+call pumps only the HTTP transport through `WANT_READ`/`WANT_WRITE` while the
+crypto stays synchronous.
 
 **Client options** (`WolfCertServerCfg.proto_opts.scep`, a `WolfCertScepServerOpts`; all zero-init to the default behavior):
 - `ca_id` — CA identifier sent as `message=<id>` on GetCACaps / GetCACert
@@ -346,20 +347,63 @@ keys typically can't be exported in PEM, so `wolfcert_key_to_pem` will fail;
 persist the key by its `key_label` instead and resolve it against your backend
 on the next boot. See `examples/enroll_cryptocb.c` for a full example.
 
-### 4.3 Non-blocking I/O in a caller-owned event loop
+### 4.3 Keep-alive sessions and non-blocking I/O
 
-The session API flips to non-blocking mode with a single flag:
+A session keeps one connection for several requests. Open one when a flow
+makes more than one request to the same server: SCEP's GetCACert, GetCACaps
+and PKCSReq, or EST's `/cacerts` then `/simpleenroll`, which TLS 1.3
+post-handshake auth needs on one connection. Each one-shot `wolfcert_est_X` /
+`wolfcert_scep_X` has a session call `wolfcert_est_session_X` /
+`wolfcert_scep_session_X` that takes the session in place of `srv`:
+
+```c
+WolfCertServerCfg srv = { .protocol = WOLFCERT_PROTO_SCEP,
+                          .server_url = "http://ca.example/scep" };
+WolfCertScepSession* s = NULL;
+WolfCertBuffer ca = { 0 };
+WolfCertScepCaps caps = { 0 };
+WolfCertScepResult res = { 0 };
+
+int rc = wolfcert_scep_session_open(&srv, &s);
+if (rc == WOLFCERT_OK)          /* a single-cert CA: its DER */
+    rc = wolfcert_scep_session_get_ca_cert(s, WOLFCERT_ENCODING_DER, &ca);
+if (rc == WOLFCERT_OK)          /* pin it: GetCACert is unauthenticated */
+    rc = wolfcert_scep_verify_ca_fingerprint(ca.data, ca.len, fp, sizeof(fp),
+                                             WOLFCERT_SCEP_FP_SHA256);
+if (rc == WOLFCERT_OK)
+    rc = wolfcert_scep_session_get_ca_caps(s, &caps);
+if (rc == WOLFCERT_OK)
+    rc = wolfcert_scep_session_pkcs_req(s, &caps, ca.data, ca.len,
+                                        ca.data, ca.len, key,
+                                        csr.data, csr.len, &res);
+/* On WOLFCERT_OK, res.status is SUCCESS, PENDING or FAILURE. */
+
+wolfcert_scep_result_free(&res);
+wolfcert_buffer_free(&ca);
+wolfcert_scep_session_close(s);
+```
+
+A call refused with `WOLFCERT_ERR_BAD_ARG` changes nothing. A request that
+fails at the protocol level (an HTTP error status, a FAILURE CertRep) leaves
+the session open, though the server may close the connection after such a
+reply. A failed exchange (I/O, TLS or a malformed reply), or a reply that ends
+by closing the connection, closes the session: later calls return
+`WOLFCERT_ERR_CONN_CLOSED`. After an I/O or connection error, open a new
+session.
+
+Every session call also has an `_nb` form that returns instead of waiting, for
+a caller-owned event loop:
 
 ```c
 WolfCertServerCfg srv = { /* ... as normal ... */ };
 WolfCertEstSession* s;
-wolfcert_est_session_open_async(&srv, &s);   /* NON-BLOCKING session */
+wolfcert_est_session_open(&srv, &s);
 
 int fd = wolfcert_est_session_fd(s);
 
 WolfCertBuffer ca;
 for (;;) {
-    int rc = wolfcert_est_session_get_cacerts_nb(s, &ca);
+    int rc = wolfcert_est_session_get_cacerts_nb(s, WOLFCERT_ENCODING_PEM, &ca);
     if (rc == WOLFCERT_OK) break;
     if (rc == WOLFCERT_ERR_WANT_READ)  { poll_fd_readable(fd);  continue; }
     if (rc == WOLFCERT_ERR_WANT_WRITE) { poll_fd_writable(fd);  continue; }
@@ -370,14 +414,16 @@ for (;;) {
 
 Key points:
 
-- **Only the session API is non-blocking.** One-shot `wolfcert_http_request` /
-  `wolfcert_est_*` / `wolfcert_scep_*` calls are blocking by design. Both EST
-  (`wolfcert_est_session_*_nb`) and SCEP (`wolfcert_scep_session_*_nb`) offer
-  non-blocking session variants; the SCEP session additionally does not require
-  TLS, since SCEP authenticates at the pkiMessage layer.
-- **DNS and the initial TCP connect stay synchronous.** Only socket operations
-  *after* the session is open are non-blocking; if you can't afford a blocking
-  connect, resolve and connect the socket yourself.
+- **One-shots block; a session takes either style.** One-shot
+  `wolfcert_http_request` / `wolfcert_est_*` / `wolfcert_scep_*` calls are
+  blocking by design. A session takes blocking and `_nb` calls, and the style
+  may change between requests; a blocking call while an `_nb` request is in
+  flight returns `WOLFCERT_ERR_BAD_ARG`. The SCEP session additionally does
+  not require TLS, since SCEP authenticates at the pkiMessage layer.
+- **DNS and the initial TCP connect stay synchronous.** Session open resolves
+  and connects; the TLS handshake runs on the first request, so it is
+  non-blocking under `_nb`. If you can't afford a blocking connect, resolve and
+  connect the socket yourself.
 - **The descriptor comes from the built-in transport.** `*_session_fd()`
   returns `-1` on a caller-supplied `WolfCertTransport`, which has no
   descriptor to hand out; drive the loop from whatever readiness signal your
@@ -429,7 +475,7 @@ wolfSSL leaves `THREAD_LS_T` empty. Otherwise (RTOS and bare-metal builds) the
 state is one global, so keep wolfCert calls on one thread. After any failing call:
 
 ```c
-int rc = wolfcert_est_simple_enroll(&srv, csr, csr_len, &cert);
+int rc = wolfcert_est_simple_enroll(&srv, csr, csr_len, &res);
 if (rc != WOLFCERT_OK) {
     LOG("wolfCert: %s (ssl=%d): %s",
         wolfcert_strerror(rc),
@@ -490,11 +536,11 @@ The contract:
   unbounded wait around a non-blocking transfer: the second shape silently
   discards whatever the application configured.
 - **The mode can change between requests on one connection.** wolfCert lets
-  an application make blocking and `_nb` requests on one HTTP or EST session,
-  one request at a time, so a transport can see `0` and a negative value on
-  the same connection. Take special care to honour each call's value if your
-  application needs this; otherwise keep a connection in one mode. Closing a
-  session always writes the TLS `close_notify` with `0`.
+  an application make blocking and `_nb` requests on one HTTP, EST or SCEP
+  session, one request at a time, so a transport can see `0` and a negative
+  value on the same connection. Take special care to honour each call's value
+  if your application needs this; otherwise keep a connection in one mode.
+  Closing a session always writes the TLS `close_notify` with `0`.
 - **Never write more than `len` bytes.** wolfCert rejects a count larger than
   it asked for, but that only keeps the overrun out of its own buffers - the
   write into yours has already happened, so honouring `len` is the transport's
@@ -563,7 +609,7 @@ WolfCertServerCfg srv = {
     .proto_opts.est     = { .allow_post_handshake_auth = 1 },
 };
 WolfCertEstSession* s;
-wolfcert_est_session_open_async(&srv, &s);
+wolfcert_est_session_open(&srv, &s);
 run_nb_loop(s);                              /* pattern from section 4.3 */
 wolfcert_est_session_close(s);
 

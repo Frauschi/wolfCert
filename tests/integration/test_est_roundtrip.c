@@ -113,7 +113,7 @@ static int enroll_raw_csr(const WolfCertServerCfg* client_cfg,
     test_signkey key;
     Cert req;
     byte csr[8192];
-    WolfCertBuffer issued = { 0 };
+    WolfCertEstResult issued = { 0 };
     int sz;
 
     REQUIRE(wc_InitRng(&rng) == 0);
@@ -133,13 +133,13 @@ static int enroll_raw_csr(const WolfCertServerCfg* client_cfg,
             == want_rc);
 
     if (want_rc == WOLFCERT_OK) {
-        REQUIRE(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE, der,
-                            NULL, NULL, NULL) == 0);
+        REQUIRE(wc_PemToDer(issued.cert_pem.data, (long)issued.cert_pem.len,
+                            CERT_TYPE, der, NULL, NULL, NULL) == 0);
         wc_InitDecodedCert(dc, (*der)->buffer, (*der)->length, NULL);
         REQUIRE(wc_ParseCert(dc, CERT_TYPE, NO_VERIFY, NULL) == 0);
     }
 
-    wolfcert_buffer_free(&issued);
+    wolfcert_est_result_free(&issued);
     test_signkey_free(&key);
     wc_FreeRng(&rng);
     return 0;
@@ -188,13 +188,13 @@ static int enroll_check_subject_rdns(const WolfCertServerCfg* client_cfg)
     WolfCertBuffer csr = { 0 };
     REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
 
-    WolfCertBuffer issued = { 0 };
+    WolfCertEstResult issued = { 0 };
     REQUIRE(wolfcert_est_simple_enroll(client_cfg, csr.data, csr.len, &issued)
             == WOLFCERT_OK);
 
     DerBuffer* der = NULL;
-    REQUIRE(wc_PemToDer(issued.data, (long)issued.len, CERT_TYPE, &der,
-                        NULL, NULL, NULL) == 0);
+    REQUIRE(wc_PemToDer(issued.cert_pem.data, (long)issued.cert_pem.len,
+                        CERT_TYPE, &der, NULL, NULL, NULL) == 0);
 
     DecodedCert dc;
     wc_InitDecodedCert(&dc, der->buffer, der->length, NULL);
@@ -220,7 +220,7 @@ static int enroll_check_subject_rdns(const WolfCertServerCfg* client_cfg)
     wc_FreeDecodedCert(&dc);
     wc_FreeDer(&der);
     wolfcert_buffer_free(&csr);
-    wolfcert_buffer_free(&issued);
+    wolfcert_est_result_free(&issued);
     wolfcert_key_free(dk);
     return 0;
 }
@@ -269,7 +269,8 @@ int main(void)
     client_cfg.transport = counting_transport;
 
     WolfCertBuffer ca_pem = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&client_cfg, &ca_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&client_cfg, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem) == WOLFCERT_OK);
 
     /* For the single-cert test CA the DER result is that cert's raw DER. */
     WolfCertClient* client = NULL;
@@ -283,6 +284,17 @@ int main(void)
     REQUIRE(wolfSSL_CertManagerLoadCABuffer(ca_cm, ca_der.data, (long)ca_der.len,
                                             WOLFSSL_FILETYPE_ASN1) == WOLFSSL_SUCCESS);
     wolfSSL_CertManagerFree(ca_cm);
+
+    WolfCertEstSession* ca_sess = NULL;
+    WolfCertBuffer sess_der = { 0 };
+    REQUIRE(wolfcert_est_session_open(&client_cfg, &ca_sess) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_session_get_cacerts(ca_sess, WOLFCERT_ENCODING_DER,
+                                             &sess_der) == WOLFCERT_OK);
+    wolfcert_est_session_close(ca_sess);
+    REQUIRE(sess_der.len == ca_der.len &&
+            memcmp(sess_der.data, ca_der.data, ca_der.len) == 0);
+    wolfcert_buffer_free(&sess_der);
+
     wolfcert_buffer_free(&ca_der);
     wolfcert_client_free(client);
 
@@ -321,10 +333,10 @@ int main(void)
     REQUIRE(pop_csr.len > 0);
     pop_csr.data[pop_csr.len - 1] ^= 0x01;
 
-    WolfCertBuffer pop_out = { 0 };
+    WolfCertEstResult pop_out = { 0 };
     REQUIRE(wolfcert_est_simple_enroll(&client_cfg, pop_csr.data, pop_csr.len,
                                        &pop_out) != WOLFCERT_OK);
-    REQUIRE(pop_out.data == NULL);
+    REQUIRE(pop_out.cert_pem.data == NULL);
 
     wolfcert_buffer_free(&pop_csr);
     wolfcert_key_free(pop_dk);
@@ -339,7 +351,7 @@ int main(void)
 
     client_cfg.proto_opts.est.username = "bad";
     client_cfg.proto_opts.est.password = "wrong";
-    WolfCertBuffer bad = { 0 };
+    WolfCertEstResult bad = { 0 };
     REQUIRE(wolfcert_est_simple_enroll(&client_cfg, csr.data, csr.len, &bad)
             == WOLFCERT_ERR_AUTH);
 
@@ -379,13 +391,13 @@ int main(void)
     WolfCertBuffer acsr = { 0 };
     REQUIRE(wolfcert_csr_build(adk, &ameta, &acsr) == WOLFCERT_OK);
 
-    WolfCertBuffer aok = { 0 };
+    WolfCertEstResult aok = { 0 };
     REQUIRE(wolfcert_est_simple_enroll(&acli, acsr.data, acsr.len, &aok)
-            == WOLFCERT_OK);
-    wolfcert_buffer_free(&aok);
+            == WOLFCERT_OK && aok.status == WOLFCERT_EST_STATUS_SUCCESS);
+    wolfcert_est_result_free(&aok);
 
     acli.proto_opts.est.password = "hunterABC";
-    WolfCertBuffer abad = { 0 };
+    WolfCertEstResult abad = { 0 };
     REQUIRE(wolfcert_est_simple_enroll(&acli, acsr.data, acsr.len, &abad)
             == WOLFCERT_ERR_AUTH);
 

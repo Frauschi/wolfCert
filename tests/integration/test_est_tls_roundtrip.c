@@ -384,7 +384,8 @@ int main(void)
     };
 
     WolfCertBuffer ca_pem = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&cli, &ca_pem) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&cli, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem) == WOLFCERT_OK);
     REQUIRE(ca_pem.len > 0);
 
     WolfCertKeyCfg kcfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
@@ -395,13 +396,14 @@ int main(void)
     WolfCertBuffer csr = { 0 };
     REQUIRE(wolfcert_csr_build(dk, &meta, &csr) == WOLFCERT_OK);
 
-    WolfCertBuffer issued = { 0 };
+    WolfCertEstResult issued = { 0 };
     int rc = wolfcert_est_simple_enroll(&cli, csr.data, csr.len, &issued);
     if (rc != WOLFCERT_OK)
         fprintf(stderr, "enroll rc=%d (%s)\n", rc, wolfcert_strerror(rc));
     REQUIRE(rc == WOLFCERT_OK);
-    REQUIRE(memmem(issued.data, issued.len, "BEGIN CERTIFICATE", 17) != NULL);
-    REQUIRE(check_subject_cn(&issued, "tls-est-client") == 0);
+    REQUIRE(memmem(issued.cert_pem.data, issued.cert_pem.len,
+                   "BEGIN CERTIFICATE", 17) != NULL);
+    REQUIRE(check_subject_cn(&issued.cert_pem, "tls-est-client") == 0);
 
     /* The same trust anchor in DER form. */
     DerBuffer* ta_der = NULL;
@@ -415,7 +417,8 @@ int main(void)
         .verify_server     = 1,
     };
     WolfCertBuffer ca_pem_der = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&cli_der, &ca_pem_der) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&cli_der, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem_der) == WOLFCERT_OK);
     REQUIRE(ca_pem_der.len > 0);
     wolfcert_buffer_free(&ca_pem_der);
     wc_FreeDer(&ta_der);
@@ -435,7 +438,8 @@ int main(void)
         .verify_server     = 1,
     };
     WolfCertBuffer ca_pem_chain = { 0 };
-    REQUIRE(wolfcert_est_get_cacerts(&cli_chain, &ca_pem_chain) == WOLFCERT_OK);
+    REQUIRE(wolfcert_est_get_cacerts(&cli_chain, WOLFCERT_ENCODING_PEM,
+                                     &ca_pem_chain) == WOLFCERT_OK);
     REQUIRE(ca_pem_chain.len > 0);
     wolfcert_buffer_free(&ca_pem_chain);
     free(ta_chain);
@@ -449,7 +453,7 @@ int main(void)
 
     wolfcert_buffer_free(&ca_pem);
     wolfcert_buffer_free(&csr);
-    wolfcert_buffer_free(&issued);
+    wolfcert_est_result_free(&issued);
     wolfcert_key_free(dk);
     free(tls_cert);
     free(tls_key);

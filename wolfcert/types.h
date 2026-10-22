@@ -166,13 +166,13 @@ typedef struct {
     const char* username;
     const char* password;
 
-    /* TLS 1.3 post-handshake auth opt-in (RFC 8446 section 4.6.2), read only
-     * by the keep-alive EST session API. */
+    /* TLS 1.3 post-handshake auth opt-in (RFC 8446 section 4.6.2) for every
+     * EST call; WOLFCERT_ERR_UNSUPPORTED if wolfSSL lacks it. */
     int allow_post_handshake_auth;
 
     /* When set, wolfcert_client_enroll fetches /csrattrs and applies its
      * hints to copies of key_cfg and meta, filling only zero-valued fields.
-     * An empty reply (204, 404 or no body) changes nothing. */
+     * An empty /csrattrs reply changes nothing. */
     int auto_csrattrs;
 } WolfCertEstServerOpts;
 
@@ -211,8 +211,8 @@ typedef struct {
     int              verify_server;  /* must be 1 for EST and https:// SCEP */
     int              timeout_ms;     /* per-request timeout; 0 = default */
 
-    /* Optional mutual-TLS client identity (both set), PEM or DER. EST
-     * /simplereenroll presents the cert being renewed instead. */
+    /* Optional mutual-TLS client identity (both set), PEM or DER. For EST, a
+     * session's identity is the cert its /simplereenroll renews. */
     const uint8_t*   client_cert;
     size_t           client_cert_len;
     const uint8_t*   client_key;

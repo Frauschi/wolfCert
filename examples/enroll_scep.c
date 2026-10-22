@@ -84,7 +84,8 @@ int main(int argc, char** argv)
 
     /* 1) GetCACert, converted to DER for the SCEP envelope. */
     WolfCertBuffer ca_pem = { 0 };
-    if (wolfcert_scep_get_ca_cert(&srv, &ca_pem) != WOLFCERT_OK) {
+    if (wolfcert_scep_get_ca_cert(&srv, WOLFCERT_ENCODING_PEM,
+                                  &ca_pem) != WOLFCERT_OK) {
         fprintf(stderr, "GetCACert failed\n");
         return 2;
     }
@@ -121,20 +122,28 @@ int main(int argc, char** argv)
     if (wolfcert_csr_build(key, &meta, &csr) != WOLFCERT_OK)
         return 2;
 
-    /* 4) PKCSReq. */
-    WolfCertBuffer cert = { 0 };
+    /* 4) PKCSReq, enveloped to and verified against the single CA cert. */
+    WolfCertScepResult res = { 0 };
     rc = wolfcert_scep_pkcs_req(&srv, &caps, ca_der->buffer, ca_der->length,
-                                key, csr.data, csr.len, &cert);
+                                ca_der->buffer, ca_der->length,
+                                key, csr.data, csr.len, &res);
     if (rc != WOLFCERT_OK) {
         fprintf(stderr, "PKCSReq failed: %s\n", wolfcert_strerror(rc));
         return 2;
     }
-    fwrite(cert.data, 1, cert.len, stdout);
+    if (res.status != WOLFCERT_SCEP_STATUS_SUCCESS) {
+        fprintf(stderr, "PKCSReq %s\n",
+                res.status == WOLFCERT_SCEP_STATUS_PENDING
+                    ? "pending; poll with wolfcert_scep_get_cert_initial"
+                    : "rejected by the CA");
+        return 2;
+    }
+    fwrite(res.cert_pem.data, 1, res.cert_pem.len, stdout);
 
     wc_FreeDer(&ca_der);
     wolfcert_buffer_free(&ca_pem);
     wolfcert_buffer_free(&csr);
-    wolfcert_buffer_free(&cert);
+    wolfcert_scep_result_free(&res);
     wolfcert_key_free(key);
     wolfcert_cleanup();
     return 0;

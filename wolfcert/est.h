@@ -27,12 +27,16 @@
 extern "C" {
 #endif
 
-/* GET /.well-known/est/cacerts - returns the CA chain as PEM. */
+/* GET /.well-known/est/cacerts - returns the CA chain as PEM for
+ * WOLFCERT_ENCODING_PEM, or as concatenated DER for WOLFCERT_ENCODING_DER.
+ * A 401 or 403 returns WOLFCERT_ERR_AUTH, any other non-200 _HTTP. */
 WOLFCERT_API int wolfcert_est_get_cacerts(const WolfCertServerCfg* srv,
-                                          WolfCertBuffer* out_ca_pem);
+                                          WolfCertEncoding enc,
+                                          WolfCertBuffer* out_ca);
 
 /* GET /.well-known/est/csrattrs - returns the CsrAttrs DER for
- * wolfcert_est_parse_csr_attrs, empty (NULL, 0) on 204, 404 or no body. */
+ * wolfcert_est_parse_csr_attrs, empty (NULL, 0) on 204, 404, 405, 501 or a
+ * 200 with no body. A 401 or 403 returns WOLFCERT_ERR_AUTH, others _HTTP. */
 WOLFCERT_API int wolfcert_est_get_csr_attrs(const WolfCertServerCfg* srv,
                                             WolfCertBuffer* out_attrs_der);
 
@@ -101,16 +105,14 @@ WOLFCERT_API int wolfcert_csr_attrs_build(const WolfCertCsrAttrItem* items,
                                           size_t count,
                                           WolfCertBuffer* out_der);
 
-/* Outcome of the _ex enroll calls (RFC 7030 section 4.2), matching the
+/* Outcome of the enroll calls (RFC 7030 section 4.2), matching the
  * WolfCertScepStatus values:
  *   SUCCESS - returns WOLFCERT_OK; cert_pem holds the issued cert.
  *   PENDING - returns WOLFCERT_OK; cert_pem is empty and the caller re-POSTs
  *             the identical request after retry_after_sec (section 4.2.3).
  *   FAILURE - any other HTTP status; returns WOLFCERT_ERR_AUTH for 401/403,
  *             else WOLFCERT_ERR_HTTP.
- *   UNSET   - no usable reply; the int return code says why.
- * The non-_ex calls return PENDING as WOLFCERT_ERR_PENDING and drop
- * retry_after_sec. */
+ *   UNSET   - no usable reply; the int return code says why. */
 typedef enum {
     WOLFCERT_EST_STATUS_UNSET   = 0,
     WOLFCERT_EST_STATUS_SUCCESS = 1,
@@ -130,17 +132,14 @@ typedef struct {
 
 /* Every wolfcert_est_* call taking a WolfCertEstResult* initializes a
  * non-NULL *out first, so freeing it after any outcome is safe. A populated
- * result must be freed before it is passed again. */
+ * result must be freed before it is passed again, except a session's
+ * in-flight result, which every resume passes back unfreed. */
 WOLFCERT_API void wolfcert_est_result_free(WolfCertEstResult* r);
 
 /* POST /.well-known/est/simpleenroll. */
 WOLFCERT_API int wolfcert_est_simple_enroll(const WolfCertServerCfg* srv,
                                             const uint8_t* csr_der, size_t csr_der_len,
-                                            WolfCertBuffer* out_cert_pem);
-
-WOLFCERT_API int wolfcert_est_simple_enroll_ex(const WolfCertServerCfg* srv,
-                                               const uint8_t* csr_der, size_t csr_der_len,
-                                               WolfCertEstResult* out);
+                                            WolfCertEstResult* out);
 
 /* POST /.well-known/est/simplereenroll. Uses the caller's current cert/key
  * as the TLS client credential. */
@@ -148,38 +147,45 @@ WOLFCERT_API int wolfcert_est_simple_reenroll(const WolfCertServerCfg* srv,
                                               const uint8_t* current_cert, size_t current_cert_len,
                                               const WolfCertKey* current_key,
                                               const uint8_t* csr_der, size_t csr_der_len,
-                                              WolfCertBuffer* out_cert_pem);
-
-WOLFCERT_API int wolfcert_est_simple_reenroll_ex(const WolfCertServerCfg* srv,
-                                                 const uint8_t* current_cert, size_t current_cert_len,
-                                                 const WolfCertKey* current_key,
-                                                 const uint8_t* csr_der, size_t csr_der_len,
-                                                 WolfCertEstResult* out);
+                                              WolfCertEstResult* out);
 
 /* Keep-alive EST session carrying several requests over one TLS connection.
- * With proto_opts.est.allow_post_handshake_auth set, the server can request
- * the preloaded client cert via TLS 1.3 post-handshake auth (RFC 8446 section
+ * Each call on it is blocking or _nb, and the style may change between
+ * requests. An _nb call returning WOLFCERT_ERR_WANT_READ / _WANT_WRITE is
+ * repeated with the same arguments when the session fd is ready. While a
+ * request is in flight, a call for another operation, output or encoding, and
+ * any blocking call, returns WOLFCERT_ERR_BAD_ARG and leaves it intact. Open
+ * checks the config and connects synchronously; it does not verify the server:
+ * the first request runs the TLS handshake and returns WOLFCERT_ERR_TLS if it
+ * fails, or WOLFCERT_ERR_MEMORY if wolfSSL runs out of memory. HTTP Basic
+ * credentials are copied at open and sent on every request. With
+ * proto_opts.est.allow_post_handshake_auth set, the server can request the
+ * preloaded client cert via TLS 1.3 post-handshake auth (RFC 8446 section
  * 4.6.2); open then fails with WOLFCERT_ERR_UNSUPPORTED if wolfSSL lacks
- * WOLFSSL_POST_HANDSHAKE_AUTH. HTTP Basic credentials are copied at open and
- * sent on every request. Open does not verify the server: the first request
- * runs the TLS handshake and returns WOLFCERT_ERR_TLS if it fails, or
- * WOLFCERT_ERR_MEMORY if wolfSSL runs out of memory. */
+ * WOLFSSL_POST_HANDSHAKE_AUTH. */
 typedef struct WolfCertEstSession WolfCertEstSession;
 
 WOLFCERT_API int wolfcert_est_session_open(const WolfCertServerCfg* srv,
                                            WolfCertEstSession** out);
 
 WOLFCERT_API int wolfcert_est_session_get_cacerts(WolfCertEstSession* s,
-                                                  WolfCertBuffer* out_ca_pem);
+                                                  WolfCertEncoding enc,
+                                                  WolfCertBuffer* out_ca);
+
+WOLFCERT_API int wolfcert_est_session_get_csr_attrs(WolfCertEstSession* s,
+                                                    WolfCertBuffer* out_attrs_der);
 
 WOLFCERT_API int wolfcert_est_session_simple_enroll(WolfCertEstSession* s,
-                                                    const uint8_t* csr_der, size_t csr_der_len,
-                                                    WolfCertBuffer* out_cert_pem);
+                                                    const uint8_t* csr_der,
+                                                    size_t csr_der_len,
+                                                    WolfCertEstResult* out);
 
-WOLFCERT_API int wolfcert_est_session_simple_enroll_ex(WolfCertEstSession* s,
-                                                       const uint8_t* csr_der,
-                                                       size_t csr_der_len,
-                                                       WolfCertEstResult* out);
+/* The session's TLS client credential, srv->client_cert and client_key at
+ * open, is the cert being renewed; WOLFCERT_ERR_BAD_ARG without one. */
+WOLFCERT_API int wolfcert_est_session_simple_reenroll(WolfCertEstSession* s,
+                                                      const uint8_t* csr_der,
+                                                      size_t csr_der_len,
+                                                      WolfCertEstResult* out);
 
 WOLFCERT_API void wolfcert_est_session_close(WolfCertEstSession* s);
 
@@ -187,27 +193,22 @@ WOLFCERT_API void wolfcert_est_session_close(WolfCertEstSession* s);
  * -1 when a caller-supplied WolfCertTransport backs it (no descriptor). */
 WOLFCERT_API int wolfcert_est_session_fd(const WolfCertEstSession* s);
 
-/* Non-blocking variants, for a session from wolfcert_est_session_open or
- * wolfcert_est_session_open_async. Each _nb call returns WOLFCERT_OK once the
- * output is populated, or WOLFCERT_ERR_WANT_READ / _WANT_WRITE to be repeated
- * with the same arguments when the fd is ready; any other value ends the
- * request. While a _nb request is in flight, any other request on the session
- * returns WOLFCERT_ERR_BAD_ARG and leaves it intact. */
-WOLFCERT_API int wolfcert_est_session_open_async(const WolfCertServerCfg* srv,
-                                                 WolfCertEstSession** out);
-
 WOLFCERT_API int wolfcert_est_session_get_cacerts_nb(WolfCertEstSession* s,
-                                                     WolfCertBuffer* out_ca_pem);
+                                                     WolfCertEncoding enc,
+                                                     WolfCertBuffer* out_ca);
+
+WOLFCERT_API int wolfcert_est_session_get_csr_attrs_nb(WolfCertEstSession* s,
+                                                       WolfCertBuffer* out_attrs_der);
 
 WOLFCERT_API int wolfcert_est_session_simple_enroll_nb(WolfCertEstSession* s,
                                                        const uint8_t* csr_der,
                                                        size_t csr_der_len,
-                                                       WolfCertBuffer* out_cert_pem);
+                                                       WolfCertEstResult* out);
 
-WOLFCERT_API int wolfcert_est_session_simple_enroll_nb_ex(WolfCertEstSession* s,
-                                                          const uint8_t* csr_der,
-                                                          size_t csr_der_len,
-                                                          WolfCertEstResult* out);
+WOLFCERT_API int wolfcert_est_session_simple_reenroll_nb(WolfCertEstSession* s,
+                                                         const uint8_t* csr_der,
+                                                         size_t csr_der_len,
+                                                         WolfCertEstResult* out);
 
 #ifdef __cplusplus
 }

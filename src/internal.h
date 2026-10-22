@@ -26,6 +26,7 @@
 #define WOLFCERT_INTERNAL_H
 
 #include <wolfcert/types.h>
+#include <wolfcert/http.h>
 #include <wolfcert/keygen.h>
 #include <wolfcert/server.h>
 #include <wolfcert/scep.h>
@@ -272,8 +273,6 @@ typedef struct {
 
 WOLFCERT_TEST_VIS int  wolfcert_http_url_parse(const char* url, WolfCertUrl* out, void* heap);
 WOLFCERT_TEST_VIS void wolfcert_http_url_free (WolfCertUrl* u);
-WOLFCERT_TEST_VIS int  wolfcert_http_url_origin(const WolfCertUrl* u, void* heap,
-                                                char** out_origin);
 
 /* Resume point for wolfcert_http_chunked_complete(); zero it before the first
  * call, setting max to cap the decoded body (0 for no cap). */
@@ -304,6 +303,8 @@ int wolfcert_http_hdr_is(const char* line, size_t llen, const char* name);
  * value after leading whitespace, or *val NULL when the line has no colon. */
 int wolfcert_http_hdr_split(const char* line, size_t llen, const char** val,
                             size_t* vlen);
+/* Send Connection: close on the session's requests. */
+void wolfcert_http_session_set_close(WolfCertHttpSession* s);
 
 /* `_encode` emits one line; `_encode_mime` wraps at 64 columns, which libest's
  * BIO_f_base64 body parser requires. `_decode` accepts both. */
@@ -346,9 +347,6 @@ WOLFCERT_TEST_VIS int wolfcert_pkcs7_certs_to_pem(const uint8_t* p7_der, size_t 
 WOLFCERT_TEST_VIS int wolfcert_pkcs7_certs_to_der(const uint8_t* p7_der, size_t p7_der_len,
                                                   WolfCertBuffer* out_der, void* heap);
 
-WOLFCERT_TEST_VIS int wolfcert_est_get_cacerts_enc(const WolfCertServerCfg* srv,
-                                                   WolfCertEncoding enc,
-                                                   WolfCertBuffer* out_ca);
 WOLFCERT_TEST_VIS int wolfcert_pkcs7_build_certs_only(const uint8_t* const* certs_der,
                                                       const size_t* certs_len, size_t count,
                                                       WolfCertBuffer* out_der, void* heap);
@@ -486,10 +484,11 @@ WOLFCERT_TEST_VIS int wolfcert_scep_check_cert_rep(const char* msg_type,
     const uint8_t* sent_tid, size_t sent_tid_len);
 
 /* Verify a GetNextCACert response is signed by a cert in current_ca_der and
- * return the rollover certificates as PEM. */
+ * return the rollover certificates as PEM, or as concatenated DER for
+ * WOLFCERT_ENCODING_DER. */
 WOLFCERT_TEST_VIS int wolfcert_scep_verify_next_ca_response(
     const uint8_t* resp_der, size_t resp_len,
     const uint8_t* current_ca_der, size_t current_ca_len,
-    WolfCertBuffer* out_pem, void* heap);
+    WolfCertEncoding enc, WolfCertBuffer* out, void* heap);
 
 #endif /* WOLFCERT_INTERNAL_H */

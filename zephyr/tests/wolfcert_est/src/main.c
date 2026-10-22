@@ -98,7 +98,7 @@ static void* est_setup(void)
         zassert_unreachable("wolfcert_init");
         return NULL;
     }
-    rc = wolfcert_est_get_cacerts(&g_cfg, &g_ca_pem);
+    rc = wolfcert_est_get_cacerts(&g_cfg, WOLFCERT_ENCODING_PEM, &g_ca_pem);
     if (rc != WOLFCERT_OK) {
         printk("wolfcert_est: get_cacerts rc=%d (%s) wolfssl=%d: %s\n", rc,
                wolfcert_strerror(rc), wolfcert_last_wolfssl_err(),

@@ -130,38 +130,6 @@ static int host_is_ip_literal(const char* host)
     return wolfcert_parse_ip(host, ip, &ip_len) == WOLFCERT_OK && ip_len == 16;
 }
 
-/* "scheme://host[:port]" without a default port; free with WOLFCERT_XFREE. */
-WOLFCERT_TEST_VIS int wolfcert_http_url_origin(const WolfCertUrl* u, void* heap,
-                                               char** out_origin)
-{
-    size_t      origin_len;
-    char*       origin;
-    const char* open_br;
-    const char* close_br;
-
-    if (u == NULL || u->scheme == NULL || u->host == NULL || out_origin == NULL)
-        return WOLFCERT_ERR_BAD_ARG;
-
-    open_br  = host_is_ip_literal(u->host) ? "[" : "";
-    close_br = host_is_ip_literal(u->host) ? "]" : "";
-
-    /* "://", then room for the brackets, ":65535" and the NUL. */
-    origin_len = strlen(u->scheme) + 3 + strlen(u->host) + 16;
-    origin = (char*)WOLFCERT_XMALLOC(origin_len, heap);
-    if (origin == NULL)
-        return WOLFCERT_ERR_MEMORY;
-
-    if ((u->tls && u->port == 443) || (!u->tls && u->port == 80))
-        snprintf(origin, origin_len, "%s://%s%s%s", u->scheme,
-                 open_br, u->host, close_br);
-    else
-        snprintf(origin, origin_len, "%s://%s%s%s:%d", u->scheme,
-                 open_br, u->host, close_br, u->port);
-
-    *out_origin = origin;
-    return WOLFCERT_OK;
-}
-
 static char* dup_range(const char* s, const char* e, void* heap)
 {
     size_t n = (size_t)(e - s);
@@ -1122,6 +1090,12 @@ int wolfcert_http_session_open(const WolfCertHttpSessionCfg* cfg,
     return WOLFCERT_OK;
 }
 
+void wolfcert_http_session_set_close(WolfCertHttpSession* s)
+{
+    if (s != NULL)
+        s->keep_alive = 0;
+}
+
 int wolfcert_http_session_fd(const WolfCertHttpSession* s)
 {
 #ifdef WOLFCERT_HAVE_BUILTIN_TRANSPORT
@@ -1909,7 +1883,7 @@ int wolfcert_http_request(const WolfCertHttpRequest* req, WolfCertHttpResponse* 
 
     rc = wolfcert_http_session_open(&cfg, &s);
     if (rc == WOLFCERT_OK) {
-        s->keep_alive = 0;
+        wolfcert_http_session_set_close(s);
         rc = http_session_call(s, req, resp, 0);
     }
 

@@ -170,10 +170,10 @@ wolfcert_cleanup();
   `examples/enroll_scep.c` is the full flow.
 - **Step by step:** `wolfcert_key_generate`, `wolfcert_csr_build`, then
   `wolfcert_est_simple_enroll` (`examples/enroll_est.c`).
-- **Pending approval:** the `_ex` variants report a status of PENDING; poll
-  again later (EST: re-POST after `retry_after_sec`; SCEP:
-  `wolfcert_scep_get_cert_initial`). The plain variants return
-  `WOLFCERT_ERR_PENDING`.
+- **Pending approval:** the enroll calls report PENDING in their result's
+  status; poll again later (EST: re-POST after `retry_after_sec`; SCEP:
+  `wolfcert_scep_get_cert_initial`). `wolfcert_client_enroll` and
+  `wolfcert_client_reenroll` return `WOLFCERT_ERR_PENDING`.
 - **Renewal:** `wolfcert_client_reenroll` (EST, authenticates with the
   certificate being renewed) or `wolfcert_scep_renewal_req`.
 - **Hardware keys:** `examples/enroll_cryptocb.c`.
@@ -184,8 +184,8 @@ wolfcert_cleanup();
 |---|---|
 | `wolfcert/wolfcert.h` | Umbrella header, `wolfcert_init` / `wolfcert_cleanup` |
 | `wolfcert/client.h` | High-level `wolfcert_client_*` API |
-| `wolfcert/est.h`, `wolfcert/scep.h` | Protocol one-shots, `_ex` PENDING variants, sessions, non-blocking `_nb` sessions |
-| `wolfcert/types.h` | `WolfCertServerCfg`, `WolfCertKeyCfg`, `WolfCertCertMeta`, `WolfCertTransport`, `wolfcert_buffer_free` |
+| `wolfcert/est.h`, `wolfcert/scep.h` | Protocol one-shots, sessions, non-blocking `_nb` sessions |
+| `wolfcert/types.h` | `WolfCertServerCfg`, `WolfCertKeyCfg`, `WolfCertCertMeta`, `WolfCertEncoding` (PEM or DER output), `WolfCertTransport`, `wolfcert_buffer_free` |
 | `wolfcert/keygen.h`, `wolfcert/csr.h` | Key generation, import / export, CSR building |
 | `wolfcert/store.h` | `WolfCertStoreOps` storage vtable, POSIX and in-memory backends |
 | `wolfcert/errors.h`, `wolfcert/status.h`, `wolfcert/log.h` | Error codes, last-error detail, log callback |
@@ -206,7 +206,7 @@ contract, alone or in a group comment.
 | Network stack without BSD sockets (lwIP, NetX, FreeRTOS+TCP, wolfIP) | Fill `WolfCertServerCfg.transport` (`WolfCertTransport`); TLS records go through it too | `wolfcert/types.h`, `docs/EMBEDDED.md` section 7 |
 | Persistence in flash / NVM | Implement `WolfCertStoreOps` (`read` / `write` / `remove`) | `wolfcert/store.h` |
 | Keys in a TPM, HSM, PKCS#11 token or secure element | Register a backend with `wc_CryptoCb_RegisterDevice`, pass its id as `WolfCertKeyCfg.dev_id` | `docs/ARCHITECTURE.md` section 4.2, `examples/enroll_cryptocb.c` |
-| Event loop / no blocking | `wolfcert_est_session_open_async` / `wolfcert_scep_session_open_async`, then the `_nb` calls until they stop returning `WOLFCERT_ERR_WANT_READ` / `_WANT_WRITE`; `*_session_fd` gives the descriptor to poll | `wolfcert/est.h`, `wolfcert/scep.h` |
+| Event loop / no blocking | `wolfcert_est_session_open` / `wolfcert_scep_session_open`, then the `_nb` calls until they stop returning `WOLFCERT_ERR_WANT_READ` / `_WANT_WRITE`; `*_session_fd` gives the descriptor to poll | `wolfcert/est.h`, `wolfcert/scep.h` |
 | Logging | `wolfcert_set_log_cb` (e.g. to a UART) | `wolfcert/log.h` |
 | RAM budget | `max_response_bytes`, HTTP stack buffers, wolfSSL `Cert` / `CertName` sizing | `docs/EMBEDDED.md` |
 
@@ -249,7 +249,8 @@ contract, alone or in a group comment.
 - **The HTTPS transport needs TLS 1.2 or newer**, or TLS 1.3 when wolfSSL
   is built with `WOLFSSL_NO_TLS12`. A server limited to older versions
   fails the handshake.
-- **Non-blocking mode still blocks for DNS and the initial TCP connect.**
+- **Session open still blocks for DNS and the initial TCP connect**, even
+  when every later call is `_nb`.
 - **The test server is for development and interop only**, not a production
   CA.
 - **SCEP over plain HTTP is downgradable:** an attacker who strips `AES` from
