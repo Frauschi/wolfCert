@@ -74,6 +74,8 @@ static int roundtrip(WolfCertKeyType type, int param)
     size_t id_len = 1;
     REQUIRE(wolfcert_key_id(k, &id, &id_len) == WOLFCERT_OK);
     REQUIRE(id == NULL && id_len == 0);
+    REQUIRE(wolfcert_key_wolfssl_key(k) == k->impl && k->impl != NULL);
+    REQUIRE(wolfcert_key_wolfssl_key(NULL) == NULL);
 
     wolfcert_buffer_free(&pem);
     wolfcert_buffer_free(&der);

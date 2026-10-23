@@ -66,6 +66,9 @@ WOLFCERT_API int wolfcert_key_dev_id(const WolfCertKey* key);
  * none. The bytes stay owned by the key. */
 WOLFCERT_API int wolfcert_key_id(const WolfCertKey* key, const uint8_t** id,
                                  size_t* id_len);
+/* The wolfSSL key behind key: RsaKey, ecc_key, ed25519_key, ed448_key or
+ * MlDsaKey by wolfcert_key_type. wolfcert_key_free frees it. NULL on NULL. */
+WOLFCERT_API void* wolfcert_key_wolfssl_key(WolfCertKey* key);
 
 #ifdef __cplusplus
 }

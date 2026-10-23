@@ -375,6 +375,52 @@ static int mock_provision_ed448(const byte* id, int id_len, byte* cert,
 }
 #endif
 
+/* 1 when the wolfSSL key behind key names the device key id. */
+static int wolfssl_key_has_id(WolfCertKey* key, const uint8_t* id, size_t len)
+{
+    void* k = wolfcert_key_wolfssl_key(key);
+    const byte* kid = NULL;
+    int kid_len = -1;
+
+    switch (wolfcert_key_type(key)) {
+#ifdef WOLFCERT_HAVE_RSA
+        case WOLFCERT_KEY_RSA:
+            kid = ((RsaKey*)k)->id;
+            kid_len = ((RsaKey*)k)->idLen;
+            break;
+#endif
+#ifdef WOLFCERT_HAVE_ECC
+        case WOLFCERT_KEY_ECC:
+            kid = ((ecc_key*)k)->id;
+            kid_len = ((ecc_key*)k)->idLen;
+            break;
+#endif
+#ifdef MOCK_HAVE_ED25519
+        case WOLFCERT_KEY_ED25519:
+            kid = ((ed25519_key*)k)->id;
+            kid_len = ((ed25519_key*)k)->idLen;
+            break;
+#endif
+#ifdef MOCK_HAVE_ED448
+        case WOLFCERT_KEY_ED448:
+            kid = ((ed448_key*)k)->id;
+            kid_len = ((ed448_key*)k)->idLen;
+            break;
+#endif
+#ifdef WOLFCERT_HAVE_MLDSA
+        case WOLFCERT_KEY_MLDSA44:
+        case WOLFCERT_KEY_MLDSA65:
+        case WOLFCERT_KEY_MLDSA87:
+            kid = ((MlDsaKey*)k)->id;
+            kid_len = ((MlDsaKey*)k)->idLen;
+            break;
+#endif
+        default:
+            break;
+    }
+    return kid != NULL && kid_len == (int)len && memcmp(kid, id, len) == 0;
+}
+
 static void mock_reset(void)
 {
     for (int i = 0; i < MOCK_SLOTS; i++) {
@@ -493,6 +539,7 @@ static int run_key_type(const char* url, WolfCertKeyType type, int param,
     REQUIRE(mock_keygens == 1);
     REQUIRE(wolfcert_key_id(key, &got_id, &got_len) == WOLFCERT_OK);
     REQUIRE(got_len == sizeof(id) - 1 && memcmp(got_id, id, got_len) == 0);
+    REQUIRE(wolfssl_key_has_id(key, id, sizeof(id) - 1));
     REQUIRE(wolfcert_key_to_pem(key, &out) == WOLFCERT_ERR_UNSUPPORTED);
     REQUIRE(wolfcert_key_to_der(key, &out) == WOLFCERT_ERR_UNSUPPORTED);
     REQUIRE(out.data == NULL);
@@ -586,6 +633,7 @@ static int run_key_type(const char* url, WolfCertKeyType type, int param,
     REQUIRE(wolfcert_key_from_id(&kcfg, issued.cert_pem.data, issued.cert_pem.len,
                                  &reloaded) == WOLFCERT_OK);
     REQUIRE(wolfcert_key_type(reloaded) == type);
+    REQUIRE(wolfssl_key_has_id(reloaded, id, sizeof(id) - 1));
     REQUIRE(wolfcert_key_to_pem(reloaded, &out) == WOLFCERT_ERR_UNSUPPORTED);
     {
         static uint8_t buf[16384];

@@ -479,3 +479,8 @@ int wolfcert_key_id(const WolfCertKey* k, const uint8_t** id, size_t* id_len)
     *id_len = k->id_len;
     return WOLFCERT_OK;
 }
+
+void* wolfcert_key_wolfssl_key(WolfCertKey* k)
+{
+    return k ? k->impl : NULL;
+}
