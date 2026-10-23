@@ -81,12 +81,25 @@ typedef enum {
  * registers; WOLFCERT_DEVID_SOFTWARE selects software. */
 #define WOLFCERT_DEVID_SOFTWARE (-1)
 
+/* Matches wolfSSL's ECC_MAX_ID_LEN / RSA_MAX_ID_LEN. */
+#define WOLFCERT_KEY_ID_MAX_LEN 32
+
+/* What a TLS client_key holds and where its operations run. */
+typedef enum {
+    WOLFCERT_CLIENT_KEY_BUFFER     = 0, /* PEM or DER, in software */
+    WOLFCERT_CLIENT_KEY_BUFFER_DEV = 1, /* PEM or DER, on client_key_dev_id */
+    WOLFCERT_CLIENT_KEY_ID         = 2  /* key id held by client_key_dev_id */
+} WolfCertClientKeySrc;
+
 typedef struct {
     WolfCertKeyType type;
     int             param;       /* RSA 2048/3072/4096 or ECC 256/384/521 bits */
     int             dev_id;      /* wolfSSL CryptoCb devId; -1 for software */
-    const char*     key_label;   /* optional backend identifier for persistent keys */
     void*           heap;        /* optional heap hint; NULL = default */
+    /* Backend key id, opaque to wolfCert; needs dev_id. Up to
+     * WOLFCERT_KEY_ID_MAX_LEN bytes. */
+    const uint8_t*  key_id;
+    size_t          key_id_len;
 } WolfCertKeyCfg;
 
 /* Called by wolfcert_csr_build() once the standard fields are set, with the
@@ -233,6 +246,11 @@ typedef struct {
     void*            heap;
 
     WolfCertTransport transport;
+
+    /* What client_key holds, and the CryptoCb device for the _DEV and _ID
+     * sources, which need client_cert, client_key and an https:// URL. */
+    WolfCertClientKeySrc client_key_src;
+    int                  client_key_dev_id;
 } WolfCertServerCfg;
 
 /* Caller-owned byte buffer filled by the library. wolfcert_buffer_free()

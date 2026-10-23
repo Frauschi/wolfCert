@@ -323,29 +323,92 @@ hosts.
 ### 4.2 CryptoCb offload (TPM / HSM / PKCS#11 / custom)
 
 wolfCert uses wolfSSL's CryptoCb `devId` as an opaque token. The application
-registers the backend; wolfCert threads the devId through every crypto call:
+registers the backend; wolfCert threads the devId into every key it creates:
 
 ```c
 /* Application startup: register the CryptoCb with wolfSSL. */
 wc_CryptoCb_RegisterDevice(MY_DEVID, my_callback, my_ctx);
 
-/* Generate a key that lives behind the CryptoCb. */
+/* Generate a key inside the backend, under an id the backend defines. */
+static const uint8_t id[] = { 0x01, 0x80, 0x00, 0x01 };
 WolfCertKeyCfg cfg = {
-    .type      = WOLFCERT_KEY_ECC,
-    .param     = 256,
-    .dev_id    = MY_DEVID,
-    .key_label = "tpm:/handles/0x01800001",  /* optional */
+    .type       = WOLFCERT_KEY_ECC,
+    .param      = 256,
+    .dev_id     = MY_DEVID,
+    .key_id     = id,
+    .key_id_len = sizeof(id),
 };
 WolfCertKey* key;
 wolfcert_key_generate(&cfg, &key);
 ```
 
-From there, every wolfSSL crypto call on the key — CSR signing, TLS handshake
-client-auth, SCEP pkiMessage signing — routes through `my_callback`. Pass
-`WOLFCERT_DEVID_SOFTWARE` (`-1`) to force software operation. CryptoCb-resident
-keys typically can't be exported in PEM, so `wolfcert_key_to_pem` will fail;
-persist the key by its `key_label` instead and resolve it against your backend
-on the next boot. See `examples/enroll_cryptocb.c` for a full example.
+The `key_id` bytes are opaque to wolfCert. They reach the backend in the
+wolfCrypt key's `id` field, the same way wolfPKCS11, wolfHSM and the hardware
+ports name their keys, and the backend decides what they mean (a PKCS#11
+`CKA_ID`, a TPM handle, a key-store slot). The backend generates the key there
+and returns only its public half. It may also rename the key, as a TPM does
+when it picks a transient handle, and `wolfcert_key_id` returns the new id.
+
+From there, every private-key operation on the key routes through
+`my_callback`: CSR signing, and TLS client authentication by id or for EST
+`/simplereenroll`. wolfSSL also hands the backend public-key operations on
+that id, such as the check of its own RSA signature in TLS, so the backend
+must serve those too. Pass `WOLFCERT_DEVID_SOFTWARE` (`-1`) to force software
+operation.
+
+A `dev_id` without a `key_id` only offloads the computation. The key itself
+is an ordinary wolfCrypt key in host memory, and `wolfcert_key_to_pem` exports
+it. Only a `key_id` keeps the key in the backend.
+
+For TLS client authentication, `WolfCertServerCfg.client_key_src` says what
+`client_key` holds and where the handshake signs with it:
+
+| `client_key_src` | `client_key` holds | Signed |
+|---|---|---|
+| `WOLFCERT_CLIENT_KEY_BUFFER` (default) | PEM or DER | in software |
+| `WOLFCERT_CLIENT_KEY_BUFFER_DEV` | PEM or DER | on `client_key_dev_id`, falling back to software; needs `WOLF_CRYPTO_CB` |
+| `WOLFCERT_CLIENT_KEY_ID` | the key id | in `client_key_dev_id` |
+
+The `_DEV` source sets the device on the TLS context, so it also gets the
+connection's other crypto, such as the key exchange. EST `/simplereenroll`
+picks the source from the key being renewed.
+
+A key with a `key_id` never leaves the backend: `wolfcert_key_to_pem` and
+`wolfcert_key_to_der` fail with `WOLFCERT_ERR_UNSUPPORTED`. Persist the id and
+the issued certificate instead. TLS client authentication needs only those
+two: the certificate in `client_cert` and the id in `client_key`, with
+`client_key_src = WOLFCERT_CLIENT_KEY_ID` and the device in
+`client_key_dev_id`. A source other than `_BUFFER` without the certificate
+and key returns `WOLFCERT_ERR_BAD_ARG`. Re-enrollment also needs a key
+handle, because the CSR carries the public key:
+rebuild it with `wolfcert_key_from_id(&cfg, cert, cert_len, &key)`, which takes
+the public half from the certificate since a backend need not be able to
+return it.
+
+`wolfcert_client_enroll` and `wolfcert_client_reenroll` hand back a key they
+generated under a `key_id` even when they fail, so the caller can delete it
+in the backend.
+
+RSA, ECC and ML-DSA keys take a `key_id`. Ed25519 and Ed448 keys take one
+with a wolfSSL newer than 5.9.4, which has `wc_ed25519_init_id` and
+`wc_ed448_init_id`. wolfSSL does not pass Ed448 key generation to a CryptoCb
+yet, so an Ed448 key must already exist in the backend and comes in through
+`wolfcert_key_from_id`. SCEP does not support a `key_id` key: its PKCS#7
+signing and decryption take the private key as DER, so the SCEP calls return
+`WOLFCERT_ERR_UNSUPPORTED`. A `key_id` needs wolfSSL built with
+`WOLF_CRYPTO_CB` and `WOLF_PRIVATE_KEY_ID`. See `examples/enroll_cryptocb.c`
+for the registration pattern.
+
+`examples/enroll_tpm.c` enrolls and re-enrolls over EST with an ECC, RSA or
+ML-DSA key in a TPM. It needs a wolfTPM whose CryptoCb reads a 4-byte
+`key_id` as a persistent or transient handle. A key generated under a
+persistent handle is stored there. Under `0x80000000`
+(`WOLFTPM2_KEYID_TRANSIENT`) the TPM loads it at a transient handle it picks;
+a TPM reset drops that key, and so does `/dev/tpmrm0` when the process exits.
+An older wolfTPM generates the key in software, which `wolfcert_key_generate`
+refuses. ML-DSA needs a TPM with the v1.85 commands, such as wolfTPM's fwTPM.
+For a test CA that renews the certificates it issued, start the EST server
+from README.md with `--ca-dir DIR --tls-trust-issued` added.
 
 ### 4.3 Keep-alive sessions and non-blocking I/O
 
@@ -586,7 +649,8 @@ wolfcert_set_log_cb(my_log, NULL);
 /* 2. Key generation (stays in hardware) */
 WolfCertKey* key;
 WolfCertKeyCfg kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
-                        .dev_id = MY_DEVID };
+                        .dev_id = MY_DEVID,
+                        .key_id = my_key_id, .key_id_len = my_key_id_len };
 wolfcert_key_generate(&kcfg, &key);
 
 /* 3. CSR build */
@@ -615,7 +679,8 @@ wolfcert_est_session_close(s);
 
 /* 5. Persist to flash through our storage backend */
 wolfcert_store_write_cert(&flash_ops, "device.crt", cert.data, cert.len);
-/* key stays behind the CryptoCb; persist its label instead */
+/* key stays behind the CryptoCb; wolfcert_key_from_id rebuilds the handle
+ * for re-enrollment */
 
 /* 6. Shutdown */
 wolfcert_key_free(key);
@@ -676,8 +741,9 @@ time `#error`s. See [`EMBEDDED.md`](EMBEDDED.md#configuring-wolfcert-without-its
 
 **Required wolfSSL features** (build hard-fails with a "rebuild wolfSSL with
 --enable-X" diagnostic if missing): `HAVE_PKCS7`, `WOLFSSL_CERT_GEN`,
-`WOLFSSL_CERT_REQ`, `WOLFSSL_CERT_EXT`, `WOLFSSL_KEY_GEN`, `WOLF_CRYPTO_CB`,
-`WOLFSSL_BASE64_ENCODE`, `WOLFSSL_ALT_NAMES`, `WOLFSSL_CERT_NAME_ALL`. A
+`WOLFSSL_CERT_REQ`, `WOLFSSL_CERT_EXT`, `WOLFSSL_KEY_GEN`,
+`WOLFSSL_BASE64_ENCODE`, `WOLFSSL_ALT_NAMES`, `WOLFSSL_CERT_NAME_ALL`.
+`WOLF_CRYPTO_CB` is optional; without it keys run in software. A
 `NO_RSA` build hard-fails unless SCEP is disabled, and so does one without
 AES-128-CBC encrypt and decrypt (`NO_AES_128`, `NO_AES_CBC` or
 `NO_AES_DECRYPT`), which RFC 8894 makes mandatory. CMake and autoconf also
@@ -704,4 +770,5 @@ one key algorithm must be present.
 - `wolfcert/*.h` — the authoritative API reference; each public function and
   field states its contract, alone or in a group comment.
 - `examples/enroll_est.c`, `examples/enroll_scep.c`,
-  `examples/enroll_cryptocb.c` — runnable minimal integrations.
+  `examples/enroll_cryptocb.c`, `examples/enroll_tpm.c` - runnable minimal
+  integrations.

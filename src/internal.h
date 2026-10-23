@@ -82,12 +82,27 @@
 #error "WOLFCERT_SCEP_MAX_GET_URL exceeds WOLFCERT_HTTP_QUERY_SZ; raise WOLFCERT_HTTP_QUERY_SZ so the SCEP server can receive the largest GET the client will build."
 #endif
 
+#if defined(WOLF_CRYPTO_CB) && defined(WOLF_PRIVATE_KEY_ID)
+#define WOLFCERT_USE_KEY_ID
+#endif
+
+static inline int wolfcert_devid_is_cb(int dev_id)
+{
+    return dev_id != WOLFCERT_DEVID_SOFTWARE && dev_id != INVALID_DEVID;
+}
+
+/* BAD_ARG or UNSUPPORTED, with a message, unless id names a key a CryptoCb
+ * device can hold in this build. */
+int  wolfcert_key_id_check(const uint8_t* id, size_t id_len, int dev_id,
+                           const char* module);
+
 struct WolfCertKey {
     WolfCertKeyType type;
     int             dev_id;
     int             curve_id;     /* ECC only */
     int             rsa_bits;     /* RSA only */
-    char*           label;
+    uint8_t         id[WOLFCERT_KEY_ID_MAX_LEN];
+    size_t          id_len;
     void*           heap;
     void*           impl;         /* RsaKey* / ecc_key* / ... */
 };
@@ -100,12 +115,14 @@ typedef struct {
     uint8_t* key_der;
     size_t   key_der_len;
     void*    heap;
+    int      skid_copies;  /* SKID is KEYID_SIZE, so issued AKIDs copy it */
 } WolfCertCa;
 
 int  wolfcert_ca_generate(WolfCertCa* ca, WolfCertKeyType type, int param, void* heap);
 WOLFCERT_TEST_VIS int  wolfcert_ca_load(WolfCertCa* ca, WolfCertStoreOps* store,
                                         void* heap);
 int  wolfcert_ca_save(const WolfCertCa* ca, WolfCertStoreOps* store);
+int  wolfcert_ca_skid_copies(const WolfCertCa* ca);
 WOLFCERT_TEST_VIS void wolfcert_ca_free(WolfCertCa* ca);
 /* wolfcert_buffer_free() after wiping: for a buffer that held key material. */
 void wolfcert_buffer_free_secure(WolfCertBuffer* buf);
@@ -138,6 +155,9 @@ struct WolfCertServer {
     void*                   priv;        /* protocol-specific state */
     WOLFSSL_CTX*            tls_ctx;
     WOLFSSL*                tls_current; /* owned by the accept loop */
+    /* Only ca.cert_der; set when tls_client_trust_issued meets a client CA. */
+    WOLFSSL_CERT_MANAGER*   issued_cm;
+    int                     renew_only;  /* tls_client_trust_issued alone */
     int                     keep_alive;  /* handlers clear it to close */
     /* Set when the accept loop armed SO_RCVTIMEO/SO_SNDTIMEO; would-block
      * retries in wolfcert_io_{recv,send} are allowed only then. */
@@ -256,6 +276,7 @@ void wolfcert_logv(WolfCertLogLevel lvl, const char* module, const char* fmt, ..
 int  wolfcert_rng_new(WC_RNG* rng);
 #ifdef WOLFCERT_HAVE_ECC
 int  wolfcert_ecc_curve_from_param(int param, int* out_curve_id, int* out_key_size);
+int  wolfcert_ecc_param_from_curve(int curve_id, int* out_param);
 #endif
 
 /* Returns WOLFCERT_ERR_BAD_ARG unless srv->protocol is want. */
@@ -340,6 +361,11 @@ WOLFCERT_TEST_VIS int wolfcert_find_san(const DecodedCert* dc,
                                         const byte** san, word32* san_len);
 
 WOLFCERT_TEST_VIS int wolfcert_buffer_is_der(const uint8_t* buf, size_t len);
+
+/* Private key DER of a software key; fails for a key with a key_id. The
+ * caller zeroizes and frees *out_der. */
+int wolfcert_key_export_der(const WolfCertKey* key, uint8_t** out_der,
+                            int* out_len, void* heap);
 
 /* Degenerate (certs-only) PKCS#7 helpers. */
 WOLFCERT_TEST_VIS int wolfcert_pkcs7_certs_to_pem(const uint8_t* p7_der, size_t p7_der_len,
