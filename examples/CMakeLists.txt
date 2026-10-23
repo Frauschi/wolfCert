@@ -35,6 +35,30 @@ if(WOLFCERT_ENABLE_EST)
             message(STATUS "wolfCert: wolfTPM not found or without its "
                            "CryptoCb, skipping examples/enroll_tpm.c")
         endif()
+
+        set(CMAKE_REQUIRED_LIBRARIES ${_wc_example_wolfssl})
+        unset(_have_pkcs11_persist CACHE)
+        check_c_source_compiles("${_wc_wolfssl_prologue}
+            #if !defined(HAVE_PKCS11) || !defined(WOLF_PRIVATE_KEY_ID)
+            #error missing
+            #endif
+            #include <wolfssl/wolfcrypt/wc_pkcs11.h>
+            int main(void)
+            {
+                int (*persist)(Pkcs11Token*, int, void*) = wc_Pkcs11PersistKey;
+                int (*del)(Pkcs11Token*, int, void*) = wc_Pkcs11DeleteKey;
+                return persist == del;
+            }
+        " _have_pkcs11_persist)
+        unset(CMAKE_REQUIRED_LIBRARIES)
+        if(_have_pkcs11_persist)
+            add_executable(example_enroll_pkcs11 enroll_pkcs11.c)
+            target_link_libraries(example_enroll_pkcs11 PRIVATE wolfcert)
+        else()
+            message(STATUS "wolfCert: wolfSSL lacks PKCS#11 key ids or "
+                           "wc_Pkcs11PersistKey, skipping "
+                           "examples/enroll_pkcs11.c")
+        endif()
     endif()
 endif()
 

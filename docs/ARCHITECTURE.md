@@ -410,6 +410,16 @@ refuses. ML-DSA needs a TPM with the v1.85 commands, such as wolfTPM's fwTPM.
 For a test CA that renews the certificates it issued, start the EST server
 from README.md with `--ca-dir DIR --tls-trust-issued` added.
 
+`examples/enroll_pkcs11.c` does the same with a key on a PKCS#11 token such
+as wolfPKCS11, with the key's `CKA_ID` as `key_id`. wolfSSL generates the key
+as a session object, so the example keeps the token session open and, once
+the certificate is issued, makes the key persistent by passing
+`wolfcert_key_wolfssl_key(key)` to `wc_Pkcs11PersistKey`. When the CA
+refuses the request the key is never made persistent, and when the
+certificate cannot be written the example deletes the key again. A rekey
+removes the old key with `wc_Pkcs11DeleteKey`, and only warns when that
+fails. The example is built only when wolfSSL has both functions.
+
 ### 4.3 Keep-alive sessions and non-blocking I/O
 
 A session keeps one connection for several requests. Open one when a flow
@@ -770,5 +780,5 @@ one key algorithm must be present.
 - `wolfcert/*.h` — the authoritative API reference; each public function and
   field states its contract, alone or in a group comment.
 - `examples/enroll_est.c`, `examples/enroll_scep.c`,
-  `examples/enroll_cryptocb.c`, `examples/enroll_tpm.c` - runnable minimal
-  integrations.
+  `examples/enroll_cryptocb.c`, `examples/enroll_tpm.c`,
+  `examples/enroll_pkcs11.c` - runnable minimal integrations.

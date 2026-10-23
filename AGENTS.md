@@ -178,8 +178,9 @@ wolfcert_cleanup();
   `wolfcert_client_reenroll` return `WOLFCERT_ERR_PENDING`.
 - **Renewal:** `wolfcert_client_reenroll` (EST, authenticates with the
   certificate being renewed) or `wolfcert_scep_renewal_req`.
-- **Hardware keys:** `examples/enroll_cryptocb.c`, and `examples/enroll_tpm.c`
-  for a TPM through wolfTPM.
+- **Hardware keys:** `examples/enroll_cryptocb.c`, `examples/enroll_tpm.c`
+  for a TPM through wolfTPM, and `examples/enroll_pkcs11.c` for a PKCS#11
+  token such as wolfPKCS11.
 
 ## Where to look
 
@@ -193,7 +194,7 @@ wolfcert_cleanup();
 | `wolfcert/store.h` | `WolfCertStoreOps` storage vtable, POSIX and in-memory backends |
 | `wolfcert/errors.h`, `wolfcert/status.h`, `wolfcert/log.h` | Error codes, last-error detail, log callback |
 | `wolfcert/memory.h` | Default heap hint, allocation macros |
-| `examples/` | `enroll_est.c`, `enroll_scep.c`, `enroll_cryptocb.c`, `enroll_tpm.c`, `user_settings.h.example` |
+| `examples/` | `enroll_est.c`, `enroll_scep.c`, `enroll_cryptocb.c`, `enroll_tpm.c`, `enroll_pkcs11.c`, `user_settings.h.example` |
 | `examples/certs/` | Test credentials; never ship them |
 | `zephyr/samples/wolfcert_est_client/` | EST client on Zephyr (qemu_x86, FRDM-MCXN947) |
 | `src/` | Implementation; `src/internal.h` is not for applications |
