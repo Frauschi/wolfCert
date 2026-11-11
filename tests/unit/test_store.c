@@ -50,7 +50,7 @@ static int test_posix(void)
     REQUIRE(store != NULL);
 
     WolfCertKeyCfg cfg = { .type = TEST_ENROLL_KEY_TYPE, .param = TEST_ENROLL_KEY_PARAM,
-                           .dev_id = WOLFCERT_DEVID_SOFTWARE };
+                           .dev_id = INVALID_DEVID };
     WolfCertKey* k = NULL;
     REQUIRE(wolfcert_key_generate(&cfg, &k) == WOLFCERT_OK);
     REQUIRE(wolfcert_store_write_key(store, "device.key.pem", k) == WOLFCERT_OK);
