@@ -56,9 +56,11 @@ WOLFCERT_API int  wolfcert_client_fetch_meta(WolfCertClient* client,
 /* Generate a key from key_cfg (dev_id selects a CryptoCb device), build a CSR
  * from meta and POST it to /simpleenroll. out is filled as
  * wolfcert_est_simple_enroll fills it and is freed with
- * wolfcert_est_result_free after any return.
- * - WOLFCERT_OK, status SUCCESS: out->cert_pem holds the issued cert first
- *   and *out_key owns the key.
+ * wolfcert_est_result_free after any return. enc picks PEM or concatenated
+ * DER for out->cert; an unknown value is WOLFCERT_ERR_BAD_ARG before any key
+ * is generated.
+ * - WOLFCERT_OK, status SUCCESS: out->cert holds the issued cert first and
+ *   *out_key owns the key.
  * - WOLFCERT_ERR_PENDING, status PENDING, with retry_after_sec: when out_csr
  *   is not NULL, *out_key and *out_csr hold the key and the DER CSR to re-POST
  *   through wolfcert_est_simple_enroll. With out_csr NULL the CSR is dropped,
@@ -69,6 +71,7 @@ WOLFCERT_API int  wolfcert_client_fetch_meta(WolfCertClient* client,
  *   the caller can delete it from the backend; a software key is freed. */
 WOLFCERT_API int  wolfcert_client_enroll(WolfCertClient* client,
                                          const WolfCertServerCfg* srv,
+                                         WolfCertEncoding enc,
                                          const WolfCertKeyCfg* key_cfg,
                                          const WolfCertCertMeta* meta,
                                          WolfCertKey** out_key,
@@ -76,7 +79,8 @@ WOLFCERT_API int  wolfcert_client_enroll(WolfCertClient* client,
                                          WolfCertBuffer* out_csr);
 
 /* POST a renewal of current_cert to /simplereenroll over TLS client
- * authentication with current_cert and current_key. A NULL new_key_cfg reuses
+ * authentication with current_cert and current_key. current_cert may be PEM
+ * or DER, including a concatenated DER result, whose first cert is used. A NULL new_key_cfg reuses
  * current_key and leaves *out_key NULL; otherwise a new key is generated as
  * for wolfcert_client_enroll. The CSR copies current_cert's Subject and SAN:
  * WOLFCERT_ERR_BAD_ARG if meta sets them, WOLFCERT_ERR_PARSE for a bad
@@ -86,6 +90,7 @@ WOLFCERT_API int  wolfcert_client_enroll(WolfCertClient* client,
  * current_cert and current_key. */
 WOLFCERT_API int  wolfcert_client_reenroll(WolfCertClient* client,
                                            const WolfCertServerCfg* srv,
+                                           WolfCertEncoding enc,
                                            const uint8_t* current_cert, size_t current_cert_len,
                                            const WolfCertKey* current_key,
                                            const WolfCertKeyCfg* new_key_cfg,

@@ -81,12 +81,13 @@ static int enroll(void)
 
     rc = wolfcert_client_new(&client);
     if (rc == WOLFCERT_OK)
-        rc = wolfcert_client_enroll(client, &srv, &key_cfg, &meta, &key,
+        rc = wolfcert_client_enroll(client, &srv, WOLFCERT_ENCODING_PEM,
+                                    &key_cfg, &meta, &key,
                                     &res, NULL);
 
     if (rc == WOLFCERT_OK) {
-        printk("enrolled: %u bytes\n", (unsigned)res.cert_pem.len);
-        print_pem(&res.cert_pem);
+        printk("enrolled: %u bytes\n", (unsigned)res.cert.len);
+        print_pem(&res.cert);
     }
     else {
         printk("enroll failed: %s (%s)\n", wolfcert_strerror(rc),

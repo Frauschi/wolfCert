@@ -1275,12 +1275,14 @@ static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
             renew_srv.proto_opts.scep.renewal_msg_type =
                 WOLFCERT_SCEP_RENEWAL_MSG_PKCS_REQ;
         }
-        rc = wolfcert_scep_renewal_req(&renew_srv, &caps, cas.ra,
+        rc = wolfcert_scep_renewal_req(&renew_srv, WOLFCERT_ENCODING_PEM,
+                 &caps, cas.ra,
                  cas.ra_len, cas.bundle, cas.bundle_len, renew_cert->buffer,
                  renew_cert->length, key, csr->data, csr->len, &scep_result);
     }
     else if (rc == WOLFCERT_OK) {
-        rc = wolfcert_scep_pkcs_req(srv, &caps, cas.ra, cas.ra_len,
+        rc = wolfcert_scep_pkcs_req(srv, WOLFCERT_ENCODING_PEM,
+                                    &caps, cas.ra, cas.ra_len,
                                     cas.bundle, cas.bundle_len, key,
                                     csr->data, csr->len, &scep_result);
     }
@@ -1296,7 +1298,8 @@ static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
         WolfCertScepResult poll_result = { 0 };
 
         nanosleep(&ts, NULL);
-        rc = wolfcert_scep_get_cert_initial(srv, &caps, cas.ra, cas.ra_len,
+        rc = wolfcert_scep_get_cert_initial(srv, WOLFCERT_ENCODING_PEM,
+                 &caps, cas.ra, cas.ra_len,
                  cas.bundle, cas.bundle_len,
                  renew_cert != NULL ? renew_cert->buffer : NULL,
                  renew_cert != NULL ? renew_cert->length : 0,
@@ -1311,9 +1314,9 @@ static int scep_enroll(const Opts* opts, const WolfCertServerCfg* srv,
 
     if (rc == WOLFCERT_OK) {
         if (scep_result.status == WOLFCERT_SCEP_STATUS_SUCCESS) {
-            *issued = scep_result.cert_pem;
-            scep_result.cert_pem.data = NULL;
-            scep_result.cert_pem.len = 0;
+            *issued = scep_result.cert;
+            scep_result.cert.data = NULL;
+            scep_result.cert.len = 0;
         }
         else if (scep_result.status == WOLFCERT_SCEP_STATUS_PENDING) {
             rc = WOLFCERT_ERR_PENDING;
@@ -1593,30 +1596,33 @@ static int cmd_enroll(int argc, char** argv)
                                                       &ca_pem);
                 wolfcert_buffer_free(&ca_pem);
                 if (rc == WOLFCERT_OK)
-                    rc = wolfcert_est_session_simple_enroll(es, csr.data, csr.len,
+                    rc = wolfcert_est_session_simple_enroll(
+                        es, WOLFCERT_ENCODING_PEM, csr.data, csr.len,
                                                             &est_result);
                 wolfcert_est_session_close(es);
             }
         }
         else {
             /* 202 Accepted (RFC 7030 section 4.2.3) comes back as PENDING. */
-            rc = wolfcert_est_simple_enroll(&srv, csr.data, csr.len, &est_result);
+            rc = wolfcert_est_simple_enroll(&srv, WOLFCERT_ENCODING_PEM,
+                                            csr.data, csr.len, &est_result);
             int attempts = 0;
             while (rc == WOLFCERT_OK &&
                     est_result.status == WOLFCERT_EST_STATUS_PENDING &&
                     attempts < opts.poll_attempts) {
                 est_poll_wait(&opts, est_result.retry_after_sec);
                 wolfcert_est_result_free(&est_result);
-                rc = wolfcert_est_simple_enroll(&srv, csr.data, csr.len, &est_result);
+                rc = wolfcert_est_simple_enroll(&srv, WOLFCERT_ENCODING_PEM,
+                                                csr.data, csr.len, &est_result);
                 attempts++;
             }
         }
 
         if (rc == WOLFCERT_OK) {
             if (est_result.status == WOLFCERT_EST_STATUS_SUCCESS) {
-                issued = est_result.cert_pem;
-                est_result.cert_pem.data = NULL;
-                est_result.cert_pem.len = 0;
+                issued = est_result.cert;
+                est_result.cert.data = NULL;
+                est_result.cert.len = 0;
             }
             else if (est_result.status == WOLFCERT_EST_STATUS_PENDING) {
                 rc = WOLFCERT_ERR_PENDING;
@@ -1801,14 +1807,16 @@ static int cmd_reenroll(int argc, char** argv)
         int               attempts = 0;
 
         meta.challenge_password = opts.challenge;
-        rc = wolfcert_client_reenroll(NULL, &srv, cert_der->buffer,
+        rc = wolfcert_client_reenroll(NULL, &srv, WOLFCERT_ENCODING_PEM,
+                                      cert_der->buffer,
                                       cert_der->length, current_key, NULL,
                                       &meta, &new_key, &est_result, &parked);
         /* Re-POST the parked CSR (RFC 7030 section 4.2.3). */
         while (rc == WOLFCERT_ERR_PENDING && attempts < opts.poll_attempts) {
             est_poll_wait(&opts, est_result.retry_after_sec);
             wolfcert_est_result_free(&est_result);
-            rc = wolfcert_est_simple_reenroll(&srv, cert_der->buffer,
+            rc = wolfcert_est_simple_reenroll(&srv, WOLFCERT_ENCODING_PEM,
+                                              cert_der->buffer,
                                               cert_der->length, current_key,
                                               parked.data, parked.len,
                                               &est_result);
@@ -1819,9 +1827,9 @@ static int cmd_reenroll(int argc, char** argv)
         }
         wolfcert_buffer_free_secure(&parked);
         if (rc == WOLFCERT_OK) {
-            issued = est_result.cert_pem;
-            est_result.cert_pem.data = NULL;
-            est_result.cert_pem.len = 0;
+            issued = est_result.cert;
+            est_result.cert.data = NULL;
+            est_result.cert.len = 0;
         }
         wolfcert_est_result_free(&est_result);
 #endif
@@ -2026,7 +2034,8 @@ static int cmd_getcert(int argc, char** argv)
     }
 
     if (ret == 0) {
-        rc = wolfcert_scep_get_cert(&srv, &caps, cas.ra, cas.ra_len,
+        rc = wolfcert_scep_get_cert(&srv, WOLFCERT_ENCODING_PEM,
+                                    &caps, cas.ra, cas.ra_len,
                                     cas.bundle, cas.bundle_len,
                                     signer_der->buffer, signer_der->length,
                                     signer_key, serial, serial_len, &result);
@@ -2052,8 +2061,8 @@ static int cmd_getcert(int argc, char** argv)
         ret = 2;
     }
 
-    if (ret == 0 && write_file(opts.out_cert, result.cert_pem.data,
-                               result.cert_pem.len, 0) != 0) {
+    if (ret == 0 && write_file(opts.out_cert, result.cert.data,
+                               result.cert.len, 0) != 0) {
         fprintf(stderr, "getcert: cannot write %s\n",
                 opts.out_cert ? opts.out_cert : "<stdout>");
         ret = 2;

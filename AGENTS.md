@@ -152,10 +152,10 @@ WolfCertKeyCfg   kcfg = { .type = WOLFCERT_KEY_ECC, .param = 256,
                           .dev_id = INVALID_DEVID };
 WolfCertCertMeta meta = { .subject_dn = "CN=device-0001" };
 WolfCertKey*     key  = NULL;
-WolfCertEstResult res = { 0 };          /* res.cert_pem: issued cert first */
+WolfCertEstResult res = { 0 };          /* res.cert: issued cert first */
 
-int rc = wolfcert_client_enroll(client, &srv, &kcfg, &meta, &key, &res,
-                                NULL);
+int rc = wolfcert_client_enroll(client, &srv, WOLFCERT_ENCODING_PEM,
+                                &kcfg, &meta, &key, &res, NULL);
 if (rc != WOLFCERT_OK)
     printf("%s: %s\n", wolfcert_strerror(rc), wolfcert_last_error_message());
 

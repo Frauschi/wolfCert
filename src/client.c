@@ -132,6 +132,11 @@ static int client_proto_check(const WolfCertServerCfg* srv)
                         (int)srv->protocol);
 }
 
+static int enc_ok(WolfCertEncoding enc)
+{
+    return enc == WOLFCERT_ENCODING_PEM || enc == WOLFCERT_ENCODING_DER;
+}
+
 /* On failure, a key with a key_id still goes to the caller to delete. A
  * pending request hands out its key and CSR when out_csr is set. */
 static int hand_back(WolfCertKey* key, WolfCertBuffer* csr, int rc,
@@ -159,7 +164,7 @@ static int hand_back(WolfCertKey* key, WolfCertBuffer* csr, int rc,
 }
 
 int wolfcert_client_enroll(WolfCertClient* client, const WolfCertServerCfg* srv,
-                           const WolfCertKeyCfg* key_cfg,
+                           WolfCertEncoding enc, const WolfCertKeyCfg* key_cfg,
                            const WolfCertCertMeta* meta,
                            WolfCertKey** out_key, WolfCertEstResult* out,
                            WolfCertBuffer* out_csr)
@@ -170,7 +175,7 @@ int wolfcert_client_enroll(WolfCertClient* client, const WolfCertServerCfg* srv,
     if (out_csr != NULL)
         memset(out_csr, 0, sizeof(*out_csr));
     if (srv == NULL || key_cfg == NULL || meta == NULL ||
-            out_key == NULL || out == NULL)
+            out_key == NULL || out == NULL || !enc_ok(enc))
         return WOLFCERT_ERR_BAD_ARG;
     *out_key = NULL;
 
@@ -194,12 +199,13 @@ int wolfcert_client_enroll(WolfCertClient* client, const WolfCertServerCfg* srv,
     if (rc == WOLFCERT_OK)
         rc = wolfcert_csr_build(key, &eff_meta, &csr);
     if (rc == WOLFCERT_OK)
-        rc = wolfcert_est_simple_enroll(srv, csr.data, csr.len, out);
+        rc = wolfcert_est_simple_enroll(srv, enc, csr.data, csr.len, out);
 
     return hand_back(key, &csr, rc, out, out_key, out_csr);
 }
 
 int wolfcert_client_reenroll(WolfCertClient* client, const WolfCertServerCfg* srv,
+                             WolfCertEncoding enc,
                              const uint8_t* current_cert, size_t current_cert_len,
                              const WolfCertKey* current_key,
                              const WolfCertKeyCfg* new_key_cfg,
@@ -213,7 +219,7 @@ int wolfcert_client_reenroll(WolfCertClient* client, const WolfCertServerCfg* sr
     if (out_csr != NULL)
         memset(out_csr, 0, sizeof(*out_csr));
     if (srv == NULL || current_cert == NULL || current_key == NULL ||
-        meta == NULL || out_key == NULL || out == NULL)
+        meta == NULL || out_key == NULL || out == NULL || !enc_ok(enc))
         return WOLFCERT_ERR_BAD_ARG;
     *out_key = NULL;
     if (wolfcert_csr_meta_sets_identity(meta))
@@ -234,7 +240,8 @@ int wolfcert_client_reenroll(WolfCertClient* client, const WolfCertServerCfg* sr
         rc = wolfcert_csr_build_ex(signing_key, meta, current_cert,
                                    current_cert_len, &csr);
     if (rc == WOLFCERT_OK)
-        rc = wolfcert_est_simple_reenroll(srv, current_cert, current_cert_len,
+        rc = wolfcert_est_simple_reenroll(srv, enc, current_cert,
+                                          current_cert_len,
                                           current_key, csr.data, csr.len, out);
 
     return hand_back(nk, &csr, rc, out, out_key, out_csr);

@@ -280,13 +280,14 @@ static int cmd_enroll(Tpm* t, const WolfCertServerCfg* srv, char** argv)
 
     int rc = wolfcert_client_new(&client);
     if (rc == WOLFCERT_OK)
-        rc = wolfcert_client_enroll(client, srv, &kcfg, &meta, &key, &res,
+        rc = wolfcert_client_enroll(client, srv, WOLFCERT_ENCODING_PEM,
+                                    &kcfg, &meta, &key, &res,
                                     NULL);
     int issued = (rc == WOLFCERT_OK);
     if (rc != WOLFCERT_OK) {
         report("enroll", rc);
     }
-    else if (write_whole(argv[5], &res.cert_pem) != 0) {
+    else if (write_whole(argv[5], &res.cert) != 0) {
         fprintf(stderr, "cannot write %s\n", argv[5]);
         rc = WOLFCERT_ERR_IO;
     }
@@ -297,7 +298,7 @@ static int cmd_enroll(Tpm* t, const WolfCertServerCfg* srv, char** argv)
     /* A key under a key_id comes back on failure too. */
     if (rc != WOLFCERT_OK && key_handle(key) != 0 &&
             evict(t, key_handle(key)) == 0 && issued)
-        show_cert("revoke this certificate, its key is evicted", &res.cert_pem);
+        show_cert("revoke this certificate, its key is evicted", &res.cert);
 
     wolfcert_est_result_free(&res);
     wolfcert_key_free(key);
@@ -352,17 +353,18 @@ static int cmd_reenroll(Tpm* t, const WolfCertServerCfg* srv, int argc,
     if (rc == WOLFCERT_OK)
         rc = wolfcert_client_new(&client);
     if (rc == WOLFCERT_OK)
-        rc = wolfcert_client_reenroll(client, srv, cert, cert_len, cur_key,
+        rc = wolfcert_client_reenroll(client, srv, WOLFCERT_ENCODING_PEM,
+                                      cert, cert_len, cur_key,
                                       rekey ? &new_cfg : NULL, &meta,
                                       &new_key, &renewed, NULL);
     int issued = (rc == WOLFCERT_OK);
     if (rc != WOLFCERT_OK) {
         report("reenroll", rc);
     }
-    else if (write_whole(argv[5], &renewed.cert_pem) != 0) {
+    else if (write_whole(argv[5], &renewed.cert) != 0) {
         fprintf(stderr, "cannot write %s\n", argv[5]);
         if (!rekey)
-            show_cert("the renewed certificate", &renewed.cert_pem);
+            show_cert("the renewed certificate", &renewed.cert);
         rc = WOLFCERT_ERR_IO;
     }
     else if (rekey) {
@@ -378,7 +380,7 @@ static int cmd_reenroll(Tpm* t, const WolfCertServerCfg* srv, int argc,
     if (rc != WOLFCERT_OK && key_handle(new_key) != 0 &&
             evict(t, key_handle(new_key)) == 0 && issued)
         show_cert("revoke this certificate, its key is evicted",
-                  &renewed.cert_pem);
+                  &renewed.cert);
 
     wolfcert_est_result_free(&renewed);
     wolfcert_key_free(new_key);

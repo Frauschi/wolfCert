@@ -453,14 +453,16 @@ WOLFCERT_TEST_VIS int wolfcert_pkcs7_certs_to_der(const uint8_t* p7_der,
     return pkcs7_certs_extract(p7_der, p7_der_len, NULL, out_der, heap, 0);
 }
 
-WOLFCERT_TEST_VIS int wolfcert_pkcs7_issued_to_pem(const uint8_t* p7_der,
-    size_t p7_der_len, const WolfCertIssuedMatch* match,
-    WolfCertBuffer* out_pem, void* heap)
+WOLFCERT_TEST_VIS int wolfcert_pkcs7_issued_certs(const uint8_t* p7_der,
+    size_t p7_der_len, const WolfCertIssuedMatch* match, WolfCertEncoding enc,
+    WolfCertBuffer* out, void* heap)
 {
-    if (match == NULL)
+    if (match == NULL ||
+            (enc != WOLFCERT_ENCODING_PEM && enc != WOLFCERT_ENCODING_DER))
         return WOLFCERT_ERR_BAD_ARG;
 
-    return pkcs7_certs_extract(p7_der, p7_der_len, match, out_pem, heap, 1);
+    return pkcs7_certs_extract(p7_der, p7_der_len, match, out, heap,
+                               enc == WOLFCERT_ENCODING_PEM);
 }
 
 static int validate_certs(const uint8_t* const* certs, const size_t* lens, size_t count)

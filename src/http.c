@@ -1073,9 +1073,16 @@ static int setup_tls_ex(WolfCertConn* c, const TlsDials* dials,
     if (dials->client_cert != NULL &&
             (dials->client_key != NULL || dials->client_key_obj != NULL)) {
         /* Load the identity on the CTX so a PHA request can still use it. */
-        int rc = wolfSSL_CTX_use_certificate_buffer(ctx, dials->client_cert,
-                (long)dials->client_cert_len,
-                buf_filetype(dials->client_cert, dials->client_cert_len));
+        int ft = buf_filetype(dials->client_cert, dials->client_cert_len);
+        size_t len = ft == WOLFSSL_FILETYPE_ASN1 ?
+            wolfcert_der_first_len(dials->client_cert, dials->client_cert_len) :
+            0;
+        int rc;
+
+        if (len == 0)
+            len = dials->client_cert_len;
+        rc = wolfSSL_CTX_use_certificate_buffer(ctx, dials->client_cert,
+                                                (long)len, ft);
         if (rc != WOLFSSL_SUCCESS) {
             wolfSSL_CTX_free(ctx);
             return WOLFCERT_ERR_TLS;

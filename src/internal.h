@@ -446,11 +446,12 @@ WOLFCERT_TEST_VIS int wolfcert_issued_match_init(WolfCertIssuedMatch* m,
     const uint8_t* csr, size_t csr_len, const uint8_t* old_hash,
     int allow_old, void* heap);
 
-/* As _to_pem, with the cert matching m first; WOLFCERT_ERR_PROTOCOL when
- * none does. */
-WOLFCERT_TEST_VIS int wolfcert_pkcs7_issued_to_pem(const uint8_t* p7_der, size_t p7_der_len,
+/* As _to_pem or _to_der per enc, with the cert matching m first;
+ * WOLFCERT_ERR_PROTOCOL when none does. */
+WOLFCERT_TEST_VIS int wolfcert_pkcs7_issued_certs(const uint8_t* p7_der, size_t p7_der_len,
                                                    const WolfCertIssuedMatch* match,
-                                                   WolfCertBuffer* out_pem, void* heap);
+                                                   WolfCertEncoding enc,
+                                                   WolfCertBuffer* out, void* heap);
 
 WOLFCERT_TEST_VIS int wolfcert_pkcs7_build_certs_only(const uint8_t* const* certs_der,
                                                       const size_t* certs_len, size_t count,
@@ -517,6 +518,12 @@ WOLFCERT_TEST_VIS int wolfcert_scep_pem_has_cert(const uint8_t* pem, size_t pem_
                                      const uint8_t* issuer, size_t issuer_len,
                                      const uint8_t* serial, size_t serial_len,
                                      void* heap);
+
+/* As _pem_has_cert, over PEM or concatenated DER per enc. */
+WOLFCERT_TEST_VIS int wolfcert_scep_certs_have_cert(const uint8_t* certs,
+    size_t certs_len, WolfCertEncoding enc,
+    const uint8_t* issuer, size_t issuer_len,
+    const uint8_t* serial, size_t serial_len, void* heap);
 
 /* 1 if `name` is the Name the CA in `cert_der` issues under, 0 if not, or
  * WOLFCERT_ERR_MEMORY. */

@@ -339,6 +339,49 @@ static inline int test_pem_cert_is(const WolfCertBuffer* pem, int n,
     return same;
 }
 
+/* Offset and length of certificate n (from 0) of concatenated DER. */
+static inline int test_der_cert_at(const WolfCertBuffer* buf, int n,
+                                   size_t* out_off, size_t* out_len)
+{
+    size_t off = 0;
+
+    while (off + 2 <= buf->len && buf->data[off] == 0x30) {
+        size_t hdr = 2;
+        size_t len = buf->data[off + 1];
+
+        if (len & 0x80) {
+            size_t nb = len & 0x7f;
+
+            if (nb == 0 || nb > 4 || off + 2 + nb > buf->len)
+                return 0;
+            len = 0;
+            for (size_t i = 0; i < nb; i++)
+                len = (len << 8) | buf->data[off + 2 + i];
+            hdr += nb;
+        }
+        if (off + hdr + len > buf->len)
+            return 0;
+        if (n-- == 0) {
+            *out_off = off;
+            *out_len = hdr + len;
+            return 1;
+        }
+        off += hdr + len;
+    }
+    return 0;
+}
+
+/* 1 when certificate n (from 0) of concatenated DER is der. */
+static inline int test_der_cert_is(const WolfCertBuffer* buf, int n,
+                                   const uint8_t* der, size_t der_len)
+{
+    size_t off = 0;
+    size_t len = 0;
+
+    return test_der_cert_at(buf, n, &off, &len) && len == der_len &&
+           memcmp(buf->data + off, der, der_len) == 0;
+}
+
 /* Raw TLS client; each test_tls_write() is one TLS record, so one
  * wolfSSL_read() on the server, which the split-request tests need. */
 typedef struct {
